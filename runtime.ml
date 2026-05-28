@@ -1,85 +1,79 @@
 (* ============================================================
    Runtime.ml — конфигурация и запуск pipeline
 
-   Каждый mode выбирает конкретные реализации:
-   - Noop    : всё в заглушках, для тестов
-   - Log     : метрики в stderr + graceful shutdown
-   - Parallel: параллельный, noop метрики
-   - Prod    : всё включено, параллельный
-
-   DLQ встроен в safe_decode — невалидные payload не роняют pipeline.
-   Shutdown встроен в source guard — SIGTERM дочитывает буфер.
+   mode:
+   Noop    — всё в заглушках
+   Log     — метрики stderr + shutdown + DLQ log
+   Parallel— параллельный + noop метрики
+   Prod    — всё включено + Prometheus HTTP :9090
    ============================================================ *)
 
 type mode = Noop | Log | Parallel | Prod
 
 type config = {
-  mode        : mode;
-  parallelism : int;
-  capacity    : int;
+  mode         : mode;
+  parallelism  : int;
+  capacity     : int;
+  metrics_port : int;   (* порт Prometheus endpoint, 0 = выключено *)
 }
 
-let noop     = { mode = Noop;     parallelism = 1; capacity = 1024 }
-let log_cfg  = { mode = Log;      parallelism = 1; capacity = 1024 }
-let parallel = { mode = Parallel; parallelism = 4; capacity = 4096 }
-let prod     = { mode = Prod;     parallelism = 4; capacity = 8192 }
+let noop     = { mode=Noop;     parallelism=1; capacity=1024; metrics_port=0 }
+let log_cfg  = { mode=Log;      parallelism=1; capacity=1024; metrics_port=0 }
+let parallel = { mode=Parallel; parallelism=4; capacity=4096; metrics_port=0 }
+let prod     = { mode=Prod;     parallelism=4; capacity=8192; metrics_port=9090 }
 
-(* ── DLQ helpers ─────────────────────────────────────────── *)
+(* ── DLQ ─────────────────────────────────────────────────── *)
 
-(* Создать DLQ нужного типа *)
 let make_dlq mode =
   match mode with
   | Log | Prod ->
     let dlq = Dlq_log.create () in
-    (fun entry -> Dlq_log.send dlq entry),
-    (fun ()    -> Dlq_log.flush dlq),
-    (fun ()    -> Dlq_log.count dlq)
+    (fun e -> Dlq_log.send dlq e),
+    (fun () -> Dlq_log.flush dlq),
+    (fun () -> Dlq_log.count dlq)
   | _ ->
     let dlq = Dlq_noop.create () in
-    (fun entry -> Dlq_noop.send dlq entry),
-    (fun ()    -> Dlq_noop.flush dlq),
-    (fun ()    -> Dlq_noop.count dlq)
+    (fun e -> Dlq_noop.send dlq e),
+    (fun () -> Dlq_noop.flush dlq),
+    (fun () -> Dlq_noop.count dlq)
 
-(* safe_decode: ошибки декодирования → DLQ, не падение *)
 let safe_decode ~send_dlq ~topic ~codec ~attempt raw =
   match codec raw with
   | Ok v    -> Some v
   | Error e ->
-    send_dlq {
-      Dlq_noop.topic;
-      payload = raw;
-      error   = e;
-      ts      = int_of_float (Unix.gettimeofday () *. 1000.0);
-      attempt;
-    };
+    send_dlq { Dlq_noop.topic; payload=raw; error=e;
+               ts=int_of_float (Unix.gettimeofday () *. 1000.); attempt };
     None
 
-(* ── Metrics helpers ─────────────────────────────────────── *)
+(* ── Metrics ─────────────────────────────────────────────── *)
 
-let make_metrics mode name =
-  match mode with
-  | Log | Prod ->
-    let label = match mode with Prod -> "prod" | _ -> "log" in
-    let c_in  = Metrics_log.counter ~name:(name ^ "_in")
-                  ~labels:[("mode", label)] in
-    let c_out = Metrics_log.counter ~name:(name ^ "_out")
-                  ~labels:[("mode", label)] in
-    let c_dlq = Metrics_log.counter ~name:(name ^ "_dlq")
-                  ~labels:[("mode", label)] in
-    let g_lag = Metrics_log.gauge ~name:(name ^ "_lag")
-                  ~labels:[("mode", label)] in
-    (fun () -> Metrics_log.incr c_in),
-    (fun () -> Metrics_log.incr c_out),
-    (fun () -> Metrics_log.incr c_dlq),
-    (fun n  -> Metrics_log.set_gauge g_lag (float_of_int n)),
-    (fun () -> Metrics_log.start_reporter ~interval_s:30)
-  | _ ->
-    (fun () -> ()), (fun () -> ()), (fun () -> ()),
-    (fun _  -> ()), (fun () -> ())
+type metrics = {
+  events_in     : Metrics_log.counter;
+  events_out    : Metrics_log.counter;
+  events_dlq    : Metrics_log.counter;
+  pipeline_lag  : Metrics_log.gauge;
+  window_us     : Metrics_log.histogram;
+}
 
-(* ── Shutdown helpers ────────────────────────────────────── *)
+let make_metrics mode label =
+  let mk_c n = Metrics_log.counter
+    ~name:("miniflink_" ^ n) ~labels:[("pipeline", label)] in
+  let mk_g n = Metrics_log.gauge
+    ~name:("miniflink_" ^ n) ~labels:[("pipeline", label)] in
+  let mk_h n = Metrics_log.histogram
+    ~name:("miniflink_" ^ n) ~labels:[("pipeline", label)] in
+  { events_in    = mk_c "events_in";
+    events_out   = mk_c "events_out";
+    events_dlq   = mk_c "events_dlq";
+    pipeline_lag = mk_g "pipeline_lag";
+    window_us    = mk_h "window_close_us" }
 
-(* Возвращает (running_ref, register_fn, is_requested_fn) *)
+(* noop метрики — не регистрируются в реестре *)
+type noop_metrics = unit
+let noop_metrics _ = ()
+
+(* ── Shutdown ────────────────────────────────────────────── *)
+
 let make_shutdown mode =
   let running = ref true in
   (match mode with
@@ -95,18 +89,16 @@ let make_shutdown mode =
 
 (* ── Source guard ────────────────────────────────────────── *)
 
-(* Оборачивает source: останавливается при shutdown *)
-let guarded_source ~running ~is_requested ~incr_in source =
+let guarded_source ~running ~is_requested ~on_event source =
   fun () ->
     if not !running || is_requested () then None
-    else
-      match source () with
-      | Some (Mf_event.Data _ as ev) -> incr_in (); Some ev
-      | other -> other
+    else match source () with
+    | Some (Mf_event.Data _ as ev) -> on_event (); Some ev
+    | other -> other
 
 (* ── Run ─────────────────────────────────────────────────── *)
 
-let run cfg
+let run ?(label="default") cfg
     ~(key_of   : 'a -> string)
     ~(source   : 'a Mf_event.t Stream.t)
     ~(pipeline : 'a Mf_event.t Stream.t -> 'b Mf_event.t Stream.t)
@@ -114,45 +106,44 @@ let run cfg
     () =
 
   let (send_dlq, flush_dlq, count_dlq) = make_dlq cfg.mode in
-  ignore (send_dlq, flush_dlq, count_dlq);  (* используются в safe_decode *)
 
-  let (incr_in, incr_out, _incr_dlq, _set_lag, start_rep) =
-    make_metrics cfg.mode "miniflink" in
+  (* Метрики *)
+  let (incr_in, incr_out, start_rep, start_srv) =
+    match cfg.mode with
+    | Log | Prod ->
+      let m = make_metrics cfg.mode label in
+      (fun () -> Metrics_log.incr m.events_in),
+      (fun () -> Metrics_log.incr m.events_out),
+      (fun () -> Metrics_log.start_reporter ~interval_s:30),
+      (fun () ->
+        if cfg.metrics_port > 0 then
+          Metrics_log.start_server ~port:cfg.metrics_port ())
+    | _ ->
+      noop_metrics, noop_metrics,
+      (fun () -> ()), (fun () -> ())
+  in
   start_rep ();
+  start_srv ();
 
   let (running, is_requested) = make_shutdown cfg.mode in
+  let src = guarded_source ~running ~is_requested ~on_event:incr_in source in
 
-  let src = guarded_source ~running ~is_requested ~incr_in source in
-
-  let wrapped_sink v =
-    incr_out ();
-    sink v
-  in
+  let wrapped_sink v = incr_out (); sink v in
 
   if cfg.parallelism <= 1 then
-    pipeline src
-    |> Pipe.sink wrapped_sink
+    pipeline src |> Pipe.sink wrapped_sink
   else
     Parallel.run_parallel_simple
-      ~workers:cfg.parallelism
-      ~capacity:cfg.capacity
-      ~key_of
-      ~pipeline
-      ~source:src
-      ~sink:wrapped_sink
-      ();
+      ~workers:cfg.parallelism ~capacity:cfg.capacity
+      ~key_of ~pipeline ~source:src ~sink:wrapped_sink ();
 
-  (* Финальная статистика *)
-  (match cfg.mode with
-   | Log | Prod ->
-     let n = count_dlq () in
-     if n > 0 then
-       Printf.eprintf "[runtime] done. DLQ: %d messages\n%!" n
-   | _ -> ())
+  flush_dlq ();
+  let n = count_dlq () in
+  if n > 0 then
+    Printf.eprintf "[runtime:%s] done. DLQ: %d messages\n%!" label n
 
-(* ── Codec-aware source wrap ─────────────────────────────── *)
+(* ── Codec-aware source with DLQ ────────────────────────── *)
 
-(** Обернуть raw bytes source в типизированный stream с DLQ *)
 let make_stream_with_dlq cfg ~topic ~codec ~ts_of raw_source =
   let (send_dlq, _, _) = make_dlq cfg.mode in
   fun () ->

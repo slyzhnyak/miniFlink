@@ -152,3 +152,57 @@ let collect stream =
 (* ── Shorthand: seconds / minutes в операторах ───────────── *)
 let tumbling size = Tumbling size
 let sliding  size step = Sliding (size, step)
+
+(* ── Instrumented operators ──────────────────────────────── *)
+(* Версии операторов с метриками — используются в runtime *)
+
+(** Обернуть stream: вызывать f() на каждом Data событии *)
+let with_counter f upstream =
+  fun () ->
+    match upstream () with
+    | Some (Mf_event.Data _ as ev) -> f (); Some ev
+    | other -> other
+
+(** window с histogram для latency закрытия окна *)
+let window_instrumented
+    (type a)
+    (module K : Keyed.S with type t = a)
+    ?(latency = 0)
+    ~observe_window_ms
+    (spec : win_spec)
+    (upstream : a Mf_event.t Stream.t)
+    : (string * a list) Mf_event.t Stream.t =
+  let tbl : a list WMap.t ref = ref WMap.empty in
+  let out : (string * a list) Mf_event.t Queue.t = Queue.create () in
+  let close k stop vs =
+    if vs <> [] then begin
+      let t0 = int_of_float (Unix.gettimeofday () *. 1_000_000.) in
+      Queue.push (Mf_event.data (k, List.rev vs) stop) out;
+      let t1 = int_of_float (Unix.gettimeofday () *. 1_000_000.) in
+      observe_window_ms (float_of_int (t1 - t0))
+    end
+  in
+  fun () ->
+    let rec pull () =
+      if not (Queue.is_empty out) then Some (Queue.pop out) else
+      match upstream () with
+      | None ->
+        WMap.iter (fun (k,_,stop) vs -> close k stop vs) !tbl;
+        tbl := WMap.empty;
+        if Queue.is_empty out then None else Some (Queue.pop out)
+      | Some (Mf_event.Watermark wm) ->
+        let closed, open_ =
+          WMap.partition (fun (_,_,stop) _ -> stop + latency <= wm) !tbl in
+        tbl := open_;
+        WMap.iter (fun (k,_,stop) vs -> close k stop vs) closed;
+        Queue.push (Mf_event.wm wm) out;
+        pull ()
+      | Some (Mf_event.Retract _) -> pull ()
+      | Some (Mf_event.Data (v,t)) ->
+        List.iter (fun (s, stop) ->
+          let mk = (K.key v, s, stop) in
+          let existing = Option.value ~default:[] (WMap.find_opt mk !tbl) in
+          tbl := WMap.add mk (v :: existing) !tbl
+        ) (assign spec t);
+        pull ()
+    in pull ()
