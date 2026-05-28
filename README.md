@@ -144,6 +144,6 @@ Channel overhead: ~106 нс/msg (Mutex+Condition).
 
 ## Связанные материалы
 
-- [Техническая статья (PDF)](outputs/miniflink_article.pdf)
-- [Популярная статья (PDF)](outputs/miniflink_popular.pdf)
-- [Сравнение OCaml vs Go vs TypeScript (PDF)](outputs/ocaml_vs_go_ts.pdf)
+- [Техническая статья (PDF)](docs/miniflink_article.pdf)
+- [Популярная статья (PDF)](docs/miniflink_popular.pdf)
+- [Сравнение OCaml vs Go vs TypeScript (PDF)](docs/ocaml_vs_go_ts.pdf)
