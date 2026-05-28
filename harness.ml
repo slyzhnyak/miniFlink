@@ -1,57 +1,69 @@
 (* ============================================================
-   Harness.ml — тестовый фреймворк
+   Harness.ml — рабочий тестовый фреймворк
 
-   Пример использования:
-     let ctx = Harness.create pipeline in
-     Harness.push_event ctx telemetry ~ts:1000;
-     Harness.push_wm    ctx ~ts:35000;
-     let alerts = Harness.collect ctx in
-     Harness.assert_count ctx 2;
-     assert (List.for_all (fun a -> a.rule = "speed") alerts)
+   Архитектура:
+   - in_buf: Queue куда мы пишем тестовые события
+   - pipeline применяется лениво при вызове run
+   - run вычитывает всё из pipeline до None
+
+   Никакого Obj.magic — честная типизация через
+   ('a, 'b) t где 'a = тип входа, 'b = тип выхода.
    ============================================================ *)
 
-type 'a ctx = {
-  in_ch  : 'a Mf_event.t Channel.t;
-  out    : 'a list ref;   (* полиморфный: 'a на самом деле 'b *)
-  mutable closed : bool;
+type ('a, 'b) t = {
+  in_buf   : 'a Mf_event.t Queue.t;
+  pipeline : 'a Mf_event.t Stream.t -> 'b Mf_event.t Stream.t;
 }
 
-let create pipeline =
-  let in_ch = Channel.make_unbounded () in
-  let out   = ref [] in
-  let src   = Channel.to_stream in_ch in
-  (* Запускаем pipeline лениво — collect вычитает *)
-  let stream = pipeline src in
-  let ctx = { in_ch; out = Obj.magic out; closed = false } in
-  (* pipeline stream доступен через closure *)
-  ignore stream;
-  ctx
+let create pipeline = {
+  in_buf   = Queue.create ();
+  pipeline;
+}
 
-let push_event ctx v ~ts =
-  Channel.push ctx.in_ch (Mf_event.data v ts)
+let push ctx v ~ts =
+  Queue.push (Mf_event.data v ts) ctx.in_buf
 
 let push_wm ctx ~ts =
-  Channel.push ctx.in_ch (Mf_event.wm ts)
+  Queue.push (Mf_event.wm ts) ctx.in_buf
 
-let close ctx =
-  if not ctx.closed then begin
-    Channel.close ctx.in_ch;
-    ctx.closed <- true
-  end
+let push_all ctx pairs =
+  List.iter (fun (v, ts) -> push ctx v ~ts) pairs
 
-let collect ctx =
-  close ctx;
-  List.rev !(Obj.magic ctx.out)
+let run_all ctx =
+  let src () =
+    if Queue.is_empty ctx.in_buf then None
+    else Some (Queue.pop ctx.in_buf)
+  in
+  Stream.to_list (ctx.pipeline src)
 
-let assert_count ctx expected =
-  let got = List.length (collect ctx) in
-  if got <> expected then
-    failwith (Printf.sprintf "Harness.assert_count: expected %d, got %d"
-                expected got)
+let run_data ctx =
+  run_all ctx |> List.filter_map (function
+    | Mf_event.Data (v,_) -> Some v
+    | _ -> None)
 
-let assert_all ctx pred msg =
-  let results = collect ctx in
-  if not (List.for_all pred results) then
-    failwith (Printf.sprintf "Harness.assert_all failed: %s" msg)
+let run ctx = run_data ctx
 
-let run = collect
+(* ── Assertions ─────────────────────────────────────────── *)
+
+let expect_count ctx n =
+  let got = List.length (run_data ctx) in
+  if got <> n then
+    failwith (Printf.sprintf "expect_count: expected %d, got %d" n got)
+
+let expect ctx pred msg =
+  if not (List.for_all pred (run_data ctx)) then
+    failwith (Printf.sprintf "expect failed: %s" msg)
+
+let expect_none ctx =
+  let results = run_data ctx in
+  if results <> [] then
+    failwith (Printf.sprintf "expect_none: got %d events" (List.length results))
+
+(* ── Утилиты ─────────────────────────────────────────────── *)
+
+let ev device_id t_s speed fuel : Domain.telemetry =
+  { Domain.device_id; speed_kmh = speed; fuel_pct = fuel;
+    position = { Domain.lat = 55.75; lon = 37.61 };
+    ts = t_s * 1000; device = None }
+
+let evs lst = List.map (fun (id, t, s, f) -> ev id t s f) lst

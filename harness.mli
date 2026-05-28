@@ -1,36 +1,41 @@
 (* ============================================================
    Harness.mli — тестовый фреймворк для pipeline
 
-   Позволяет:
-   - подавать события вручную с контролем watermark
-   - проверять выходные события без реального брокера
-   - тестировать late data и retraction сценарии
-   - измерять покрытие правил
+   Детерминированное тестирование без реального брокера.
+   Полный контроль над событиями и watermark-ами.
    ============================================================ *)
 
-(** Контекст теста *)
-type 'a ctx
+(** Контекст теста: входная очередь + pipeline + выходной буфер *)
+type ('a, 'b) t
 
-(** Создать контекст с заданным pipeline *)
-val create : ('a Mf_event.t Stream.t -> 'b Mf_event.t Stream.t) -> 'a ctx
+(** Создать контекст теста *)
+val create :
+  ('a Mf_event.t Stream.t -> 'b Mf_event.t Stream.t) ->
+  ('a, 'b) t
 
-(** Подать событие *)
-val push_event : 'a ctx -> 'a -> ts:int -> unit
+(** Подать одно событие *)
+val push  : ('a, 'b) t -> 'a -> ts:int -> unit
 
 (** Подать watermark *)
-val push_wm : 'a ctx -> ts:int -> unit
+val push_wm : ('a, 'b) t -> ts:int -> unit
 
-(** Закрыть входной поток *)
-val close : 'a ctx -> unit
+(** Подать список событий *)
+val push_all : ('a, 'b) t -> ('a * int) list -> unit
 
-(** Собрать все выходные Data события *)
-val collect : 'a ctx -> 'b list
+(** Закрыть входной поток и вычитать все выходные события *)
+val run : ('a, 'b) t -> 'b list
 
-(** Assert: ожидаемое число выходных событий *)
-val assert_count : 'a ctx -> int -> unit
+(** Запустить и вернуть только Data значения *)
+val run_data : ('a, 'b) t -> 'b list
 
-(** Assert: предикат для каждого выходного события *)
-val assert_all : 'a ctx -> ('b -> bool) -> string -> unit
+(** Запустить и вернуть все события включая Watermark/Retract *)
+val run_all : ('a, 'b) t -> 'b Mf_event.t list
 
-(** Запустить и вернуть результат *)
-val run : 'a ctx -> 'b list
+(** Assertion helpers — бросают Failure с сообщением *)
+val expect_count  : ('a, 'b) t -> int -> unit
+val expect        : ('a, 'b) t -> ('b -> bool) -> string -> unit
+val expect_none   : ('a, 'b) t -> unit
+
+(** Утилиты для построения тестовых событий *)
+val ev  : string -> int -> float -> float -> Domain.telemetry
+val evs : (string * int * float * float) list -> Domain.telemetry list
