@@ -1,62 +1,15 @@
 # miniFlink
 
-Функциональная семантика потоковой обработки данных на OCaml.
+Декларативная потоковая обработка данных на OCaml.
 
-Учебная реализация ключевых концепций Apache Flink: event time, watermarks, windowing, stateful operators, exactly-once checkpointing, table/join, retractions — в ~600 строк без внешних зависимостей.
+Реализация ключевых концепций Apache Flink: event time, watermarks, windowing,
+stateful operators, exactly-once, table/join, retractions — плюс production слои
+(DLQ, graceful shutdown, Prometheus metrics). ~1200 строк, 42 файла.
 
-## Структура
-
-```
-src/
-  core/          — ядро (не меняется никогда)
-    stream.ml      pull-based поток: unit -> 'a option
-    event.ml       Data | Watermark | Retract
-    pipe.ml        операторы: enrich, window, aggregate, dedup
-    keyed.ml       type class KEYED — убирает ~key: из операторов
-    table.ml       Static | Snapshot таблицы
-    time.ml        единицы времени: seconds, minutes
-    codec.ml       абстракция над форматом (JSON / Protobuf)
-    domain.ml      доменные типы с [@@deriving yojson, show]
-    rules.ml       чистая бизнес-логика
-
-  parallel/      — параллелизм (опционально)
-    channel.mli    интерфейс канала
-    channel_v4.ml  Mutex + Condition (OCaml 4)
-    channel_v5.ml  Atomic lock-free SPSC (OCaml 5)
-    parallel.mli   интерфейс parallel runner
-    parallel_v4.ml Thread.create / Thread.join
-    parallel_v5.ml Domain.spawn / Domain.join
-
-  layers/        — production слои (все опциональны)
-    barrier.*      exactly-once parallel (Chandy-Lamport)
-    state_backend.* персистентный стейт (Memory | RocksDB)
-    metrics.*      observability (noop | log | OTel)
-    dlq.*          dead letter queue (noop | log | Kafka)
-    shutdown.*     graceful shutdown (noop | default)
-    schema.*       schema evolution (noop | versioned)
-    harness.*      тестовый фреймворк
-    runtime.ml     сборка всех слоёв
-
-  adapters/      — источники и стоки
-    mqtt_stubs.c   C FFI для libmosquitto
-    mqtt.ml        MQTT source / sink
-    kafka_stubs.c  C FFI для librdkafka
-    kafka.ml       Kafka source / sink
-
-  app/           — приложение
-    main.ml        декларативный pipeline (10 строк)
-    fixtures.ml    тестовые данные
-
-bench/           — бенчмарки
-  bench.ml           single-thread throughput
-  bench_parallel.ml  parallel vs sequential
-```
-
-## Ключевые концепции
-
-### Декларативный pipeline
+## Почему декларативно
 
 ```ocaml
+(* Весь pipeline — 10 строк, нет аннотаций типов, нет key_by *)
 let pipeline source =
   source
   |> Event.with_watermarks   ~latency:(seconds 3)
@@ -71,89 +24,126 @@ let pipeline source =
        ~cooldown:(minutes 5)
 ```
 
-Нет `key_by` — он спрятан в `window` через type class `KEYED`.
-Нет аннотаций типов внутри `|>` цепочки.
+`key_by` спрятан в `window` через type class `KEYED` — ключ описывается один раз в типе.
+Смена формата (JSON → Protobuf) — одна строка в codec. Pipeline не меняется.
 
-### Смена формата — одна строка
+## Структура
 
-```ocaml
-(* JSON *)
-let telemetry_codec = Codec.json
-  ~encode:Domain.telemetry_to_yojson
-  ~decode:Domain.telemetry_of_yojson
+```
+Ядро (не меняется):
+  stream.ml          pull-based поток: unit -> 'a option
+  mf_event.ml        Data | Watermark | Retract
+  pipe.ml            enrich, window, aggregate, dedup, flat_map
+  keyed.ml           type class KEYED — убирает ~key: из операторов
+  table.ml           Static | Snapshot таблицы
+  time.ml            seconds, minutes, hours
+  codec.ml           JSON / Protobuf абстракция
+  domain.ml          типы с [@@deriving yojson, show]
+  rules.ml           чистая бизнес-логика
 
-(* Protobuf — pipeline не меняется *)
-let telemetry_codec = Codec.protobuf
-  ~encode:Domain_pb.encode_telemetry
-  ~decode:Domain_pb.decode_telemetry
+Параллелизм (OCaml 4 / 5):
+  channel.mli        интерфейс канала
+  channel_v4.ml      Mutex + Condition (OCaml 4 Thread)
+  channel_v5.ml      Atomic lock-free SPSC (OCaml 5 Domain)
+  parallel.mli       интерфейс parallel runner
+  parallel_v4.ml     Thread.create / Thread.join
+  parallel_v5.ml     Domain.spawn / Domain.join
+
+Production слои (все опциональны, noop по умолчанию):
+  dlq.mli            dead letter queue
+  dlq_noop.ml        молча считает
+  dlq_log.ml         пишет в stderr с контекстом
+  shutdown.mli       graceful shutdown
+  shutdown_noop.ml   игнорирует SIGTERM
+  shutdown_default.ml SIGTERM → drain → checkpoint → exit
+  metrics.mli        Prometheus-совместимые метрики
+  metrics_noop.ml    нулевой overhead
+  metrics_log.ml     counter/gauge/histogram + HTTP /metrics endpoint
+  barrier.mli        exactly-once parallel (Chandy-Lamport)
+  state_backend.mli  персистентный стейт
+  schema.mli         schema evolution + migration
+  harness.mli        тестовый фреймворк
+  runtime.ml         сборка всех слоёв
+
+Makefile:
+  make check_version  OCaml 4/5 → выбирает channel/parallel реализацию
+  make all            собрать всё
+  make bench          single-thread throughput
+  make bench_parallel parallel vs sequential
 ```
 
-### Opтогональные слои
-
-```ocaml
-(* Разработка *)
-Runtime.run Runtime.noop ~key_of ~source ~pipeline ~sink
-
-(* Production: метрики + shutdown + DLQ + persistent state *)
-Runtime.run Runtime.prod ~key_of ~source ~pipeline ~sink
-```
-
-Каждый слой: `.mli` (контракт) + `_noop.ml` (заглушка) + `_default.ml` (реализация).
-
-## Сборка
+## Запуск
 
 ```bash
-# Зависимости
-apt install libmosquitto-dev librdkafka-dev
-opam install ppx_deriving_yojson yojson ppx_deriving
+# Зависимости (Ubuntu/Debian)
+apt install libmosquitto-dev librdkafka-dev ocaml-findlib
+apt install libppx-deriving-yojson-ocaml-dev libyojson-ocaml-dev libqcheck-ocaml-dev
 
-# OCaml 4 или 5 — Makefile определяет автоматически
-make check_version   # показать выбранные реализации
-make all             # собрать всё
-make bench           # single-thread benchmark
-make bench_parallel  # parallel benchmark
+# Сборка
+make check_version   # → OCaml 4: Thread+Mutex | OCaml 5: Domain+Atomic
+make all
 
 # Запуск
-./miniflink          # тестовые данные
-./miniflink kafka    # реальный Kafka broker
+./miniflink          # тестовые данные (noop режим)
+./miniflink log      # log режим: метрики в stderr
+
+# Тесты
+./test_core_bin      # 22 unit теста
+./test_props_bin     # 7 QCheck property тестов (1400 случаев)
+./test_reliability_bin  # DLQ + Shutdown тесты
+./test_metrics_bin   # Prometheus metrics тесты
 ```
+
+## Выбор режима
+
+```ocaml
+Runtime.run Runtime.noop     (* тесты: нулевой overhead            *)
+Runtime.run Runtime.log_cfg  (* разработка: метрики в stderr       *)
+Runtime.run Runtime.parallel (* многопоточный, 4 workers           *)
+Runtime.run Runtime.prod     (* всё: метрики HTTP :9090 + shutdown *)
+```
+
+Одна строка. Pipeline не меняется.
 
 ## Производительность
 
-OCaml 4.14, 1 CPU, Xeon 2.80GHz:
+OCaml 4.14, 1 CPU, Xeon 2.80GHz, 1M events, 1000 devices, tumbling 30s:
 
-| режим | ev/s | speedup |
-|---|---|---|
-| sequential (full pipeline) | 210K | 1.0x |
-| 2 workers | 406K | 1.94x |
-| 4 workers | 519K | 2.48x |
-| 8 workers | 600K | 2.87x |
+| режим          | ev/s  | speedup |
+|----------------|-------|---------|
+| sequential     | 210K  | 1.0x    |
+| 1 worker       | 152K  | 0.72x (channel overhead) |
+| 2 workers      | 406K  | 1.94x   |
+| 4 workers      | 519K  | 2.48x   |
+| 8 workers      | 600K  | 2.87x   |
 
-На OCaml 5 с Domain ожидается ~3.5-3.8x на 4 ядрах.
+Channel overhead: ~106 нс/msg (Mutex+Condition).
+На OCaml 5 с Domain: ожидается ~3.5x на 4 ядрах (без GIL).
 
 ## Production-readiness
 
-| Компонент | Статус |
-|---|---|
-| Event time + watermarks | ✓ |
-| Windowing (tumbling/sliding) | ✓ |
-| Stateful operators + key_by | ✓ |
-| Exactly-once (single-thread) | ✓ |
-| Table + Join (lookup/interval/union) | ✓ |
-| Retractions (invertible + recompute) | ✓ |
-| MQTT / Kafka adapters | ✓ |
-| Параллелизм (OCaml 4 + 5) | ✓ |
-| Persistent state backend | stub (файловый) |
-| Exactly-once parallel | stub (barrier интерфейс) |
-| Мониторинг / метрики | stub → metrics_log |
-| Graceful shutdown | ✓ |
-| Dead letter queue | ✓ |
-| Schema evolution | stub |
-| Тесты | harness готов |
+| Компонент                   | Статус                        |
+|-----------------------------|-------------------------------|
+| Event time + watermarks     | ✓ реализовано                 |
+| Windowing tumbling/sliding  | ✓ реализовано                 |
+| KEYED type class            | ✓ реализовано                 |
+| Stateful operators          | ✓ реализовано                 |
+| Exactly-once (single)       | ✓ реализовано                 |
+| Table + Join                | ✓ реализовано                 |
+| Retractions                 | ✓ реализовано                 |
+| Параллелизм OCaml 4/5       | ✓ реализовано                 |
+| Dead Letter Queue           | ✓ реализовано (noop + log)    |
+| Graceful Shutdown           | ✓ реализовано (SIGTERM/INT)   |
+| Prometheus Metrics          | ✓ реализовано (HTTP :9090)    |
+| Unit + Property тесты       | ✓ 29 тестов, 1400 QCheck      |
+| Schema evolution            | stub → schema_default.ml      |
+| Exactly-once parallel       | stub → barrier_default.ml     |
+| Persistent state (RocksDB)  | stub → файловый backend        |
+| MQTT adapter                | ✓ в miniflink/ (C FFI)        |
+| Kafka adapter               | ✓ в miniflink/ (C FFI)        |
 
-## Требования
+## Связанные материалы
 
-- OCaml 4.14+ или OCaml 5.x
-- `ppx_deriving_yojson`, `yojson` для доменных типов
-- `libmosquitto-dev` для MQTT (опционально)
-- `librdkafka-dev` для Kafka (опционально)
+- [Техническая статья (PDF)](outputs/miniflink_article.pdf)
+- [Популярная статья (PDF)](outputs/miniflink_popular.pdf)
+- [Сравнение OCaml vs Go vs TypeScript (PDF)](outputs/ocaml_vs_go_ts.pdf)
