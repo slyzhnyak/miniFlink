@@ -1,5 +1,8 @@
 (* dlq_log: пишет в stderr с контекстом *)
-type entry = { topic: string; payload: bytes; error: string; ts: int; attempt: int }
+(* entry type comes from Dlq_noop *)
+type entry = Dlq_noop.entry = {
+  topic: string; payload: bytes; error: string; ts: int; attempt: int
+}
 type t     = { mutable n : int; mu : Mutex.t }
 
 let create () = { n = 0; mu = Mutex.create () }

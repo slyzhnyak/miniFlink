@@ -1,10 +1,9 @@
 (* ============================================================
-   Main.ml
+   Main.ml — декларативный pipeline
 
-   Весь pipeline — 10 строк.
-   Нет аннотаций типов внутри |> цепочки.
-   Нет повторения ключа.
-   Нет низкоуровневого кодирования.
+   Демонстрирует runtime с DLQ и Shutdown:
+   - run_test   : noop режим, тестовые данные
+   - run_log    : log режим, метрики в stderr + shutdown handler
    ============================================================ *)
 
 open Time
@@ -33,7 +32,7 @@ let pipeline source =
        ~rule:(fun a -> a.rule)
        ~cooldown:(minutes 5)
 
-(* ── Sink: напечатать алерт ───────────────────────────────── *)
+(* ── Sink ─────────────────────────────────────────────────── *)
 
 let print_alert a =
   let sev = match a.severity with
@@ -41,12 +40,34 @@ let print_alert a =
   in
   Printf.printf "[%s] %s (%s): %s\n%!" sev a.device_id a.rule a.message
 
-(* ── Run ──────────────────────────────────────────────────── *)
+(* ── Run: noop (тесты) ────────────────────────────────────── *)
 
 let run_test () =
-  Fixtures.scenario_alerts
-  |> Stream.of_list
-  |> pipeline
-  |> Pipe.sink print_alert
+  Printf.printf "=== Noop mode (no DLQ, no shutdown handler) ===\n%!";
+  let source = Stream.of_list Fixtures.scenario_alerts in
+  Runtime.run Runtime.noop
+    ~key_of:(fun (t:telemetry) -> t.device_id)
+    ~source
+    ~pipeline
+    ~sink:print_alert
+    ()
 
-let () = run_test ()
+(* ── Run: log (метрики + shutdown) ───────────────────────── *)
+
+let run_log () =
+  Printf.printf "=== Log mode (metrics to stderr + shutdown handler) ===\n%!";
+  Printf.printf "(Send SIGTERM or SIGINT to test graceful shutdown)\n%!";
+  let source = Stream.of_list Fixtures.scenario_alerts in
+  Runtime.run Runtime.log_cfg
+    ~key_of:(fun (t:telemetry) -> t.device_id)
+    ~source
+    ~pipeline
+    ~sink:print_alert
+    ()
+
+(* ── Entry point ──────────────────────────────────────────── *)
+
+let () =
+  match Sys.argv with
+  | [| _; "log" |] -> run_log ()
+  | _              -> run_test ()
