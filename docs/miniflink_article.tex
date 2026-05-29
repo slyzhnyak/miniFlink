@@ -46,13 +46,16 @@ accidental complexity. The key insight is the \texttt{KEYED} type class:
 by encoding the grouping key once in the type, operators \texttt{window},
 \texttt{enrich}, and \texttt{dedup} require no explicit \texttt{\textasciitilde{}key:}
 parameter, making the pipeline read as a specification rather than
-an implementation. We implement event time, watermarks, tumbling/sliding
-windows, stateful operators, exactly-once checkpointing, table and join
-semantics, retractions for late data, and production layers
-(dead letter queue, graceful shutdown, Prometheus metrics) in
-approximately 1200 lines across 42 files. A parallel backend supports
-both OCaml~4 (Thread + Mutex) and OCaml~5 (Domain + Atomic)
-with measured speedup of $2.48\times$ on 4 workers (1 CPU).
+an implementation. We implement event time, watermarks (with periodic
+emission and end-of-stream flush), tumbling/sliding windows, stateful
+operators, exactly-once checkpointing (single-thread and parallel via
+Chandy-Lamport barrier snapshots), table and join semantics with TTL
+eviction, retractions for late data, and production layers (dead letter
+queue, graceful shutdown, Prometheus metrics, RocksDB-backed persistent
+state via C FFI) in approximately 1500 lines, validated by 13 test
+suites including replay-determinism, fuzzing, and soak tests. A parallel
+backend supports both OCaml~4 (Thread + Mutex) and OCaml~5 (Domain +
+Atomic) with measured speedup of $2.48\times$ on 4 workers (1 CPU).
 \end{abstract}
 
 \begin{document}
@@ -212,8 +215,8 @@ their accumulated events downstream.
 \section{Event Time and Watermarks}
 
 Each event carries its origin timestamp independently of processing
-time. \texttt{with\_watermarks} inserts \texttt{Watermark(max\_seen - latency)}
-after each new maximum timestamp. The invariant:
+time. \texttt{with\_watermarks\_ext \textasciitilde{}latency ?interval}
+inserts \texttt{Watermark(max\_seen - latency)}. The invariant:
 
 \[
   \forall t < \mathtt{wm}:\ \text{no future } \mathtt{Data}(\_,\, t)
@@ -224,24 +227,45 @@ This allows deterministic window closure without wall-clock polling.
 Watermarks are monotone by construction — \texttt{max\_seen} is a
 \texttt{ref} that only grows.
 
+Two refinements over naive per-event emission. \textbf{Periodic
+emission:} the optional \texttt{\textasciitilde{}interval} parameter
+emits a watermark only once it has advanced by at least
+\texttt{interval} in event-time, collapsing the one-watermark-per-event
+flood that a monotone stream would otherwise produce. \textbf{Final
+flush:} on stream end the operator emits a terminal watermark equal to
+\texttt{max\_seen} (without subtracting latency), guaranteeing every
+trailing window closes rather than lingering open. A subtle integer
+overflow — \texttt{wm - last\_wm} with \texttt{last\_wm = min\_int} —
+is special-cased so the first watermark is never suppressed.
+
 %%% ── 4. Exactly-Once ─────────────────────────────────────────────────────
 \section{Exactly-Once Checkpointing}
 
-A checkpoint is a triple $(epoch, offset, state)$ stored in
-\texttt{Checkpoint.Store}. The runner:
+\textbf{Single-thread.} A checkpoint is a triple $(epoch, offset, state)$.
+The runner reads $N$ events, and on failure restores state from the
+latest checkpoint, seeks the source to \texttt{offset}, and resumes.
+The key invariant is \emph{ordered commit}: flush sink before writing
+the checkpoint; write the checkpoint before committing the source
+offset. Violated ordering creates either duplicates (checkpoint before
+flush) or gaps (offset before checkpoint).
 
-\begin{enumerate}
-\item Reads $N$ events from source.
-\item On failure: restores state from latest checkpoint,
-  calls \texttt{source.seek(offset)}, resumes.
-\item On success every $K$ events: atomically saves
-  $(epoch{+}1,\ \mathtt{get\_offset}(),\ \mathtt{get\_state}())$.
-\end{enumerate}
+\textbf{Parallel (Chandy-Lamport).} For data-parallel execution,
+\texttt{Checkpoint\_parallel} integrates barriers into the worker
+channels. Channel messages are wrapped as
+\texttt{Event of \_ | Barrier of epoch}. The dispatcher injects a
+\texttt{Barrier(epoch)} into every worker channel every
+\texttt{checkpoint\_every} events. On receiving a barrier each worker
+snapshots its own \texttt{state\_backend} and submits
+$(worker, epoch, bytes)$ to the coordinator. The coordinator commits
+$\mathtt{checkpoint}(epoch)$ — the array of per-worker snapshots —
+atomically once {\it all} workers have reported (barrier alignment;
+trivial here since each worker has a single input channel). Because
+key-sharding routes each key to exactly one worker, a committed
+checkpoint is a consistent cut with no cross-worker double-counting.
 
-The key invariant is \emph{ordered commit}: flush sink before
-writing checkpoint; write checkpoint before committing source offset.
-Violated ordering creates either duplicates (checkpoint before flush)
-or gaps (offset before checkpoint).
+This covers operator-state exactly-once within the engine. End-to-end
+exactly-once across an external source/sink (source-offset coordination
+plus transactional sink commit) is a deliberate non-goal.
 
 %%% ── 5. Table and Join ───────────────────────────────────────────────────
 \section{Table and Join}
@@ -265,6 +289,15 @@ let lookup_join (module K) ~from ~merge upstream =
 \texttt{interval\_join} buffers both streams; events match when
 keys are equal and $|t_A - t_B| \leq \mathtt{window\_ms}$. The
 combined watermark is $\min(\mathtt{wm}_A,\, \mathtt{wm}_B)$.
+
+\texttt{of\_stream} is bounded by the number of {\it distinct} keys
+(it uses \texttt{replace}, not \texttt{add}), but an unbounded key
+space would still grow it without limit. For that case
+\texttt{of\_stream\_ttl \textasciitilde{}key \textasciitilde{}ttl}
+stores $(value, last\_ts)$ per key, tracks the maximum event-time
+seen, and evicts any key whose $last\_ts < \mathtt{max\_ts} - ttl$ on
+each pump — the same watermark-driven eviction used by \texttt{dedup},
+bounding table size under a growing key space.
 
 %%% ── 6. Retractions ──────────────────────────────────────────────────────
 \section{Retractions for Late Data}
@@ -324,7 +357,23 @@ that serves the exposition text format on \texttt{GET /metrics}.
 Data parallelism via key sharding: \texttt{hash(key) mod N} routes
 each event to a dedicated worker. Workers share no state — window
 correctness follows from the invariant that all events for a given
-key go to the same shard.
+key go to the same shard. The hash uses \texttt{land max\_int} (not
+\texttt{abs}, which returns \texttt{min\_int} for \texttt{min\_int})
+to guarantee a non-negative shard index.
+
+\textbf{Crash resilience.} A worker body is wrapped in
+\texttt{try/with}; on an exception it marks itself failed and closes
+its input channel. The dispatcher uses \texttt{try\_push} (returning
+\texttt{false} on a closed channel) and skips failed shards, so a
+single worker crash can no longer deadlock the whole pipeline by
+blocking the dispatcher on a full channel that nobody drains.
+
+\textbf{Per-worker sinks.} \texttt{run\_parallel\_simple} takes an
+optional \texttt{\textasciitilde{}sink\_factory : int -> 'b -> unit}.
+When supplied, each worker writes to its own sink (e.g. its own Kafka
+partition) with zero lock contention; otherwise a single shared sink is
+guarded by a mutex. This removes the global-mutex bottleneck that
+flattened throughput at high worker counts.
 
 \begin{table}[h]
 \centering
@@ -348,19 +397,52 @@ On OCaml~5 with \texttt{Domain}, channel overhead drops from
 $\sim$106\,ns (Mutex) to $\sim$30\,ns (Atomic), and real
 4-core parallelism is expected to yield $3.5$--$3.8\times$.
 
-%%% ── 9. Testing ──────────────────────────────────────────────────────────
+%%% ── 9. Persistent State ────────────────────────────────────────────────
+\section{Persistent State}
+
+The \texttt{state\_backend} contract (\texttt{get}/\texttt{set}/%
+\texttt{delete}/\texttt{snapshot}/\texttt{restore}) has three
+implementations: \texttt{\_noop}, \texttt{\_memory} (Hashtbl), and
+\texttt{\_rocksdb} backed by RocksDB through a C FFI. The FFI binds
+\texttt{rocksdb\_open/put/get/delete} from the RocksDB C API. GC
+safety is maintained by copying all bytes across the OCaml$\leftrightarrow$C
+boundary immediately — the \texttt{get} stub \texttt{memcpy}s the
+returned buffer into a fresh OCaml string and frees the C buffer before
+returning, so no OCaml pointer is ever retained on the C side. The
+\texttt{rocksdb\_t} handle lives in a custom block whose finalizer
+closes the database. State persists across process restarts, verified
+by a test that writes, closes, reopens the same path, and reads the
+values back.
+
+%%% ── 10. Testing ─────────────────────────────────────────────────────────
 \section{Testing}
 
 \textbf{Harness.} A deterministic test context \texttt{('a,'b) t}
 feeds events via \texttt{push}/\texttt{push\_wm} and collects
 output via \texttt{run}. No broker, no threads, no wall clock.
 
-\textbf{Unit tests} (22): stream laws (map identity, filter
-composition, flat\_map count), watermark monotonicity, window
-correctness, dedup cooldown, enrich left-join semantics, rule
-thresholds, full pipeline integration.
+Thirteen test suites run under \texttt{dune test}. Beyond the
+operator-correctness unit tests and QCheck property tests, the suite
+targets the failure modes specific to stream engines:
 
-\textbf{Property tests} (7 × 100--500 cases via QCheck):
+\begin{description}
+\item[Determinism] replay determinism (same input twice yields
+  byte-identical output); parallel result equals sequential as a
+  {\it multiset} (order between keys is nondeterministic by design, so
+  multisets are compared — this proves key-sharding neither drops nor
+  duplicates); watermark fuzzing on randomly time-shuffled streams;
+  permutation invariance of order-independent aggregates.
+\item[Exactly-once parallel] a checkpoint commits one snapshot per
+  worker; state is restored after a simulated restart; exactly $n$
+  outputs for $n$ inputs.
+\item[Crash resilience] a watchdog-timed test crashes one worker and
+  asserts the others still finish — without the fix it hangs.
+\item[Soak] a separate slow target runs millions of events and asserts
+  live heap growth $\leq 3\times$ (a leak would be $\sim 10\times$),
+  validating dedup and window eviction.
+\end{description}
+
+\textbf{Property tests} (QCheck, 100--500 cases each):
 
 \begin{enumerate}
 \item $\sum_w \mathtt{count}(w) = |\mathtt{input}|$
@@ -379,10 +461,12 @@ thresholds, full pipeline integration.
 \section{Conclusion}
 
 miniFlink demonstrates that the core semantics of Apache Flink —
-event time, watermarks, windowing, stateful operators, exactly-once,
-table/join, retractions, and production reliability layers — fit
-in $\sim$1200 lines of OCaml. Two design decisions proved most
-consequential:
+event time, watermarks, windowing, stateful operators, exactly-once
+(single-thread and parallel via barrier snapshots), table/join with
+TTL eviction, retractions, and production layers (DLQ, graceful
+shutdown, Prometheus metrics, RocksDB-backed state) — fit in
+$\sim$1500 lines of OCaml across 13 test suites. Two design decisions
+proved most consequential:
 
 \begin{enumerate}
 \item The \texttt{KEYED} type class eliminates repeated key
@@ -395,5 +479,11 @@ consequential:
 The OCaml module system's ability to accept modules as runtime values
 (first-class modules) is what makes both design decisions expressible
 without metaprogramming or code generation.
+
+Deliberate non-goals keep the ``mini'' honest: distributed execution,
+remote shuffle, end-to-end exactly-once across an external source/sink,
+and incremental checkpointing are out of scope. The project targets the
+{\it semantics} of stream processing on a single node, not the
+distributed infrastructure of a production cluster.
 
 \end{document}

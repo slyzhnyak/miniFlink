@@ -185,5 +185,5 @@ API-документация генерируется через odoc:
 ## Связанные материалы
 
 - [Техническая статья (PDF)](docs/miniflink_article.pdf)
-- [Популярная статья (PDF)](docs/miniflink_popular.pdf)
-- [Сравнение OCaml vs Go vs TypeScript (PDF)](docs/ocaml_vs_go_ts.pdf)
+- [Популярная статья (Markdown)](docs/miniflink_popular.md)
+- [Сравнение OCaml vs Go vs TypeScript (PDF)](docs/ocaml_vs_go_ts.pdf) / [Markdown](docs/ocaml_vs_go_ts.md)
