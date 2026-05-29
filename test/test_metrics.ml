@@ -80,30 +80,41 @@ let test_runtime_metrics () =
   Printf.printf "\n-- Runtime metrics accumulation\n";
   let devices = Table.of_list [
     "A", { owner="O"; max_speed=90.; zone="z" } ] in
+  (* Pipeline без внутреннего with_watermarks — watermark подаём в source,
+     чтобы runtime's on_wm их увидел и посчитал lag *)
   let pipeline src =
     src
-    |> Mf_event.with_watermarks ~latency:(seconds 3)
     |> Pipe.enrich (module Telemetry) ~from:devices
          ~merge:(fun t d -> { t with device=d })
     |> Pipe.window (module Telemetry) (Pipe.tumbling (seconds 30))
     |> Pipe.aggregate Rules.compute
     |> Pipe.flat_map (Rules.check Rules.fleet)
   in
-  let events = Fixtures.scenario_alerts in
+  (* Источник с явными watermark-ами *)
+  let mk t = { device_id="A"; speed_kmh=120.; fuel_pct=80.;
+    position={lat=55.;lon=37.}; ts=t; device=None } in
+  let events = [
+    Mf_event.data (mk 5000) 5000;
+    Mf_event.data (mk 20000) 20000;
+    Mf_event.wm 17000;          (* lag = 20000 - 17000 = 3000 *)
+    Mf_event.data (mk 35000) 35000;
+    Mf_event.wm 65000;
+  ] in
   let sink_count = ref 0 in
-  Runtime.run ~label:"test" Runtime.log_cfg
+  Runtime.run ~label:"wmtest" Runtime.log_cfg
     ~key_of:(fun (t:telemetry) -> t.device_id)
     ~source:(Stream.of_list events)
     ~pipeline
     ~sink:(fun _ -> incr sink_count)
     ();
-  check "pipeline produced some output" (!sink_count >= 0);
-  (* Проверяем что метрики in/out накопились *)
   let d = Metrics_log.dump () in
-  check "events_in counter in dump" (
-    try ignore (Str.search_forward
-      (Str.regexp "miniflink_events_in") d 0); true
-    with Not_found -> false)
+  let has re = try ignore (Str.search_forward (Str.regexp re) d 0); true
+               with Not_found -> false in
+  check "events_in counter in dump"     (has "miniflink_events_in");
+  check "watermarks_total in dump"       (has "miniflink_watermarks_total");
+  check "watermark_lag_ms in dump"       (has "miniflink_watermark_lag_ms");
+  check "watermark_last_ms in dump"      (has "miniflink_watermark_last_ms");
+  check "max_event_ts_ms in dump"        (has "miniflink_max_event_ts_ms")
 
 (* ── Main ────────────────────────────────────────────────── *)
 let () =

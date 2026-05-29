@@ -51,22 +51,24 @@ type metrics = {
   events_in     : Metrics_log.counter;
   events_out    : Metrics_log.counter;
   events_dlq    : Metrics_log.counter;
-  pipeline_lag  : Metrics_log.gauge;
-  window_us     : Metrics_log.histogram;
+  watermarks    : Metrics_log.counter;   (* сколько watermark прошло *)
+  wm_lag_ms     : Metrics_log.gauge;      (* max_event_ts - last_watermark *)
+  last_wm       : Metrics_log.gauge;      (* последний watermark (event-time) *)
+  max_event_ts  : Metrics_log.gauge;      (* максимальный виденный event-time *)
 }
 
-let make_metrics mode label =
+let make_metrics _mode label =
   let mk_c n = Metrics_log.counter
     ~name:("miniflink_" ^ n) ~labels:[("pipeline", label)] in
   let mk_g n = Metrics_log.gauge
     ~name:("miniflink_" ^ n) ~labels:[("pipeline", label)] in
-  let mk_h n = Metrics_log.histogram
-    ~name:("miniflink_" ^ n) ~labels:[("pipeline", label)] in
   { events_in    = mk_c "events_in";
     events_out   = mk_c "events_out";
     events_dlq   = mk_c "events_dlq";
-    pipeline_lag = mk_g "pipeline_lag";
-    window_us    = mk_h "window_close_us" }
+    watermarks   = mk_c "watermarks_total";
+    wm_lag_ms    = mk_g "watermark_lag_ms";
+    last_wm      = mk_g "watermark_last_ms";
+    max_event_ts = mk_g "max_event_ts_ms" }
 
 (* noop метрики — не регистрируются в реестре *)
 type noop_metrics = unit
@@ -89,11 +91,13 @@ let make_shutdown mode =
 
 (* ── Source guard ────────────────────────────────────────── *)
 
-let guarded_source ~running ~is_requested ~on_event source =
+(* on_data: вызывается на Data; on_wm: на Watermark (для метрик lag) *)
+let guarded_source ~running ~is_requested ~on_data ~on_wm source =
   fun () ->
     if not !running || is_requested () then None
     else match source () with
-    | Some (Mf_event.Data _ as ev) -> on_event (); Some ev
+    | Some (Mf_event.Data (_, t) as ev) -> on_data t; Some ev
+    | Some (Mf_event.Watermark t as ev) -> on_wm t; Some ev
     | other -> other
 
 (* ── Run ─────────────────────────────────────────────────── *)
@@ -108,25 +112,40 @@ let run ?(label="default") cfg
   let (send_dlq, flush_dlq, count_dlq) = make_dlq cfg.mode in
 
   (* Метрики *)
-  let (incr_in, incr_out, start_rep, start_srv) =
+  let (incr_in, incr_out, on_data, on_wm, start_rep, start_srv) =
     match cfg.mode with
     | Log | Prod ->
       let m = make_metrics cfg.mode label in
+      let max_ts = ref min_int in
       (fun () -> Metrics_log.incr m.events_in),
       (fun () -> Metrics_log.incr m.events_out),
+      (fun t ->   (* on_data: обновляем max_event_ts *)
+        if t > !max_ts then begin
+          max_ts := t;
+          Metrics_log.set_gauge m.max_event_ts (float_of_int t)
+        end),
+      (fun t ->   (* on_wm: считаем watermark, обновляем lag *)
+        Metrics_log.incr m.watermarks;
+        Metrics_log.set_gauge m.last_wm (float_of_int t);
+        let lag = !max_ts - t in
+        if !max_ts > min_int then
+          Metrics_log.set_gauge m.wm_lag_ms (float_of_int (max 0 lag))),
       (fun () -> Metrics_log.start_reporter ~interval_s:30),
       (fun () ->
         if cfg.metrics_port > 0 then
           Metrics_log.start_server ~port:cfg.metrics_port ())
     | _ ->
       noop_metrics, noop_metrics,
+      (fun _ -> ()), (fun _ -> ()),
       (fun () -> ()), (fun () -> ())
   in
   start_rep ();
   start_srv ();
 
   let (running, is_requested) = make_shutdown cfg.mode in
-  let src = guarded_source ~running ~is_requested ~on_event:incr_in source in
+  let src = guarded_source ~running ~is_requested
+              ~on_data:(fun t -> incr_in (); on_data t)
+              ~on_wm source in
 
   let wrapped_sink v = incr_out (); sink v in
 
