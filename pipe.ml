@@ -53,41 +53,77 @@ let assign spec ts =
     in go last []
 
 (* window groups by KEYED.key, fires when watermark closes the window.
-   Output: (key * value list) per window. *)
+   Output: (key * value list) per window.
+
+   Late data handling (retractions):
+   - Окно после закрытия по watermark переходит в Fired, но данные
+     сохраняются ещё на `allowed_lateness` времени.
+   - Late Data попадающее в Fired окно: переоткрывает его, эмитит
+     Retract(старый результат) затем Data(новый результат).
+   - Окно окончательно удаляется когда wm > stop + latency + allowed_lateness. *)
+
+type 'a win_state =
+  | Open  of 'a list
+  | Fired of 'a list   (* данные сохранены для late data *)
+
 let window
     (type a)
     (module K : Keyed.S with type t = a)
     ?(latency = 0)
+    ?(allowed_lateness = 0)
     (spec     : win_spec)
     (upstream : a Mf_event.t Stream.t)
     : (string * a list) Mf_event.t Stream.t =
-  let tbl : a list WMap.t ref = ref WMap.empty in
+  let tbl : a win_state WMap.t ref = ref WMap.empty in
   let out : (string * a list) Mf_event.t Queue.t = Queue.create () in
-  let close k stop vs =
-    if vs <> [] then
-      Queue.push (Mf_event.data (k, List.rev vs) stop) out
-  in
+  let emit_data k stop vs =
+    Queue.push (Mf_event.data (k, List.rev vs) stop) out in
+  let emit_retract k stop vs =
+    Queue.push (Mf_event.retract (k, List.rev vs) stop) out in
   fun () ->
     let rec pull () =
       if not (Queue.is_empty out) then Some (Queue.pop out) else
       match upstream () with
       | None ->
-        WMap.iter (fun (k,_,stop) vs -> close k stop vs) !tbl;
+        (* Закрываем все Open окна; Fired уже эмитили *)
+        WMap.iter (fun (k,_,stop) st ->
+          match st with Open vs when vs <> [] -> emit_data k stop vs | _ -> ()
+        ) !tbl;
         tbl := WMap.empty;
         if Queue.is_empty out then None else Some (Queue.pop out)
       | Some (Mf_event.Watermark wm) ->
-        let closed, open_ =
-          WMap.partition (fun (_,_,stop) _ -> stop + latency <= wm) !tbl in
-        tbl := open_;
-        WMap.iter (fun (k,_,stop) vs -> close k stop vs) closed;
+        (* Open окна со stop+latency <= wm → закрываем (Fire) *)
+        WMap.iter (fun (k,s,stop) st ->
+          match st with
+          | Open vs when stop + latency <= wm ->
+            if vs <> [] then emit_data k stop vs;
+            tbl := WMap.add (k,s,stop) (Fired vs) !tbl
+          | _ -> ()
+        ) !tbl;
+        (* Fired окна старше allowed_lateness → удаляем окончательно *)
+        tbl := WMap.filter (fun (_,_,stop) st ->
+          match st with
+          | Fired _ -> stop + latency + allowed_lateness > wm
+          | Open _  -> true
+        ) !tbl;
         Queue.push (Mf_event.wm wm) out;
         pull ()
       | Some (Mf_event.Retract _) -> pull ()
       | Some (Mf_event.Data (v,t)) ->
         List.iter (fun (s, stop) ->
           let mk = (K.key v, s, stop) in
-          let existing = Option.value ~default:[] (WMap.find_opt mk !tbl) in
-          tbl := WMap.add mk (v :: existing) !tbl
+          match WMap.find_opt mk !tbl with
+          | None ->
+            tbl := WMap.add mk (Open [v]) !tbl
+          | Some (Open vs) ->
+            tbl := WMap.add mk (Open (v :: vs)) !tbl
+          | Some (Fired vs) ->
+            (* Late data: переоткрываем окно.
+               Retract старого результата, Data нового. *)
+            emit_retract (K.key v) stop vs;
+            let vs' = v :: vs in
+            emit_data (K.key v) stop vs';
+            tbl := WMap.add mk (Fired vs') !tbl
         ) (assign spec t);
         pull ()
     in pull ()
