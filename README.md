@@ -170,6 +170,18 @@ Channel overhead: ~106 нс/msg (Mutex+Condition).
 максимально прозрачно, а не воспроизводит его распределённую
 инфраструктуру. Для single-node до 1-2 ядер он полнофункционален.
 
+## Документация
+
+API-документация генерируется через odoc:
+
+```bash
+./gen_docs.sh        # → docs/api/index.html
+```
+
+Открыть [docs/api/index.html](docs/api/index.html) — обзор архитектуры,
+ссылки на все модули, и [туториал](docs/api/tutorial.html) с пошаговым
+построением конвейера.
+
 ## Связанные материалы
 
 - [Техническая статья (PDF)](docs/miniflink_article.pdf)

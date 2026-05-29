@@ -24,3 +24,4 @@ docs/*.out
 docs/*.toc
 docs/*.fls
 docs/*.fdb_latexmk
+_doc_build/

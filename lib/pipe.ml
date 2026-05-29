@@ -1,11 +1,11 @@
-(* ============================================================
-   Pipe.ml — операторы pipeline
+(** Операторы конвейера: enrich, window, aggregate, dedup, flat_map.
 
-   Ключевое отличие от предыдущей версии:
-   - window, enrich, dedup получают ключ из модуля KEYED
-   - никаких ~key: параметров в пользовательском коде
-   - window использует locally abstract type — нет рекурсивных типов
-   ============================================================ *)
+    Ключевая особенность: [window], [enrich], [dedup] получают ключ
+    группировки из модуля {!Keyed.S}, переданного первым аргументом —
+    в пользовательском коде нет повторяющихся [~key:] параметров.
+
+    [window] использует locally abstract type [(type a)], что
+    устраняет рекурсивный тип [α = string × α list] без [Obj.magic]. *)
 
 (* ── Lift: применить функцию к значению события ─────────── *)
 
@@ -22,6 +22,10 @@ let eflatmap f = Stream.flat_map (function
 
 (* enrich ~from:table обогащает каждое событие данными из таблицы.
    Тип KEYED говорит как достать ключ. *)
+(** [enrich (module K) ~from ~merge upstream] обогащает каждое событие
+    данными из справочной таблицы [from] по ключу [K.key]. Left join:
+    если ключа нет в таблице, [merge] получает [None] и событие проходит
+    необогащённым — конвейер не падает. *)
 let enrich
     (type a)
     (module K : Keyed.S with type t = a)
@@ -70,6 +74,16 @@ type 'a win_state =
   | Open  of 'a list
   | Fired of 'a list   (* данные сохранены для late data *)
 
+(** [window (module K) ?latency ?allowed_lateness spec upstream]
+    группирует события по ключу [K.key] и временным окнам [spec]
+    ({!tumbling} или {!sliding}). Окно закрывается когда watermark
+    проходит его правую границу (плюс [latency]), выдавая
+    [(ключ, событие list)].
+
+    Поздние данные в пределах [~allowed_lateness] переоткрывают
+    закрытое окно: эмитится [Retract] старого результата, затем
+    [Data] нового. За пределами [allowed_lateness] окно окончательно
+    удаляется (ограничивает рост состояния). *)
 let window
     (type a)
     (module K : Keyed.S with type t = a)
@@ -136,6 +150,8 @@ let window
 
 (* aggregate принимает (key * 'a list) — выход window.
    f : string -> 'a list -> 'b *)
+(** [aggregate f] сворачивает события каждого окна [(key, vs)] в один
+    результат [f key vs] (например max-скорость, min-топливо). *)
 let aggregate f = emap (fun (key, vs) -> f key vs)
 
 (* ── Stateful ─────────────────────────────────────────────── *)
@@ -156,13 +172,12 @@ let stateful ~init ~f upstream =
 
 (* ── Dedup ────────────────────────────────────────────────── *)
 
-(* dedup использует KEYED для ключа.
-   rule : 'a -> string  — тип алерта (второй компонент ключа дедупликации)
+(** [dedup (module K) ~rule ~cooldown upstream] подавляет повторные
+    события с одинаковым [(K.key, rule)] в пределах окна [cooldown].
 
-   Eviction: при каждом Watermark удаляем записи старше cooldown
-   относительно wm — они уже не могут подавить будущие события
-   (t - last <= cooldown невозможно если last < wm - cooldown).
-   Это ограничивает размер таблицы числом активных ключей. *)
+    Состояние ограничено: при каждом watermark записи старше
+    [wm - cooldown] удаляются — они уже не могут подавить будущие
+    события, поэтому удаление безопасно. *)
 let dedup
     (type a)
     (module K : Keyed.S with type t = a)
@@ -202,7 +217,11 @@ let collect stream =
     | Mf_event.Data (v,_) -> v :: acc | _ -> acc) [] stream)
 
 (* ── Shorthand: seconds / minutes в операторах ───────────── *)
+(** Неперекрывающиеся окна фиксированного размера. *)
 let tumbling size = Tumbling size
+
+(** Перекрывающиеся окна: [sliding size step] — окна размера [size]
+    с шагом [step] (при [step < size] окна перекрываются). *)
 let sliding  size step = Sliding (size, step)
 
 (* ── Instrumented operators ──────────────────────────────── *)

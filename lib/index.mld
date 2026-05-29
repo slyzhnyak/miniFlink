@@ -1,0 +1,91 @@
+{0 miniFlink}
+
+{e Декларативная потоковая обработка данных на OCaml — учебная реализация
+ключевых концепций Apache Flink.}
+
+miniFlink выражает семантику потоковой обработки максимально прозрачно:
+весь конвейер мониторинга читается как спецификация, без явного
+[key_by], без аннотаций типов, без ручных проверок на [null].
+
+{[
+let pipeline source =
+  source
+  |> Mf_event.with_watermarks   ~latency:(seconds 3)
+  |> Pipe.enrich (module Telemetry)
+       ~from:devices
+       ~merge:(fun t dev -> { t with device = dev })
+  |> Pipe.window (module Telemetry) (Pipe.tumbling (seconds 30))
+  |> Pipe.aggregate              Rules.compute
+  |> Pipe.flat_map               (Rules.check Rules.fleet)
+  |> Pipe.dedup (module Alert)
+       ~rule:(fun a -> a.rule)
+       ~cooldown:(minutes 5)
+]}
+
+{1 Обзор архитектуры}
+
+Проект разбит на ортогональные слои. Каждый слой зависит только от
+нижележащих; ядро никогда не импортирует слои надёжности или параллелизма.
+
+{2 Ядро}
+
+Никогда не меняется, без внешних зависимостей.
+
+- {!Stream} — pull-based поток [unit -> 'a option]. Стек вызовов = граф операторов.
+- {!Mf_event} — событие [Data | Watermark | Retract]. Watermark-стратегия.
+- {!Time} — единицы времени: [seconds], [minutes], [hours].
+- {!Keyed} — type class [KEYED]: ключ группировки описывается один раз в типе.
+- {!Pipe} — операторы: [enrich], [window], [aggregate], [dedup], [flat_map].
+- {!Table} — таблицы [of_list], [of_stream], [of_stream_ttl] для join.
+- {!Codec} — абстракция сериализации JSON / Protobuf.
+
+{2 Домен}
+
+- {!Domain} — доменные типы с [@@deriving yojson, show].
+- {!Rules} — бизнес-логика как чистые функции.
+
+{2 Параллелизм}
+
+Шардирование по ключу: [hash(key) mod N] направляет событие воркеру.
+
+- {!Channel} — канал между операторами с backpressure (bounded).
+- {!Parallel} — data-parallel выполнение. Thread (OCaml 4) / Domain (OCaml 5).
+- {!Checkpoint_parallel} — exactly-once: barrier-инжекция + per-worker snapshot.
+
+{2 Production-слои}
+
+Каждый: контракт ([.mli]) + [_noop] (нулевой overhead) + [_default] (production).
+
+- {!Dlq} — dead letter queue: ошибки decode не роняют конвейер.
+- {!Shutdown} — graceful shutdown: SIGTERM → drain → exit.
+- {!Metrics} — Prometheus-совместимые метрики + HTTP endpoint.
+- {!Barrier} — координатор Chandy-Lamport для распределённого снапшота.
+- {!State_backend} — хранилище стейта: memory / RocksDB (через C FFI).
+- {!Schema} — эволюция схемы.
+- {!Harness} — детерминированный тестовый фреймворк.
+- {!Runtime} — сборка всех слоёв по режиму ([Noop | Log | Parallel | Prod]).
+
+{1 С чего начать}
+
+Туториал с пошаговым построением конвейера: {!page-tutorial}.
+
+{1 Запуск}
+
+{[
+dune build           # сборка (channel/parallel выбираются по версии OCaml)
+dune exec bin/main.exe   # демо
+dune test            # 13 тест-сюит
+dune exec bench/soak.exe -- 2000000   # soak: проверка отсутствия утечек
+]}
+
+{1 Гарантии и границы}
+
+Реализовано: event time, watermarks (с периодической эмиссией и финальным
+flush), tumbling/sliding окна, stateful-операторы, exactly-once стейта в
+параллельном режиме (barrier + recovery), table/join с TTL-eviction,
+retractions для поздних данных, персистентный RocksDB-стейт.
+
+Сознательно вне области ({e non-goals}): распределённое выполнение,
+remote shuffle, end-to-end exactly-once через внешние source/sink,
+incremental checkpointing. «mini» в названии честное — проект про
+{e семантику}, не про распределённую инфраструктуру.

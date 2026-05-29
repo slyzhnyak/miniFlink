@@ -1,7 +1,14 @@
+(** Событие потока: данные, watermark или отмена.
+
+    Все три конструктора текут по одному потоку и обрабатываются
+    операторами через pattern matching — единообразно и с проверкой
+    полноты компилятором. *)
+
+(** Событие со значением ['a]. *)
 type 'a t =
-  | Data      of 'a * Time.t
-  | Watermark of Time.t
-  | Retract   of 'a * Time.t
+  | Data      of 'a * Time.t  (** значение + его event-time *)
+  | Watermark of Time.t       (** граница: события раньше уже пришли *)
+  | Retract   of 'a * Time.t  (** отмена ранее выданного результата *)
 
 let data    v ts = Data    (v, ts)
 let retract v ts = Retract (v, ts)
@@ -27,6 +34,17 @@ let map_value f = function
    и раньше (interval=0 → watermark на каждый продвинувшийся максимум).
    ──────────────────────────────────────────────────────────── *)
 
+(** [with_watermarks_ext ~latency ?interval src] вставляет watermark-маркеры
+    в поток. Watermark = [max_seen - latency]: все события с меньшим
+    timestamp считаются прибывшими.
+
+    - [~latency] — допуск на опоздание (out-of-orderness).
+    - [~interval] — минимальный сдвиг watermark перед новой эмиссией
+      (по event-time). При [interval=0] watermark эмитится на каждый
+      новый максимум; больший [interval] уменьшает их число.
+
+    На конце потока эмитится финальный watermark [= max_seen], чтобы
+    закрыть все хвостовые окна. *)
 let with_watermarks_ext ~latency ?(interval = 0) (src : 'a t Stream.t)
     : 'a t Stream.t =
   let max_seen   = ref min_int in
@@ -67,6 +85,9 @@ let with_watermarks_ext ~latency ?(interval = 0) (src : 'a t Stream.t)
       Some ev
 
 (* Совместимость: старая сигнатура (watermark на каждый новый максимум) *)
+(** [with_watermarks ~latency src] — то же что
+    {!with_watermarks_ext} с [~interval:0] (watermark на каждый новый
+    максимум). Обратно совместимая форма. *)
 let with_watermarks ~latency src = with_watermarks_ext ~latency ~interval:0 src
 
 let pp_ts t = Printf.sprintf "%d.%03ds" (t/1000) (t mod 1000)

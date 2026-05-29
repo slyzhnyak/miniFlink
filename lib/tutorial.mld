@@ -1,0 +1,148 @@
+{0 Туториал: построение конвейера с нуля}
+
+Этот туториал проводит через построение конвейера потоковой обработки
+шаг за шагом — от простейшего потока до полного pipeline с окнами,
+обогащением и дедупликацией.
+
+{1 Шаг 1. Поток как функция}
+
+В miniFlink поток — это функция [unit -> 'a option]. Вызываешь —
+получаешь следующий элемент; [None] означает конец.
+
+{[
+let numbers = Stream.of_list [1; 2; 3; 4; 5]
+let doubled = Stream.map (fun x -> x * 2) numbers
+(* doubled: 2 4 6 8 10 *)
+]}
+
+Операторы {!Stream.map}, {!Stream.filter}, {!Stream.flat_map}
+композируются без промежуточных буферов — стек вызовов и есть граф.
+
+{1 Шаг 2. События и время}
+
+Реальные данные несут timestamp. {!Mf_event.t} оборачивает значение:
+
+{[
+let events = Stream.of_list [
+  Mf_event.data { device_id = "A"; speed_kmh = 95.; ts = 1000; (* ... *) } 1000;
+  Mf_event.data { device_id = "B"; speed_kmh = 60.; ts = 2000; (* ... *) } 2000;
+]
+]}
+
+Три конструктора: [Data] (значение + event-time), [Watermark]
+(граница: все события раньше уже пришли), [Retract] (отмена прошлого
+результата для поздних данных).
+
+{1 Шаг 3. Watermarks}
+
+{!Mf_event.with_watermarks} вставляет watermark-маркеры. Они позволяют
+детерминированно закрывать окна, не дожидаясь wall-clock.
+
+{[
+let timed = events |> Mf_event.with_watermarks ~latency:(seconds 3)
+]}
+
+[latency] — допуск на опоздание: watermark = [max_seen - latency].
+Для потоков с большим числом событий используйте
+{!Mf_event.with_watermarks_ext} с параметром [~interval], чтобы не
+эмитить watermark на каждое событие.
+
+{1 Шаг 4. Ключ группировки через KEYED}
+
+Чтобы считать статистику отдельно по каждому устройству, нужен ключ.
+В miniFlink он описывается {e один раз} в типе через {!Keyed.S}:
+
+{[
+module Telemetry = Keyed.Make (struct
+  type t = telemetry
+  let key (t : telemetry) = t.device_id
+end)
+]}
+
+После этого операторы [window], [enrich], [dedup] знают ключ
+автоматически — больше не нужно писать [~key:(fun t -> t.device_id)].
+
+{1 Шаг 5. Окна}
+
+{!Pipe.window} группирует события по времени. {!Pipe.tumbling} —
+неперекрывающиеся интервалы, {!Pipe.sliding} — перекрывающиеся.
+
+{[
+timed
+|> Pipe.window (module Telemetry) (Pipe.tumbling (seconds 30))
+(* поток (ключ * событие list) — по одному на закрытое окно *)
+]}
+
+Окно закрывается когда watermark проходит его правую границу.
+Поздние данные (в пределах [~allowed_lateness]) переоткрывают окно
+и эмитят [Retract] старого результата + [Data] нового.
+
+{1 Шаг 6. Агрегация и правила}
+
+{!Pipe.aggregate} сворачивает события окна в результат,
+{!Pipe.flat_map} применяет правила:
+
+{[
+|> Pipe.aggregate Rules.compute           (* max speed, min fuel, ... *)
+|> Pipe.flat_map (Rules.check Rules.fleet) (* -> алерты *)
+]}
+
+{1 Шаг 7. Обогащение из таблицы}
+
+{!Pipe.enrich} добавляет данные из справочной {!Table}:
+
+{[
+let devices = Table.of_list [
+  "A", { owner = "ООО Ромашка"; max_speed = 90.; zone = "north" };
+]
+(* в pipeline: *)
+|> Pipe.enrich (module Telemetry) ~from:devices
+     ~merge:(fun t dev -> { t with device = dev })
+]}
+
+Если ключ не найден — событие проходит без обогащения (left join),
+конвейер не падает.
+
+{1 Шаг 8. Дедупликация}
+
+{!Pipe.dedup} подавляет повторные алерты в окне [~cooldown]:
+
+{[
+|> Pipe.dedup (module Alert)
+     ~rule:(fun a -> a.rule)
+     ~cooldown:(minutes 5)
+]}
+
+Состояние ограничено: старые записи вычищаются по watermark.
+
+{1 Шаг 9. Запуск через Runtime}
+
+{!Runtime.run} собирает всё вместе и выбирает реализации слоёв по режиму:
+
+{[
+Runtime.run Runtime.prod          (* всё включено: метрики :9090, shutdown, DLQ *)
+  ~key_of:(fun (t : telemetry) -> t.device_id)
+  ~source
+  ~pipeline
+  ~sink:print_alert
+  ()
+]}
+
+Режимы: [noop] (тесты, нулевой overhead), [log_cfg] (метрики в stderr),
+[parallel] (многопоточно), [prod] (всё включено).
+
+{1 Шаг 10. Параллелизм и exactly-once}
+
+Для масштабирования {!Parallel.run_parallel_simple} шардирует поток по
+ключу на N воркеров. Для exactly-once с восстановлением стейта —
+{!Checkpoint_parallel.run_exactly_once}: координатор инжектирует
+barrier, каждый воркер снапшотит свой стейт, checkpoint коммитится
+атомарно когда снапшоты собраны со всех воркеров.
+
+{[
+Checkpoint_parallel.run_exactly_once
+  ~workers:4 ~capacity:256 ~checkpoint_every:1000
+  ~key_of ~make_state ~process ~source ~sink ~store ()
+]}
+
+Возврат к {!page-index}.

@@ -33,3 +33,8 @@
 (rule
  (enabled_if (< %{ocaml_version} 5.0.0))
  (action (copy ../variants/parallel_v4.ml parallel.ml)))
+
+; ── odoc документация ─────────────────────────────────────────
+(documentation
+ (package miniflink)
+ (mld_files index tutorial))
