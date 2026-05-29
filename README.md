@@ -64,9 +64,10 @@ variants/            — реализации channel/parallel по версии
 
 bin/    main.ml        демо pipeline
 bench/  bench.ml bench_parallel.ml
-test/   9 тест-сюит (core, props, reliability, metrics,
+test/   12 тест-сюит (core, props, reliability, metrics,
                      retract, sliding, dedup_evict, parallel_crash,
-                     determinism)
+                     determinism, watermark, table_ttl,
+                     checkpoint_parallel)
 ```
 
 Сборка через **dune**. `channel.ml`/`parallel.ml` выбираются автоматически
@@ -142,7 +143,7 @@ Channel overhead: ~106 нс/msg (Mutex+Condition).
 | Prometheus Metrics          | ✓ реализовано (HTTP :9090)    |
 | Unit + Property тесты       | ✓ 29 тестов, 1400 QCheck      |
 | Schema evolution            | stub → schema_default.ml      |
-| Exactly-once parallel       | stub → barrier_default.ml     |
+| Exactly-once parallel       | ✓ реализовано (barrier + snapshot) |
 | Persistent state (RocksDB)  | stub → файловый backend        |
 | MQTT adapter                | ✓ в miniflink/ (C FFI)        |
 | Kafka adapter               | ✓ в miniflink/ (C FFI)        |
