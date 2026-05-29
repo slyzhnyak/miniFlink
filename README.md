@@ -149,6 +149,27 @@ Channel overhead: ~106 нс/msg (Mutex+Condition).
 | MQTT adapter                | ✓ в miniflink/ (C FFI)        |
 | Kafka adapter               | ✓ в miniflink/ (C FFI)        |
 
+## Non-goals (осознанно не делаем)
+
+«mini» в названии честное. Следующее намеренно вне области проекта —
+это распределённая инфраструктура, а не семантика потоковой обработки:
+
+- **Распределённое выполнение.** Один узел. Нет execution graph
+  поверх нескольких машин, нет распределённого планировщика.
+- **Remote shuffle / network transport.** Параллелизм — через
+  shared-memory каналы между потоками/доменами, не по сети.
+- **End-to-end exactly-once через внешние source/sink.** Реализован
+  consistent snapshot операторного стейта в параллельном режиме
+  (barrier + recovery). Координация offset-ов источника и
+  транзакционный commit в sink (полный Kafka EOS) — отдельная
+  большая задача, не сделана.
+- **Incremental checkpointing.** Снапшот целиком, не дельтами.
+
+Это сознательный выбор: проект демонстрирует *семантику* Flink
+(event time, watermarks, windowing, exactly-once стейта, retractions)
+максимально прозрачно, а не воспроизводит его распределённую
+инфраструктуру. Для single-node до 1-2 ядер он полнофункционален.
+
 ## Связанные материалы
 
 - [Техническая статья (PDF)](docs/miniflink_article.pdf)
