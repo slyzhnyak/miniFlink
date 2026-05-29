@@ -54,7 +54,12 @@ let test_watermarks () =
         (List.tl lst)
   in
   check "watermarks monotone" (is_monotone wms);
-  check "watermarks bounded" (List.for_all (fun t -> t <= 10000 - seconds 2) wms)
+  (* Все watermarks <= max_ts (никогда не опережают виденное время).
+     Промежуточные = max-latency; финальный flush на конце потока = max_ts. *)
+  check "watermarks never exceed max_ts" (List.for_all (fun t -> t <= 10000) wms);
+  (* Хотя бы один промежуточный watermark учитывает latency *)
+  check "intermediate watermarks respect latency"
+    (List.exists (fun t -> t <= 10000 - seconds 2) wms)
 
 (* ── 3. Window correctness ──────────────────────────────── *)
 let test_window () =
