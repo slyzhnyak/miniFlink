@@ -27,7 +27,7 @@ let make_stats () = { processed = 0; emitted = 0; wm_seen = 0 }
 let hash_key key n =
   let h = ref 5381 in
   String.iter (fun c -> h := !h * 33 + Char.code c) key;
-  (abs !h) mod n
+  (!h land max_int) mod n
 
 let run_parallel_simple
     ~(workers  : int)

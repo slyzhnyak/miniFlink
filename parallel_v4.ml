@@ -24,7 +24,7 @@
 let hash_key key n_shards =
   let h = ref 5381 in
   String.iter (fun c -> h := !h * 33 + Char.code c) key;
-  (abs !h) mod n_shards
+  (!h land max_int) mod n_shards
 
 (* ── Статистика worker-а ─────────────────────────────────── *)
 

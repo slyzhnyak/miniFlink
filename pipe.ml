@@ -157,7 +157,12 @@ let stateful ~init ~f upstream =
 (* ── Dedup ────────────────────────────────────────────────── *)
 
 (* dedup использует KEYED для ключа.
-   rule : 'a -> string  — тип алерта (второй компонент ключа дедупликации) *)
+   rule : 'a -> string  — тип алерта (второй компонент ключа дедупликации)
+
+   Eviction: при каждом Watermark удаляем записи старше cooldown
+   относительно wm — они уже не могут подавить будущие события
+   (t - last <= cooldown невозможно если last < wm - cooldown).
+   Это ограничивает размер таблицы числом активных ключей. *)
 let dedup
     (type a)
     (module K : Keyed.S with type t = a)
@@ -165,8 +170,15 @@ let dedup
     ~(cooldown : Time.t)
     (upstream  : a Mf_event.t Stream.t) : a Mf_event.t Stream.t =
   let seen = Hashtbl.create 64 in
+  let evict_before wm =
+    (* Собираем устаревшие ключи, затем удаляем (нельзя мутировать во время iter) *)
+    let stale = Hashtbl.fold (fun k last acc ->
+      if last < wm - cooldown then k :: acc else acc) seen [] in
+    List.iter (Hashtbl.remove seen) stale
+  in
   Stream.filter (function
-    | Mf_event.Watermark _ | Mf_event.Retract _ -> true
+    | Mf_event.Watermark wm -> evict_before wm; true
+    | Mf_event.Retract _ -> true
     | Mf_event.Data (v, t) ->
       let k = K.key v ^ ":" ^ rule v in
       match Hashtbl.find_opt seen k with

@@ -13,6 +13,7 @@ type worker_stats = {
 }
 
 val make_stats : unit -> worker_stats
+val hash_key : string -> int -> int
 
 (** Data-parallel pipeline.
     Шардирует source по hash(key_of) на N воркеров.
