@@ -46,9 +46,13 @@ let assign spec ts =
   | Tumbling size ->
     let s = (ts / size) * size in [(s, s + size)]
   | Sliding (size, step) ->
+    (* Событие ts принадлежит окну [s, s+size) когда s <= ts < s+size.
+       Окна начинаются на кратных step. Наибольший подходящий старт —
+       наибольшее кратное step, не превышающее ts. Идём вниз пока
+       окно ещё накрывает ts (s + size > ts) и s >= 0. *)
     let last = (ts / step) * step in
     let rec go s acc =
-      if s + size <= ts || s > ts then acc
+      if s < 0 || s + size <= ts then acc
       else go (s - step) ((s, s + size) :: acc)
     in go last []
 
