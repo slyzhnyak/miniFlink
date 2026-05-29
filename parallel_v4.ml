@@ -64,41 +64,41 @@ let run_parallel
   (* ── Workers ────────────────────────────────────────────── *)
   let worker_threads = Array.init workers (fun i ->
     Thread.create (fun () ->
-      let st   = stats.(i) in
-      let src  = Channel.to_stream in_chans.(i) in
-      let out  = pipeline src in
-      Stream.iter (fun ev ->
-        (match ev with
-         | Mf_event.Data _    -> st.emitted <- st.emitted + 1
-         | Mf_event.Watermark _ -> st.wm_seen <- st.wm_seen + 1
-         | Mf_event.Retract _ -> ());
-        Channel.push out_chans.(i) ev
-      ) out;
+      (try
+         let st   = stats.(i) in
+         let src  = Channel.to_stream in_chans.(i) in
+         let out  = pipeline src in
+         Stream.iter (fun ev ->
+           (match ev with
+            | Mf_event.Data _    -> st.emitted <- st.emitted + 1
+            | Mf_event.Watermark _ -> st.wm_seen <- st.wm_seen + 1
+            | Mf_event.Retract _ -> ());
+           Channel.push out_chans.(i) ev
+         ) out
+       with e ->
+         Printf.eprintf "[parallel] worker %d crashed: %s\n%!"
+           i (Printexc.to_string e));
+      (* Всегда закрываем out — иначе collector зависнет на pop *)
       Channel.close out_chans.(i)
     ) ()
   ) in
 
   (* ── Collector ──────────────────────────────────────────── *)
-  (* Round-robin по output channels, пока хотя бы один открыт *)
-  let collector_thread = Thread.create (fun () ->
-    let active = Array.make workers true in
-    let running = ref true in
-    while !running do
-      let any_active = ref false in
-      Array.iteri (fun i ch ->
-        if active.(i) then
-          match Channel.try_pop ch with
-          | None     -> any_active := true  (* ещё живой но пустой *)
-          | Some (Mf_event.Data (v,_)) ->
-            any_active := true;
-            sink v
-          | Some _ ->
-            any_active := true              (* watermark/retract *)
-      ) out_chans;
-      if not !any_active then running := false
-      else if not (Array.exists Fun.id active) then running := false
-    done
-  ) () in
+  (* Один collector-поток на каждый output канал.
+     Блокирующий pop: нет busy-wait, нет преждевременного завершения.
+     pop возвращает None только когда канал закрыт И пуст → воркер кончил. *)
+  let mu_sink = Mutex.create () in
+  let collector_threads = Array.init workers (fun i ->
+    Thread.create (fun () ->
+      let rec loop () =
+        match Channel.pop out_chans.(i) with
+        | None -> ()                       (* канал закрыт и пуст *)
+        | Some (Mf_event.Data (v,_)) ->
+          Mutex.lock mu_sink; sink v; Mutex.unlock mu_sink; loop ()
+        | Some _ -> loop ()                (* watermark/retract *)
+      in loop ()
+    ) ()
+  ) in
 
   (* ── Dispatcher ─────────────────────────────────────────── *)
   (* Основной поток: читает source и шардирует *)
@@ -123,7 +123,7 @@ let run_parallel
 
   (* Ждём завершения *)
   Array.iter Thread.join worker_threads;
-  Thread.join collector_thread;
+  Array.iter Thread.join collector_threads;
 
   (* Возвращаем статистику *)
   stats

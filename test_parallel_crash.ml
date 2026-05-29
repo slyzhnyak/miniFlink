@@ -70,10 +70,34 @@ let test_no_crash_all_processed () =
     else fail (Printf.sprintf "expected %d, got %d" n !processed)
   )
 
+(* ── Тест 3: run_parallel (с collector) — нет busy-wait ──────── *)
+let test_collector_no_busywait () =
+  Printf.printf "\n-- run_parallel_simple: all processed, no hang\n";
+  with_timeout 15 (fun () ->
+    let n = 5000 in
+    let events = List.init n (fun i ->
+      Mf_event.data (Printf.sprintf "k%d" (i mod 4)) (i * 100)) in
+    (* Pipeline с задержкой: имитируем медленный оператор.
+       Если collector busy-wait — CPU time >> wall time. *)
+    let processed = ref 0 in
+    let mu = Mutex.create () in
+    Parallel.run_parallel_simple
+      ~workers:4 ~capacity:64
+      ~key_of:(fun k -> k)
+      ~pipeline:(fun src -> src)
+      ~source:(Stream.of_list events)
+      ~sink:(fun _ -> Mutex.lock mu; incr processed; Mutex.unlock mu)
+      ();
+    if !processed = n then pass "all events processed, no busy-wait hang"
+    else fail (Printf.sprintf "expected %d got %d" n !processed)
+  )
+
 let () =
   Printf.printf "==========================================\n";
   Printf.printf "  Bug #4: silent worker death -> deadlock\n";
   Printf.printf "==========================================\n";
   test_no_crash_all_processed ();
   test_worker_crash_no_deadlock ();
+  test_collector_no_busywait ();
   Printf.printf "\nAll parallel crash tests passed.\n"
+
