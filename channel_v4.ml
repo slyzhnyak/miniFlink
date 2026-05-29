@@ -40,22 +40,33 @@ let make_bounded capacity =
     not_empty = Condition.create ();
   }
 
-(* push: записать значение. Блокирует если bounded и полный. *)
-let push ch v =
+(* try_push: записать значение, вернуть true если доставлено.
+   Блокирует если bounded и полный. Возвращает false если канал закрыт
+   (например, consumer-воркер упал) — это предотвращает deadlock. *)
+let try_push ch v =
   match ch with
-  | Unbounded u -> Queue.push v u.q
+  | Unbounded u ->
+    if u.closed then false else (Queue.push v u.q; true)
   | Bounded b   ->
     Mutex.lock b.mu;
     while b.count = b.cap && not b.closed do
       Condition.wait b.not_full b.mu
     done;
-    if not b.closed then begin
-      b.buf.(b.tail) <- Some v;
-      b.tail  <- (b.tail + 1) mod b.cap;
-      b.count <- b.count + 1;
-      Condition.signal b.not_empty
-    end;
-    Mutex.unlock b.mu
+    let delivered =
+      if b.closed then false
+      else begin
+        b.buf.(b.tail) <- Some v;
+        b.tail  <- (b.tail + 1) mod b.cap;
+        b.count <- b.count + 1;
+        Condition.signal b.not_empty;
+        true
+      end
+    in
+    Mutex.unlock b.mu;
+    delivered
+
+(* push: совместимость — записать значение, игнорируя статус доставки *)
+let push ch v = ignore (try_push ch v)
 
 (* close: закрыть канал. Consumer получит None после последнего элемента. *)
 let close ch =

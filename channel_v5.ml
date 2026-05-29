@@ -47,9 +47,10 @@ let make_bounded capacity =
     not_empty = Condition.create ();
   }
 
-let push ch v =
+let try_push ch v =
   match ch with
-  | Unbounded u -> Queue.push v u.q
+  | Unbounded u ->
+    if u.closed then false else (Queue.push v u.q; true)
   | Bounded b ->
     let tail = Atomic.get b.tail in
     let next = (tail + 1) mod b.cap in
@@ -57,14 +58,18 @@ let push ch v =
     while Atomic.get b.head = next && not b.closed do
       Domain.cpu_relax ()
     done;
-    if not b.closed then begin
+    if b.closed then false
+    else begin
       b.buf.(tail) <- Some v;
       Atomic.set b.tail next;
       (* Сигналим consumer если он заблокирован *)
       Mutex.lock b.mu;
       Condition.signal b.not_empty;
-      Mutex.unlock b.mu
+      Mutex.unlock b.mu;
+      true
     end
+
+let push ch v = ignore (try_push ch v)
 
 let close ch =
   match ch with

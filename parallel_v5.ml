@@ -40,18 +40,23 @@ let run_parallel_simple
 
   let in_chans = Array.init workers (fun _ -> Channel.make_bounded capacity) in
   let mu_sink  = Mutex.create () in
+  let failed   = Array.make workers false in
 
   (* ── Workers: Domain вместо Thread ────────────────────── *)
   let worker_domains = Array.init workers (fun i ->
     Domain.spawn (fun () ->
-      let src = Channel.to_stream in_chans.(i) in
-      pipeline src
-      |> Pipe.sink (fun v ->
-           (* В продакшне: каждый воркер пишет в свою Kafka партицию — без mutex *)
-           (* Здесь: общий sink защищаем мьютексом *)
-           Mutex.lock mu_sink;
-           sink v;
-           Mutex.unlock mu_sink)
+      (try
+         let src = Channel.to_stream in_chans.(i) in
+         pipeline src
+         |> Pipe.sink (fun v ->
+              Mutex.lock mu_sink;
+              (try sink v with e -> Mutex.unlock mu_sink; raise e);
+              Mutex.unlock mu_sink)
+       with e ->
+         failed.(i) <- true;
+         Channel.close in_chans.(i);
+         Printf.eprintf "[parallel] worker %d crashed: %s\n%!"
+           i (Printexc.to_string e))
     )
   ) in
 
@@ -59,9 +64,12 @@ let run_parallel_simple
   Stream.iter (fun ev ->
     match ev with
     | Mf_event.Data (v,_) ->
-      Channel.push in_chans.(hash_key (key_of v) workers) ev
+      let shard = hash_key (key_of v) workers in
+      if not failed.(shard) then
+        ignore (Channel.try_push in_chans.(shard) ev)
     | Mf_event.Watermark _ ->
-      Array.iter (fun ch -> Channel.push ch ev) in_chans
+      Array.iteri (fun i ch ->
+        if not failed.(i) then ignore (Channel.try_push ch ev)) in_chans
     | Mf_event.Retract _ -> ()
   ) source;
 

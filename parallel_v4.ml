@@ -141,24 +141,37 @@ let run_parallel_simple
 
   let in_chans = Array.init workers (fun _ -> Channel.make_bounded capacity) in
   let mu_sink  = Mutex.create () in   (* защищаем sink от race *)
+  let failed   = Array.make workers false in  (* упал ли воркер i *)
 
   let worker_threads = Array.init workers (fun i ->
     Thread.create (fun () ->
-      let src = Channel.to_stream in_chans.(i) in
-      pipeline src
-      |> Pipe.sink (fun v ->
-           Mutex.lock mu_sink;
-           sink v;
-           Mutex.unlock mu_sink)
+      (try
+         let src = Channel.to_stream in_chans.(i) in
+         pipeline src
+         |> Pipe.sink (fun v ->
+              Mutex.lock mu_sink;
+              (try sink v with e ->
+                 Mutex.unlock mu_sink; raise e);
+              Mutex.unlock mu_sink)
+       with e ->
+         (* Воркер упал: помечаем, закрываем входной канал.
+            Dispatcher через try_push узнает что писать некуда. *)
+         failed.(i) <- true;
+         Channel.close in_chans.(i);
+         Printf.eprintf "[parallel] worker %d crashed: %s\n%!"
+           i (Printexc.to_string e))
     ) ()
   ) in
 
   Stream.iter (fun ev ->
     match ev with
     | Mf_event.Data (v,_) ->
-      Channel.push in_chans.(hash_key (key_of v) workers) ev
+      let shard = hash_key (key_of v) workers in
+      if not failed.(shard) then
+        ignore (Channel.try_push in_chans.(shard) ev)
     | Mf_event.Watermark _ ->
-      Array.iter (fun ch -> Channel.push ch ev) in_chans
+      Array.iteri (fun i ch ->
+        if not failed.(i) then ignore (Channel.try_push ch ev)) in_chans
     | Mf_event.Retract _ -> ()
   ) source;
 

@@ -14,6 +14,7 @@ val make_unbounded : unit -> 'a t
 val make_bounded   : int  -> 'a t
 
 val push     : 'a t -> 'a -> unit   (* блокирует если bounded и полный *)
+val try_push : 'a t -> 'a -> bool   (* как push, но false если канал закрыт *)
 val pop      : 'a t -> 'a option    (* блокирует если bounded и пустой; None = закрыт *)
 val try_pop  : 'a t -> 'a option    (* не блокирует *)
 val close    : 'a t -> unit

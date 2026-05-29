@@ -1,0 +1,79 @@
+(* Тест бага #4: воркер падает → dispatcher не зависает (no deadlock) *)
+
+let pass name = Printf.printf "  OK %s\n%!" name
+let fail name = Printf.printf "  FAIL %s\n%!" name; exit 1
+
+(* Watchdog: если тест зависнет (deadlock) — упадём через 10 сек *)
+let with_timeout secs f =
+  Sys.set_signal Sys.sigalrm (Sys.Signal_handle (fun _ ->
+    Printf.printf "  FAIL: TIMEOUT (deadlock detected)\n%!"; exit 1));
+  ignore (Unix.alarm secs);
+  let r = f () in
+  ignore (Unix.alarm 0);
+  r
+
+(* ── Тест 1: воркер бросает исключение на определённом значении ─── *)
+let test_worker_crash_no_deadlock () =
+  Printf.printf "\n-- Worker crash does not deadlock dispatcher\n";
+  with_timeout 10 (fun () ->
+    (* Источник: 10000 событий, ключи раскиданы по воркерам *)
+    let n = 10000 in
+    let events = List.init n (fun i ->
+      Mf_event.data (Printf.sprintf "key_%d" (i mod 8)) (i * 100)) in
+
+    let processed = ref 0 in
+    let mu = Mutex.create () in
+
+    (* Pipeline одного воркера: падает если видит "key_3" *)
+    let pipeline src =
+      src |> Stream.map (fun ev ->
+        (match ev with
+         | Mf_event.Data (k, _) when k = "key_3" ->
+           failwith "simulated worker crash on key_3"
+         | _ -> ());
+        ev)
+    in
+
+    (* capacity маленький — чтобы канал быстро заполнился если consumer мёртв *)
+    Parallel.run_parallel_simple
+      ~workers:8 ~capacity:16
+      ~key_of:(fun k -> k)
+      ~pipeline
+      ~source:(Stream.of_list events)
+      ~sink:(fun _ -> Mutex.lock mu; incr processed; Mutex.unlock mu)
+      ();
+
+    (* Если дошли сюда без таймаута — deadlock не случился *)
+    pass "completed without deadlock";
+    (* Воркер key_3 упал, но остальные 7 обработали свои события *)
+    if !processed > 0 then pass (Printf.sprintf "other workers processed %d events" !processed)
+    else fail "no events processed at all"
+  )
+
+(* ── Тест 2: нормальная работа без падений ──────────────────────── *)
+let test_no_crash_all_processed () =
+  Printf.printf "\n-- Normal run: all events processed\n";
+  with_timeout 10 (fun () ->
+    let n = 1000 in
+    let events = List.init n (fun i ->
+      Mf_event.data (Printf.sprintf "key_%d" (i mod 4)) (i * 100)) in
+    let processed = ref 0 in
+    let mu = Mutex.create () in
+    Parallel.run_parallel_simple
+      ~workers:4 ~capacity:64
+      ~key_of:(fun k -> k)
+      ~pipeline:(fun src -> src)
+      ~source:(Stream.of_list events)
+      ~sink:(fun _ -> Mutex.lock mu; incr processed; Mutex.unlock mu)
+      ();
+    if !processed = n then pass (Printf.sprintf "all %d events processed" n)
+    else fail (Printf.sprintf "expected %d, got %d" n !processed)
+  )
+
+let () =
+  Printf.printf "==========================================\n";
+  Printf.printf "  Bug #4: silent worker death -> deadlock\n";
+  Printf.printf "==========================================\n";
+  test_no_crash_all_processed ();
+  test_worker_crash_no_deadlock ();
+  Printf.printf "\nAll parallel crash tests passed.\n"
