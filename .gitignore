@@ -25,3 +25,14 @@ docs/*.toc
 docs/*.fls
 docs/*.fdb_latexmk
 _doc_build/
+
+# Скомпилированные тест-бинарники (от старой ручной сборки до dune)
+/test_core_bin
+/test_props_bin
+/test_dedup_evict
+/test_parallel_crash
+/test_retract
+/test_sliding
+/test_*_bin
+# На всякий случай — любые исполняемые в корне без расширения dune не создаёт
+*.exe
