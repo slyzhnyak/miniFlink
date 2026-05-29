@@ -1,0 +1,18 @@
+; miniFlink — бенчмарки
+(executable
+ (name bench)
+ (libraries miniflink unix)
+ (flags (:standard -w +a-27-32-33-37-39-41-42-44-45-70))
+ (modules bench))
+
+(executable
+ (name bench_parallel)
+ (libraries miniflink unix threads.posix)
+ (flags (:standard -w +a-27-32-33-37-39-41-42-44-45-70))
+ (modules bench_parallel))
+
+(executable
+ (name soak)
+ (libraries miniflink unix)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
+ (modules soak))

@@ -48,3 +48,9 @@
  (libraries miniflink unix threads.posix)
  (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_parallel_crash))
+
+(test
+ (name test_determinism)
+ (libraries miniflink qcheck-core qcheck-core.runner qcheck unix threads.posix)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
+ (modules test_determinism))

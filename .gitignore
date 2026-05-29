@@ -8,8 +8,6 @@
 *.native
 miniflink
 miniflink_*
-bench
-bench_parallel
 channel.ml
 parallel.ml
 _build/

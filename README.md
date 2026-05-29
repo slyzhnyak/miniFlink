@@ -64,8 +64,9 @@ variants/            — реализации channel/parallel по версии
 
 bin/    main.ml        демо pipeline
 bench/  bench.ml bench_parallel.ml
-test/   8 тест-сюит (core, props, reliability, metrics,
-                     retract, sliding, dedup_evict, parallel_crash)
+test/   9 тест-сюит (core, props, reliability, metrics,
+                     retract, sliding, dedup_evict, parallel_crash,
+                     determinism)
 ```
 
 Сборка через **dune**. `channel.ml`/`parallel.ml` выбираются автоматически
@@ -90,8 +91,12 @@ dune exec bin/main.exe log      # log режим: метрики в stderr
 dune exec bench/bench.exe
 dune exec bench/bench_parallel.exe
 
-# Все тесты
+# Все тесты (быстрые, входят в CI)
 dune test
+
+# Soak-тест (медленный, вручную): проверка отсутствия утечек памяти
+dune exec bench/soak.exe              # 2M событий
+dune exec bench/soak.exe -- 10000000  # 10M событий
 ```
 
 ## Выбор режима
