@@ -64,10 +64,10 @@ variants/            — реализации channel/parallel по версии
 
 bin/    main.ml        демо pipeline
 bench/  bench.ml bench_parallel.ml
-test/   12 тест-сюит (core, props, reliability, metrics,
+test/   13 тест-сюит (core, props, reliability, metrics,
                      retract, sliding, dedup_evict, parallel_crash,
                      determinism, watermark, table_ttl,
-                     checkpoint_parallel)
+                     checkpoint_parallel, rocksdb)
 ```
 
 Сборка через **dune**. `channel.ml`/`parallel.ml` выбираются автоматически
@@ -80,6 +80,7 @@ test/   12 тест-сюит (core, props, reliability, metrics,
 # Зависимости (Ubuntu/Debian)
 apt install ocaml-dune ocaml-findlib
 apt install libppx-deriving-yojson-ocaml-dev libyojson-ocaml-dev libqcheck-ocaml-dev
+apt install librocksdb-dev   # для персистентного state backend (C FFI)
 
 # Сборка — dune сам выберет v4 (OCaml 4) или v5 (OCaml 5)
 dune build
@@ -144,7 +145,7 @@ Channel overhead: ~106 нс/msg (Mutex+Condition).
 | Unit + Property тесты       | ✓ 29 тестов, 1400 QCheck      |
 | Schema evolution            | stub → schema_default.ml      |
 | Exactly-once parallel       | ✓ реализовано (barrier + snapshot) |
-| Persistent state (RocksDB)  | stub → файловый backend        |
+| Persistent state (RocksDB)  | ✓ реализовано (C FFI, librocksdb) |
 | MQTT adapter                | ✓ в miniflink/ (C FFI)        |
 | Kafka adapter               | ✓ в miniflink/ (C FFI)        |
 

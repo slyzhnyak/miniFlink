@@ -1,69 +1,54 @@
 (* ============================================================
-   State_backend_rocksdb.ml — заглушка RocksDB
+   State_backend_rocksdb.ml — персистентный backend на RocksDB
 
-   Интерфейс идентичен Memory.
-   Реальная реализация через C FFI подключается здесь.
+   Реальный RocksDB через C FFI (rocksdb_ffi → rocksdb_stubs.c).
+   Переживает рестарт процесса.
 
-   Чтобы использовать настоящий RocksDB:
-   1. opam install rocksdb (или через apt: librocksdb-dev)
-   2. Раскомментировать external привязки
-   3. Заменить Hashtbl на вызовы RocksDB C API
-
-   Сейчас: пишет в /tmp/miniflink_state/ через файлы.
-   Это не RocksDB но даёт персистентность между рестартами.
+   keys/snapshot/restore: ведём in-memory set ключей рядом с db
+   (ключей операторного стейта обычно немного). При open читать
+   все ключи из RocksDB не нужно для нашего use-case — стейт
+   восстанавливается через restore из checkpoint.
    ============================================================ *)
+
 type t = {
-  path  : string;
-  cache : (string, bytes) Hashtbl.t;
+  db   : Rocksdb_ffi.db;
+  path : string;
+  mutable known : (string, unit) Hashtbl.t;  (* индекс ключей *)
 }
 
-let state_dir = "/tmp/miniflink_state"
+let default_dir = "/tmp/miniflink_rocksdb"
 
-let key_to_file t k =
-  let safe = String.map (function '/' | ':' -> '_' | c -> c) k in
-  Filename.concat t.path safe
+let create_at path =
+  (try Unix.mkdir (Filename.dirname path) 0o755
+   with Unix.Unix_error (Unix.EEXIST,_,_) -> () | _ -> ());
+  { db = Rocksdb_ffi.open_db path; path; known = Hashtbl.create 64 }
 
-let create () =
-  let path = state_dir in
-  (try Unix.mkdir path 0o755 with Unix.Unix_error (Unix.EEXIST,_,_) -> ());
-  let t = { path; cache = Hashtbl.create 64 } in
-  (* Загружаем существующий стейт при старте *)
-  (try
-    let d = Unix.opendir path in
-    (try while true do
-      let f = Unix.readdir d in
-      if f <> "." && f <> ".." then begin
-        let full = Filename.concat path f in
-        let ic = open_in_bin full in
-        let n  = in_channel_length ic in
-        let b  = Bytes.create n in
-        really_input ic b 0 n; close_in ic;
-        Hashtbl.replace t.cache f b
-      end
-    done with End_of_file -> ());
-    Unix.closedir d
-  with _ -> ());
-  t
+let create () = create_at default_dir
 
-let get t k = Hashtbl.find_opt t.cache k
+let get t k = Rocksdb_ffi.get t.db k
 
 let set t k v =
-  Hashtbl.replace t.cache k v;
-  let f  = key_to_file t k in
-  let oc = open_out_bin f in
-  output_bytes oc v; close_out oc
+  Rocksdb_ffi.put t.db k v;
+  Hashtbl.replace t.known k ()
 
 let delete t k =
-  Hashtbl.remove t.cache k;
-  (try Sys.remove (key_to_file t k) with _ -> ())
+  Rocksdb_ffi.delete t.db k;
+  Hashtbl.remove t.known k
 
-let keys t     = Hashtbl.fold (fun k _ a -> k :: a) t.cache []
-let size t     = Hashtbl.length t.cache
+let keys t = Hashtbl.fold (fun k () a -> k :: a) t.known []
 
+let size t = Hashtbl.length t.known
+
+let close t = Rocksdb_ffi.close_db t.db
+
+(* Снапшот: сериализуем все (ключ,значение) пары.
+   Для персистентного backend снапшот — это логический дамп,
+   сам RocksDB уже на диске. *)
 let snapshot t =
-  Marshal.to_bytes (Hashtbl.fold (fun k v a -> (k,v)::a) t.cache []) []
+  let pairs = Hashtbl.fold (fun k () a ->
+    match get t k with Some v -> (k,v)::a | None -> a) t.known [] in
+  Marshal.to_bytes pairs []
 
 let restore t b =
-  Hashtbl.clear t.cache;
   let pairs : (string * bytes) list = Marshal.from_bytes b 0 in
   List.iter (fun (k,v) -> set t k v) pairs
