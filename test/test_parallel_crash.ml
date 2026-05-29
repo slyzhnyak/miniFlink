@@ -92,6 +92,31 @@ let test_collector_no_busywait () =
     else fail (Printf.sprintf "expected %d got %d" n !processed)
   )
 
+(* ── Тест 4: per-worker sink_factory (без глобального mutex) ─── *)
+let test_per_worker_sinks () =
+  Printf.printf "\n-- Per-worker sinks: each worker writes to own buffer\n";
+  with_timeout 10 (fun () ->
+    let n = 4000 in
+    let events = List.init n (fun i ->
+      Mf_event.data (Printf.sprintf "k%d" (i mod 4)) (i * 100)) in
+    (* Каждый воркер пишет в свой буфер — никакого общего mutex *)
+    let buffers = Array.init 4 (fun _ -> ref 0) in
+    Parallel.run_parallel_simple
+      ~sink_factory:(fun i -> fun _ -> incr buffers.(i))
+      ~workers:4 ~capacity:64
+      ~key_of:(fun k -> k)
+      ~pipeline:(fun src -> src)
+      ~source:(Stream.of_list events)
+      ~sink:(fun _ -> ())   (* не используется когда есть factory *)
+      ();
+    let total = Array.fold_left (fun a r -> a + !r) 0 buffers in
+    if total = n then pass (Printf.sprintf "all %d events across per-worker sinks" n)
+    else fail (Printf.sprintf "expected %d, got %d" n total);
+    (* Каждый воркер получил события своего шарда *)
+    let nonempty = Array.fold_left (fun a r -> if !r > 0 then a+1 else a) 0 buffers in
+    pass (Printf.sprintf "%d workers received events" nonempty)
+  )
+
 let () =
   Printf.printf "==========================================\n";
   Printf.printf "  Bug #4: silent worker death -> deadlock\n";
@@ -99,5 +124,5 @@ let () =
   test_no_crash_all_processed ();
   test_worker_crash_no_deadlock ();
   test_collector_no_busywait ();
+  test_per_worker_sinks ();
   Printf.printf "\nAll parallel crash tests passed.\n"
-

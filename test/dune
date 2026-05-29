@@ -1,0 +1,50 @@
+; miniFlink — тесты
+; Каждый тест — отдельный исполняемый, запускается через dune test.
+
+(test
+ (name test_core)
+ (libraries miniflink)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
+ (modules test_core))
+
+(test
+ (name test_props)
+ (libraries miniflink qcheck-core qcheck-core.runner qcheck)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
+ (modules test_props))
+
+(test
+ (name test_reliability)
+ (libraries miniflink)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
+ (modules test_reliability))
+
+(test
+ (name test_metrics)
+ (libraries miniflink str)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
+ (modules test_metrics))
+
+(test
+ (name test_retract)
+ (libraries miniflink)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
+ (modules test_retract))
+
+(test
+ (name test_sliding)
+ (libraries miniflink)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
+ (modules test_sliding))
+
+(test
+ (name test_dedup_evict)
+ (libraries miniflink)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
+ (modules test_dedup_evict))
+
+(test
+ (name test_parallel_crash)
+ (libraries miniflink unix threads.posix)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
+ (modules test_parallel_crash))

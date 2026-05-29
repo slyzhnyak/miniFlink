@@ -30,68 +30,68 @@ let pipeline source =
 ## Структура
 
 ```
-Ядро (не меняется):
-  stream.ml          pull-based поток: unit -> 'a option
-  mf_event.ml        Data | Watermark | Retract
-  pipe.ml            enrich, window, aggregate, dedup, flat_map
-  keyed.ml           type class KEYED — убирает ~key: из операторов
-  table.ml           Static | Snapshot таблицы
-  time.ml            seconds, minutes, hours
-  codec.ml           JSON / Protobuf абстракция
-  domain.ml          типы с [@@deriving yojson, show]
-  rules.ml           чистая бизнес-логика
+lib/                 — библиотека miniflink
+  Ядро (не меняется):
+    stream.ml          pull-based поток: unit -> 'a option
+    mf_event.ml        Data | Watermark | Retract
+    pipe.ml            enrich, window, aggregate, dedup, flat_map
+    keyed.ml           type class KEYED — убирает ~key: из операторов
+    table.ml           Static | Snapshot таблицы
+    time.ml            seconds, minutes, hours
+    codec.ml           JSON / Protobuf абстракция
+    domain.ml          типы с [@@deriving yojson, show]
+    rules.ml           чистая бизнес-логика
+  Параллелизм:
+    channel.mli        интерфейс канала
+    parallel.mli       интерфейс parallel runner
+    (channel.ml и parallel.ml генерируются dune из variants/)
+  Production слои (все опциональны, noop по умолчанию):
+    dlq.*              dead letter queue (noop | log)
+    shutdown.*         graceful shutdown (noop | SIGTERM drain)
+    metrics.*          Prometheus метрики (noop | log + HTTP endpoint)
+    barrier.*          exactly-once parallel (Chandy-Lamport)
+    state_backend.*    персистентный стейт (noop | memory | rocksdb)
+    schema.*           schema evolution + migration
+    harness.*          тестовый фреймворк
+    runtime.ml         сборка всех слоёв
+    fixtures.ml        тестовые данные
 
-Параллелизм (OCaml 4 / 5):
-  channel.mli        интерфейс канала
-  channel_v4.ml      Mutex + Condition (OCaml 4 Thread)
-  channel_v5.ml      Atomic lock-free SPSC (OCaml 5 Domain)
-  parallel.mli       интерфейс parallel runner
-  parallel_v4.ml     Thread.create / Thread.join
-  parallel_v5.ml     Domain.spawn / Domain.join
+variants/            — реализации channel/parallel по версии OCaml
+  channel_v4.ml        Mutex + Condition (OCaml 4 Thread)
+  channel_v5.ml        Atomic lock-free SPSC (OCaml 5 Domain)
+  parallel_v4.ml       Thread.create / Thread.join
+  parallel_v5.ml       Domain.spawn / Domain.join
 
-Production слои (все опциональны, noop по умолчанию):
-  dlq.mli            dead letter queue
-  dlq_noop.ml        молча считает
-  dlq_log.ml         пишет в stderr с контекстом
-  shutdown.mli       graceful shutdown
-  shutdown_noop.ml   игнорирует SIGTERM
-  shutdown_default.ml SIGTERM → drain → checkpoint → exit
-  metrics.mli        Prometheus-совместимые метрики
-  metrics_noop.ml    нулевой overhead
-  metrics_log.ml     counter/gauge/histogram + HTTP /metrics endpoint
-  barrier.mli        exactly-once parallel (Chandy-Lamport)
-  state_backend.mli  персистентный стейт
-  schema.mli         schema evolution + migration
-  harness.mli        тестовый фреймворк
-  runtime.ml         сборка всех слоёв
-
-Makefile:
-  make check_version  OCaml 4/5 → выбирает channel/parallel реализацию
-  make all            собрать всё
-  make bench          single-thread throughput
-  make bench_parallel parallel vs sequential
+bin/    main.ml        демо pipeline
+bench/  bench.ml bench_parallel.ml
+test/   8 тест-сюит (core, props, reliability, metrics,
+                     retract, sliding, dedup_evict, parallel_crash)
 ```
+
+Сборка через **dune**. `channel.ml`/`parallel.ml` выбираются автоматически
+по версии OCaml через `(rule (enabled_if (>= %{ocaml_version} 5.0.0)))` —
+никакого ручного `cp`.
 
 ## Запуск
 
 ```bash
 # Зависимости (Ubuntu/Debian)
-apt install libmosquitto-dev librdkafka-dev ocaml-findlib
+apt install ocaml-dune ocaml-findlib
 apt install libppx-deriving-yojson-ocaml-dev libyojson-ocaml-dev libqcheck-ocaml-dev
 
-# Сборка
-make check_version   # → OCaml 4: Thread+Mutex | OCaml 5: Domain+Atomic
-make all
+# Сборка — dune сам выберет v4 (OCaml 4) или v5 (OCaml 5)
+dune build
 
-# Запуск
-./miniflink          # тестовые данные (noop режим)
-./miniflink log      # log режим: метрики в stderr
+# Запуск демо
+dune exec bin/main.exe          # тестовые данные (noop режим)
+dune exec bin/main.exe log      # log режим: метрики в stderr
 
-# Тесты
-./test_core_bin      # 22 unit теста
-./test_props_bin     # 7 QCheck property тестов (1400 случаев)
-./test_reliability_bin  # DLQ + Shutdown тесты
-./test_metrics_bin   # Prometheus metrics тесты
+# Бенчмарки
+dune exec bench/bench.exe
+dune exec bench/bench_parallel.exe
+
+# Все тесты
+dune test
 ```
 
 ## Выбор режима

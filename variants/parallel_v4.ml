@@ -131,6 +131,7 @@ let run_parallel
 (* ── Упрощённая версия: без collector, sink вызывается из воркеров ── *)
 
 let run_parallel_simple
+    ?(sink_factory : (int -> ('b -> unit)) option)
     ~(workers  : int)
     ~(capacity : int)
     ~(key_of   : 'a -> string)
@@ -140,19 +141,28 @@ let run_parallel_simple
     () =
 
   let in_chans = Array.init workers (fun _ -> Channel.make_bounded capacity) in
-  let mu_sink  = Mutex.create () in   (* защищаем sink от race *)
   let failed   = Array.make workers false in  (* упал ли воркер i *)
 
+  (* Per-worker sink:
+     - sink_factory задан → каждый воркер пишет в свой sink, без мьютекса
+       (например, своя Kafka партиция). Нет contention.
+     - иначе → общий sink под mu_sink (безопасно, но contention при
+       высоком parallelism). *)
+  let mu_sink = Mutex.create () in
+  let worker_sink = match sink_factory with
+    | Some factory -> (fun i -> factory i)              (* свой на воркера *)
+    | None -> (fun _ -> fun v ->
+        Mutex.lock mu_sink;
+        (try sink v with e -> Mutex.unlock mu_sink; raise e);
+        Mutex.unlock mu_sink)
+  in
+
   let worker_threads = Array.init workers (fun i ->
+    let my_sink = worker_sink i in
     Thread.create (fun () ->
       (try
          let src = Channel.to_stream in_chans.(i) in
-         pipeline src
-         |> Pipe.sink (fun v ->
-              Mutex.lock mu_sink;
-              (try sink v with e ->
-                 Mutex.unlock mu_sink; raise e);
-              Mutex.unlock mu_sink)
+         pipeline src |> Pipe.sink my_sink
        with e ->
          (* Воркер упал: помечаем, закрываем входной канал.
             Dispatcher через try_push узнает что писать некуда. *)

@@ -30,6 +30,7 @@ let hash_key key n =
   (!h land max_int) mod n
 
 let run_parallel_simple
+    ?(sink_factory : (int -> ('b -> unit)) option)
     ~(workers  : int)
     ~(capacity : int)
     ~(key_of   : 'a -> string)
@@ -39,19 +40,24 @@ let run_parallel_simple
     () =
 
   let in_chans = Array.init workers (fun _ -> Channel.make_bounded capacity) in
-  let mu_sink  = Mutex.create () in
   let failed   = Array.make workers false in
+
+  let mu_sink = Mutex.create () in
+  let worker_sink = match sink_factory with
+    | Some factory -> (fun i -> factory i)
+    | None -> (fun _ -> fun v ->
+        Mutex.lock mu_sink;
+        (try sink v with e -> Mutex.unlock mu_sink; raise e);
+        Mutex.unlock mu_sink)
+  in
 
   (* ── Workers: Domain вместо Thread ────────────────────── *)
   let worker_domains = Array.init workers (fun i ->
+    let my_sink = worker_sink i in
     Domain.spawn (fun () ->
       (try
          let src = Channel.to_stream in_chans.(i) in
-         pipeline src
-         |> Pipe.sink (fun v ->
-              Mutex.lock mu_sink;
-              (try sink v with e -> Mutex.unlock mu_sink; raise e);
-              Mutex.unlock mu_sink)
+         pipeline src |> Pipe.sink my_sink
        with e ->
          failed.(i) <- true;
          Channel.close in_chans.(i);

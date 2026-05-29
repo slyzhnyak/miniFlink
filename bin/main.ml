@@ -34,16 +34,20 @@ let pipeline source =
 
 (* ── Sink ─────────────────────────────────────────────────── *)
 
+(* Без "%!" в hot path: флеш на каждое событие = системный вызов
+   на каждый алерт. Буферизуем, флешим один раз в конце (at_exit). *)
 let print_alert a =
   let sev = match a.severity with
     | Critical -> "CRITICAL" | Warning -> "WARNING" | Info -> "INFO"
   in
-  Printf.printf "[%s] %s (%s): %s\n%!" sev a.device_id a.rule a.message
+  Printf.printf "[%s] %s (%s): %s\n" sev a.device_id a.rule a.message
+
+let () = at_exit (fun () -> flush stdout)
 
 (* ── Run: noop (тесты) ────────────────────────────────────── *)
 
 let run_test () =
-  Printf.printf "=== Noop mode (no DLQ, no shutdown handler) ===\n%!";
+  Printf.printf "=== Noop mode (no DLQ, no shutdown handler) ===\n";
   let source = Stream.of_list Fixtures.scenario_alerts in
   Runtime.run Runtime.noop
     ~key_of:(fun (t:telemetry) -> t.device_id)
@@ -55,8 +59,8 @@ let run_test () =
 (* ── Run: log (метрики + shutdown) ───────────────────────── *)
 
 let run_log () =
-  Printf.printf "=== Log mode (metrics to stderr + shutdown handler) ===\n%!";
-  Printf.printf "(Send SIGTERM or SIGINT to test graceful shutdown)\n%!";
+  Printf.printf "=== Log mode (metrics to stderr + shutdown handler) ===\n";
+  Printf.printf "(Send SIGTERM or SIGINT to test graceful shutdown)\n";
   let source = Stream.of_list Fixtures.scenario_alerts in
   Runtime.run Runtime.log_cfg
     ~key_of:(fun (t:telemetry) -> t.device_id)

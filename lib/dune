@@ -1,0 +1,33 @@
+; ============================================================
+;  miniFlink — библиотека ядра + production слои
+;
+;  channel.ml и parallel.ml генерируются copy-правилами
+;  из ../variants/*_v{4,5}.ml по версии OCaml:
+;    >= 5.0 → Domain + Atomic (v5)
+;    <  5.0 → Thread + Mutex  (v4)
+; ============================================================
+
+(library
+ (name miniflink)
+ (wrapped false)
+ (libraries unix threads.posix yojson ppx_deriving_yojson.runtime)
+ (preprocess (pps ppx_deriving_yojson ppx_deriving.show))
+ (flags (:standard -w +a-27-32-33-37-39-69-70))
+ (modules_without_implementation
+  barrier dlq metrics schema shutdown state_backend))
+
+; ── channel.ml по версии OCaml ────────────────────────────────
+(rule
+ (enabled_if (>= %{ocaml_version} 5.0.0))
+ (action (copy ../variants/channel_v5.ml channel.ml)))
+(rule
+ (enabled_if (< %{ocaml_version} 5.0.0))
+ (action (copy ../variants/channel_v4.ml channel.ml)))
+
+; ── parallel.ml по версии OCaml ───────────────────────────────
+(rule
+ (enabled_if (>= %{ocaml_version} 5.0.0))
+ (action (copy ../variants/parallel_v5.ml parallel.ml)))
+(rule
+ (enabled_if (< %{ocaml_version} 5.0.0))
+ (action (copy ../variants/parallel_v4.ml parallel.ml)))

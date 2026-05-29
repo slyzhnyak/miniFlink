@@ -20,6 +20,7 @@ val hash_key : string -> int -> int
     Каждый воркер запускает свою копию pipeline.
     Sink защищён мьютексом (v4) или вызывается per-domain (v5). *)
 val run_parallel_simple :
+  ?sink_factory : (int -> ('b -> unit)) ->
   workers  : int ->
   capacity : int ->
   key_of   : ('a -> string) ->
