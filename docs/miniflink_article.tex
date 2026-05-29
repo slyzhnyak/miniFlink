@@ -1,0 +1,399 @@
+\documentclass[acmsmall,review]{acmart}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{microtype}
+
+% OCaml listings style
+\lstdefinelanguage{OCaml}{
+  keywords={let,in,fun,match,with,type,module,sig,struct,
+            and,or,not,if,then,else,begin,end,val,mutable,
+            open,include,functor,of,rec,when},
+  keywordstyle=\color[rgb]{0.0,0.4,0.7}\bfseries,
+  commentstyle=\color[rgb]{0.4,0.4,0.4}\itshape,
+  stringstyle=\color[rgb]{0.2,0.6,0.2},
+  morecomment=[s]{(*}{*)},
+  morestring=[b]",
+  sensitive=true
+}
+\lstset{
+  language=OCaml,
+  basicstyle=\ttfamily\small,
+  frame=single,
+  framerule=0.4pt,
+  rulecolor=\color[rgb]{0.8,0.8,0.8},
+  backgroundcolor=\color[rgb]{0.97,0.97,0.97},
+  xleftmargin=1em,
+  xrightmargin=1em,
+  aboveskip=0.8em,
+  belowskip=0.8em,
+  breaklines=true,
+  showstringspaces=false,
+  tabsize=2
+}
+
+\title{miniFlink: Declarative Stream Processing Semantics in OCaml}
+
+\author{miniFlink Project}
+\affiliation{%
+  \institution{Independent}
+  \country{Russia}}
+
+\begin{abstract}
+We present miniFlink, a functional implementation of Apache Flink semantics
+in OCaml that demonstrates how declarative stream processing reduces
+accidental complexity. The key insight is the \texttt{KEYED} type class:
+by encoding the grouping key once in the type, operators \texttt{window},
+\texttt{enrich}, and \texttt{dedup} require no explicit \texttt{\textasciitilde{}key:}
+parameter, making the pipeline read as a specification rather than
+an implementation. We implement event time, watermarks, tumbling/sliding
+windows, stateful operators, exactly-once checkpointing, table and join
+semantics, retractions for late data, and production layers
+(dead letter queue, graceful shutdown, Prometheus metrics) in
+approximately 1200 lines across 42 files. A parallel backend supports
+both OCaml~4 (Thread + Mutex) and OCaml~5 (Domain + Atomic)
+with measured speedup of $2.48\times$ on 4 workers (1 CPU).
+\end{abstract}
+
+\begin{document}
+\maketitle
+
+%%% ── 0. Declarativity ────────────────────────────────────────────────────
+\section{Declarativity as a First Principle}
+
+Traditional stream processing frameworks require the programmer to
+explicitly state how to group events, how to serialize them, and how to
+handle null values at every operator. Consider the same pipeline in
+Kafka Streams (Java) and miniFlink (OCaml):
+
+\begin{lstlisting}[caption={Kafka Streams (Java) — imperative},label={lst:kafka}]
+KStream<String, Telemetry> stream =
+    builder.stream("vehicles.telemetry");
+KGroupedStream<String, Telemetry> grouped = stream
+    .filter((k, v) -> v != null)
+    .groupBy((k, v) -> v.getDeviceId(),
+             Grouped.with(Serdes.String(), telemetrySerde));
+KTable<Windowed<String>, Stats> stats = grouped
+    .windowedBy(TimeWindows.ofSizeWithNoGrace(
+                    Duration.ofSeconds(30)))
+    .aggregate(Stats::empty,
+               (k, v, acc) -> acc.add(v),
+               Materialized.as("stats-store"));
+stats.toStream()
+    .flatMapValues(Rules::check)
+    .filter((k, v) -> v != null)
+    .to("fleet.alerts");
+\end{lstlisting}
+
+\begin{lstlisting}[caption={miniFlink (OCaml) — declarative},label={lst:mf}]
+let pipeline source =
+  source
+  |> Event.with_watermarks   ~latency:(seconds 3)
+  |> Pipe.enrich (module Telemetry)
+       ~from:devices
+       ~merge:(fun t dev -> { t with device = dev })
+  |> Pipe.window (module Telemetry) (tumbling (seconds 30))
+  |> Pipe.aggregate              Rules.compute
+  |> Pipe.flat_map               (Rules.check Rules.fleet)
+  |> Pipe.dedup (module Alert)
+       ~rule:(fun a -> a.rule)
+       ~cooldown:(minutes 5)
+\end{lstlisting}
+
+The differences are structural, not cosmetic:
+
+\begin{itemize}
+\item \textbf{No \texttt{key\_by}.} The \texttt{KEYED} type class encodes
+  the grouping key in the type once; \texttt{window}, \texttt{enrich},
+  and \texttt{dedup} extract it automatically.
+\item \textbf{No type annotations} inside the \texttt{|>} chain.
+  Hindley-Milner inference propagates types through all operators.
+\item \textbf{No null checks.} \texttt{Option} makes absence explicit;
+  \texttt{None} cannot be dereferenced.
+\item \textbf{Format in one place.} Changing JSON to Protobuf means
+  replacing one \texttt{Codec} value; the pipeline is untouched.
+\end{itemize}
+
+%%% ── 1. Architecture ─────────────────────────────────────────────────────
+\section{Architecture}
+
+miniFlink is organized into four orthogonal layers. Each layer depends
+only on layers below it; the core never imports reliability or
+parallelism modules.
+
+\begin{table}[h]
+\centering
+\caption{Layer organization}
+\begin{tabular}{lll}
+\toprule
+Layer & Modules & Responsibility \\
+\midrule
+Core & \texttt{stream, event, pipe, keyed, table, codec} &
+  Immutable. No external dependencies. \\
+Domain & \texttt{domain, rules} &
+  \texttt{[@@deriving yojson]}. Pure functions. \\
+Parallelism & \texttt{channel\_v4/v5, parallel\_v4/v5} &
+  OCaml~4: Thread+Mutex. OCaml~5: Domain+Atomic. \\
+Reliability & \texttt{dlq, shutdown, metrics, barrier, schema} &
+  Each: \texttt{.mli} + \texttt{\_noop} + \texttt{\_default}. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The \texttt{Makefile} detects \texttt{OCAML\_MAJOR} and copies
+the appropriate \texttt{channel\_v\{4,5\}.ml} and
+\texttt{parallel\_v\{4,5\}.ml} before compilation.
+
+%%% ── 2. Core Abstractions ────────────────────────────────────────────────
+\section{Core Abstractions}
+
+\subsection{Pull Stream}
+
+\begin{lstlisting}
+type 'a t = unit -> 'a option
+\end{lstlisting}
+
+A stream is a function. The call stack \emph{is} the operator graph.
+No callbacks, no threads, no allocation per event beyond the value
+itself. \texttt{map}, \texttt{filter}, \texttt{flat\_map} compose
+without intermediate buffers.
+
+\subsection{Event}
+
+\begin{lstlisting}
+type 'a t =
+  | Data      of 'a * timestamp   (* value + event time *)
+  | Watermark of timestamp        (* lower bound on future ts *)
+  | Retract   of 'a * timestamp   (* revocation of prior Data *)
+\end{lstlisting}
+
+All three constructors flow through the same stream. Operators
+match exhaustively — adding a constructor forces all operators
+to handle it at compile time.
+
+\subsection{KEYED Type Class}
+
+\begin{lstlisting}
+module type S = sig
+  type t
+  val key : t -> string
+end
+
+(* Registered once per domain type *)
+module Telemetry = Keyed.Make(struct
+  type t = telemetry
+  let key t = t.device_id
+end)
+\end{lstlisting}
+
+Operators receive \texttt{(module Telemetry)} as a first-class module
+and call \texttt{K.key} internally. The user never writes
+\texttt{\textasciitilde{}key:(fun t -> t.device\_id)} again.
+
+\subsection{Window}
+
+The locally abstract type annotation breaks the occurs-check that
+would otherwise create the recursive type
+$\alpha = \mathtt{string} \times \alpha\ \mathtt{list}$:
+
+\begin{lstlisting}
+let window (type a) ?(latency=0)
+    ~(key : a -> string) spec
+    (upstream : a Event.t Stream.t)
+    : (string * a list) Event.t Stream.t = ...
+\end{lstlisting}
+
+Window state is a \texttt{WMap.t} from \texttt{(key, start, stop)}
+triples to event lists. Watermarks trigger partition of open windows
+into \emph{closed} (fired) and \emph{open} sets; closed windows emit
+their accumulated events downstream.
+
+%%% ── 3. Event Time and Watermarks ───────────────────────────────────────
+\section{Event Time and Watermarks}
+
+Each event carries its origin timestamp independently of processing
+time. \texttt{with\_watermarks} inserts \texttt{Watermark(max\_seen - latency)}
+after each new maximum timestamp. The invariant:
+
+\[
+  \forall t < \mathtt{wm}:\ \text{no future } \mathtt{Data}(\_,\, t)
+  \text{ will arrive}
+\]
+
+This allows deterministic window closure without wall-clock polling.
+Watermarks are monotone by construction — \texttt{max\_seen} is a
+\texttt{ref} that only grows.
+
+%%% ── 4. Exactly-Once ─────────────────────────────────────────────────────
+\section{Exactly-Once Checkpointing}
+
+A checkpoint is a triple $(epoch, offset, state)$ stored in
+\texttt{Checkpoint.Store}. The runner:
+
+\begin{enumerate}
+\item Reads $N$ events from source.
+\item On failure: restores state from latest checkpoint,
+  calls \texttt{source.seek(offset)}, resumes.
+\item On success every $K$ events: atomically saves
+  $(epoch{+}1,\ \mathtt{get\_offset}(),\ \mathtt{get\_state}())$.
+\end{enumerate}
+
+The key invariant is \emph{ordered commit}: flush sink before
+writing checkpoint; write checkpoint before committing source offset.
+Violated ordering creates either duplicates (checkpoint before flush)
+or gaps (offset before checkpoint).
+
+%%% ── 5. Table and Join ───────────────────────────────────────────────────
+\section{Table and Join}
+
+\begin{lstlisting}
+type ('k,'v) table = 'k -> 'v option
+
+let of_list pairs = Hashtbl.find_opt (Hashtbl.of_seq ...)
+let of_stream ~key src = fun k -> pump src; Hashtbl.find_opt h k
+\end{lstlisting}
+
+A table is a function. \texttt{Snapshot} tables call \texttt{pump}
+on each lookup to drain pending updates from an upstream stream.
+\texttt{lookup\_join} is a one-liner:
+
+\begin{lstlisting}
+let lookup_join (module K) ~from ~merge upstream =
+  emap (fun v -> merge v (from (K.key v))) upstream
+\end{lstlisting}
+
+\texttt{interval\_join} buffers both streams; events match when
+keys are equal and $|t_A - t_B| \leq \mathtt{window\_ms}$. The
+combined watermark is $\min(\mathtt{wm}_A,\, \mathtt{wm}_B)$.
+
+%%% ── 6. Retractions ──────────────────────────────────────────────────────
+\section{Retractions for Late Data}
+
+When a late \texttt{Data} arrives after a window has fired, the
+operator emits:
+\[
+  \mathtt{Retract}(v_\text{old},\, t) \;\to\; \mathtt{Data}(v_\text{new},\, t)
+\]
+
+Two aggregator strategies:
+
+\begin{description}
+\item[INVERTIBLE] $\mathtt{remove}(\mathtt{acc}, x)$ is defined.
+  Late data: $O(1)$ update via \texttt{add}/\texttt{remove}.
+  Examples: sum, count, average.
+\item[RECOMPUTE] No inverse. Late data triggers full recomputation
+  over the buffered event list: $O(n)$.
+  Examples: max, min, percentile.
+\end{description}
+
+Both strategies produce identical external behaviour: the downstream
+sees a \texttt{Retract}/\texttt{Data} pair and can perform an upsert.
+
+%%% ── 7. Orthogonal Runtime ───────────────────────────────────────────────
+\section{Orthogonal Runtime}
+
+Each production capability has three files:
+\texttt{foo.mli} (contract), \texttt{foo\_noop.ml} (zero-overhead stub),
+\texttt{foo\_default.ml} (production implementation).
+\texttt{runtime.ml} assembles them by \texttt{mode}:
+
+\begin{lstlisting}
+type mode = Noop | Log | Parallel | Prod
+
+(* Noop: zero overhead, for tests *)
+(* Log:  stderr metrics + SIGTERM handler *)
+(* Prod: Prometheus HTTP :9090 + shutdown + DLQ log *)
+\end{lstlisting}
+
+\textbf{Dead Letter Queue.} \texttt{safe\_decode} wraps every codec
+call; decode errors send the raw bytes to the DLQ with topic, error
+message, and timestamp instead of crashing the pipeline.
+
+\textbf{Graceful Shutdown.} A \texttt{guarded\_source} checks
+\texttt{is\_requested()} before each poll. On SIGTERM: source returns
+\texttt{None}, pipeline drains its buffer, sink flushes, process exits.
+
+\textbf{Prometheus Metrics.} \texttt{metrics\_log} implements
+counter, gauge, and histogram (7 buckets, $1\mu s$--$1s$) with
+thread-safe \texttt{Mutex}-protected state and a TCP HTTP server
+that serves the exposition text format on \texttt{GET /metrics}.
+
+%%% ── 8. Parallelism ──────────────────────────────────────────────────────
+\section{Parallelism}
+
+Data parallelism via key sharding: \texttt{hash(key) mod N} routes
+each event to a dedicated worker. Workers share no state — window
+correctness follows from the invariant that all events for a given
+key go to the same shard.
+
+\begin{table}[h]
+\centering
+\caption{Benchmark: 1M events, 1000 devices, tumbling 30s, OCaml~4, 1 CPU}
+\begin{tabular}{lrrr}
+\toprule
+Mode & ev/s & Time (s) & Speedup \\
+\midrule
+Sequential    & 209{,}293 & 4.78 & 1.00$\times$ \\
+1 worker      & 151{,}570 & 6.60 & 0.72$\times$ \\
+2 workers     & 405{,}775 & 2.46 & 1.94$\times$ \\
+4 workers     & 519{,}463 & 1.93 & 2.48$\times$ \\
+8 workers     & 599{,}988 & 1.67 & 2.87$\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The sub-linear speedup on 1 CPU is expected: OCaml~4's GIL prevents
+true parallelism, but channel-mediated pipelining hides latency.
+On OCaml~5 with \texttt{Domain}, channel overhead drops from
+$\sim$106\,ns (Mutex) to $\sim$30\,ns (Atomic), and real
+4-core parallelism is expected to yield $3.5$--$3.8\times$.
+
+%%% ── 9. Testing ──────────────────────────────────────────────────────────
+\section{Testing}
+
+\textbf{Harness.} A deterministic test context \texttt{('a,'b) t}
+feeds events via \texttt{push}/\texttt{push\_wm} and collects
+output via \texttt{run}. No broker, no threads, no wall clock.
+
+\textbf{Unit tests} (22): stream laws (map identity, filter
+composition, flat\_map count), watermark monotonicity, window
+correctness, dedup cooldown, enrich left-join semantics, rule
+thresholds, full pipeline integration.
+
+\textbf{Property tests} (7 × 100--500 cases via QCheck):
+
+\begin{enumerate}
+\item $\sum_w \mathtt{count}(w) = |\mathtt{input}|$
+  — window preserves all events.
+\item $\mathtt{dedup}(\mathtt{dedup}(s)) = \mathtt{dedup}(s)$
+  — dedup is idempotent.
+\item Watermarks are monotone for any event order.
+\item \texttt{enrich} preserves event count (left join).
+\item $\mathtt{critical} \Leftrightarrow \mathtt{speed} > 1.3 \times \mathtt{limit}$
+  — for all \texttt{float} pairs.
+\item \texttt{map} preserves event count.
+\item $|\mathtt{filter}(s)| \leq |s|$.
+\end{enumerate}
+
+%%% ── 10. Conclusion ──────────────────────────────────────────────────────
+\section{Conclusion}
+
+miniFlink demonstrates that the core semantics of Apache Flink —
+event time, watermarks, windowing, stateful operators, exactly-once,
+table/join, retractions, and production reliability layers — fit
+in $\sim$1200 lines of OCaml. Two design decisions proved most
+consequential:
+
+\begin{enumerate}
+\item The \texttt{KEYED} type class eliminates repeated key
+  extraction, making the pipeline read as a specification.
+\item The \texttt{(type a)} locally abstract type annotation in
+  \texttt{Pipe.window} avoids the recursive type $\alpha = \mathtt{string}
+  \times \alpha\ \mathtt{list}$ that otherwise requires \texttt{Obj.magic}.
+\end{enumerate}
+
+The OCaml module system's ability to accept modules as runtime values
+(first-class modules) is what makes both design decisions expressible
+without metaprogramming or code generation.
+
+\end{document}

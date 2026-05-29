@@ -16,3 +16,13 @@ _build/
 .merlin
 *.install
 /tmp/
+
+# Keep docs even if they match patterns above
+!docs/
+!docs/*
+docs/*.aux
+docs/*.log
+docs/*.out
+docs/*.toc
+docs/*.fls
+docs/*.fdb_latexmk
