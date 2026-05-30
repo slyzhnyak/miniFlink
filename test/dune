@@ -97,3 +97,9 @@
  (libraries miniflink)
  (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_window_validation))
+
+(test
+ (name test_invariants)
+ (libraries miniflink qcheck-core qcheck-core.runner qcheck)
+ (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
+ (modules test_invariants))
