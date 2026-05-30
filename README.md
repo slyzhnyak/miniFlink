@@ -265,12 +265,13 @@ Channel overhead: ~106 нс/msg (Mutex+Condition).
 API-документация генерируется через odoc:
 
 ```bash
-./gen_docs.sh        # → docs/api/index.html
+./gen_docs.sh        # → docs/api/index.html + docs/miniflink_api.pdf
 ```
 
 Открыть [docs/api/index.html](docs/api/index.html) — обзор архитектуры,
 ссылки на все модули, и [туториал](docs/api/tutorial.html) с пошаговым
-построением конвейера.
+построением конвейера. Тот же справочник единым файлом —
+[docs/miniflink_api.pdf](docs/miniflink_api.pdf) (41 стр., все модули).
 
 ## Связанные материалы
 

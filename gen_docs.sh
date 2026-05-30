@@ -45,4 +45,30 @@ done
 odoc support-files -o "$HTML" 2>/dev/null || true
 
 echo "Сгенерировано HTML: $(find "$HTML" -name '*.html' | wc -l) файлов"
-find "$HTML" -name "*.html" | sort
+
+# 6. PDF API-референс (склейка HTML-страниц через wkhtmltopdf).
+#    odoc latex-generate завязан на внутренний odoc.sty, которого нет
+#    в дистрибутиве — поэтому идём через HTML→PDF, это надёжнее.
+if command -v wkhtmltopdf >/dev/null && command -v pdfunite >/dev/null; then
+  PDFTMP=$(mktemp -d)
+  ORDER="index Stream Time Mf_event Keyed Table Pipe Codec Domain Rules Channel Parallel Checkpoint_parallel Runtime Harness"
+  i=0
+  for m in $ORDER; do
+    src="$HTML/$m/index.html"; [ "$m" = "index" ] && src="$HTML/index.html"
+    [ -f "$src" ] || continue
+    wkhtmltopdf --quiet --enable-local-file-access "$src" \
+      "$(printf "%s/%03d.pdf" "$PDFTMP" "$i")" >/dev/null 2>&1 && i=$((i+1))
+  done
+  # остальные модули (production-слои)
+  for d in "$HTML"/*/index.html; do
+    base=$(basename "$(dirname "$d")")
+    case " $ORDER " in *" $base "*) continue ;; esac
+    wkhtmltopdf --quiet --enable-local-file-access "$d" \
+      "$(printf "%s/%03d.pdf" "$PDFTMP" "$i")" >/dev/null 2>&1 && i=$((i+1))
+  done
+  pdfunite "$PDFTMP"/*.pdf docs/miniflink_api.pdf 2>/dev/null \
+    && echo "Сгенерирован PDF: docs/miniflink_api.pdf ($(pdfinfo docs/miniflink_api.pdf 2>/dev/null | awk '/Pages/{print $2}') стр.)"
+  rm -rf "$PDFTMP"
+else
+  echo "PDF пропущен (нужны wkhtmltopdf + pdfunite)"
+fi
