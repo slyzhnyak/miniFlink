@@ -132,6 +132,7 @@ let run_parallel
 
 let run_parallel_simple
     ?(sink_factory : (int -> ('b -> unit)) option)
+    ?(on_queue_depth : (int array -> unit) option)
     ~(workers  : int)
     ~(capacity : int)
     ~(key_of   : 'a -> string)
@@ -173,12 +174,23 @@ let run_parallel_simple
     ) ()
   ) in
 
+  let report_depth = match on_queue_depth with
+    | None -> (fun () -> ())
+    | Some f ->
+      let n = ref 0 in
+      (fun () ->
+        incr n;
+        (* прореживаем: раз в 64 события, чтобы не звать на каждом *)
+        if !n land 63 = 0 then
+          f (Array.map Channel.length in_chans))
+  in
   Stream.iter (fun ev ->
     match ev with
     | Mf_event.Data (v,_) ->
       let shard = hash_key (key_of v) workers in
       if not failed.(shard) then
-        ignore (Channel.try_push in_chans.(shard) ev)
+        ignore (Channel.try_push in_chans.(shard) ev);
+      report_depth ()
     | Mf_event.Watermark _ ->
       Array.iteri (fun i ch ->
         if not failed.(i) then ignore (Channel.try_push ch ev)) in_chans
