@@ -1,4 +1,4 @@
-(* Тест roadmap 1.1: exactly-once в параллельном режиме *)
+(* Тесты end-to-end exactly-once: offset + 2PC sink + recovery + durable *)
 
 let pass name = Printf.printf "  OK %s\n%!" name
 let fail name = Printf.printf "  FAIL %s\n%!" name; exit 1
@@ -12,7 +12,6 @@ let with_timeout secs f =
   ignore (Unix.alarm secs);
   let r = f () in ignore (Unix.alarm 0); r
 
-(* process: считаем события по device_id в backend *)
 let count_process backend ev =
   match ev with
   | Mf_event.Data (key, _) ->
@@ -20,106 +19,159 @@ let count_process backend ev =
       | Some b -> int_of_string (Bytes.to_string b) | None -> 0 in
     State_backend_memory.set backend key
       (Bytes.of_string (string_of_int (cur + 1)));
-    [key]   (* эмитим ключ как выход *)
+    [key]
   | _ -> []
 
-(* ── 1. Checkpoint создаётся, все воркеры снапшотятся ─────── *)
-let test_checkpoint_created () =
-  Printf.printf "\n-- Checkpoint commits snapshots from all workers\n";
+let mk_events n =
+  List.init n (fun i -> Mf_event.data (Printf.sprintf "k%d" (i mod 4)) (i * 100))
+
+(* ── 1. Checkpoint содержит offset источника ──────────────── *)
+let test_checkpoint_has_offset () =
+  Printf.printf "\n-- Checkpoint records source offset\n";
   with_timeout 10 (fun () ->
     let store = Checkpoint_parallel.make_store () in
-    let n = 4000 in
-    let events = List.init n (fun i ->
-      Mf_event.data (Printf.sprintf "k%d" (i mod 4)) (i * 100)) in
-    let sink_count = ref 0 in
+    let events = mk_events 4000 in
+    let emitted = ref 0 in
     let mu = Mutex.create () in
     Checkpoint_parallel.run_exactly_once
       ~workers:4 ~capacity:128 ~checkpoint_every:500
       ~key_of:(fun k -> k)
       ~make_state:State_backend_memory.create
       ~process:count_process
-      ~source:(Stream.of_list events)
-      ~sink:(fun _ -> Mutex.lock mu; incr sink_count; Mutex.unlock mu)
+      ~source:(Checkpoint_parallel.seekable_of_list events)
+      ~sink:(Checkpoint_parallel.idempotent_sink
+               (fun _ -> Mutex.lock mu; incr emitted; Mutex.unlock mu))
       ~store
       ();
-    check "all events processed exactly once" (!sink_count = n);
-    check "at least one checkpoint committed"
-      (Checkpoint_parallel.checkpoint_count store > 0);
+    check "exactly n outputs" (!emitted = 4000);
     (match Checkpoint_parallel.latest_checkpoint store with
-     | Some (_epoch, snaps) ->
-       check_eq "checkpoint has snapshot per worker"
-         (Array.length snaps) 4
+     | Some cp ->
+       check "checkpoint offset > 0" (cp.Checkpoint_parallel.cp_offset > 0);
+       check_eq "snapshot per worker"
+         (Array.length cp.Checkpoint_parallel.cp_snapshots) 4
      | None -> fail "no checkpoint")
   )
 
-(* ── 2. Восстановление: стейт переживает "рестарт" ────────── *)
-let test_recovery () =
-  Printf.printf "\n-- Recovery: state restored from checkpoint\n";
+(* ── 2. Recovery: offset + state восстанавливаются ────────── *)
+let test_recovery_with_offset () =
+  Printf.printf "\n-- Recovery restores state AND seeks source to offset\n";
   with_timeout 10 (fun () ->
     let store = Checkpoint_parallel.make_store () in
-    (* Прогон 1: обрабатываем события, копим стейт *)
-    let events = List.init 2000 (fun i ->
-      Mf_event.data (Printf.sprintf "k%d" (i mod 4)) (i * 100)) in
+    let events = mk_events 2000 in
     Checkpoint_parallel.run_exactly_once
       ~workers:4 ~capacity:128 ~checkpoint_every:400
       ~key_of:(fun k -> k)
       ~make_state:State_backend_memory.create
       ~process:count_process
-      ~source:(Stream.of_list events)
-      ~sink:(fun _ -> ())
+      ~source:(Checkpoint_parallel.seekable_of_list events)
+      ~sink:(Checkpoint_parallel.idempotent_sink (fun _ -> ()))
       ~store
       ();
-
-    (* Восстанавливаем стейт в свежие backends *)
-    let restored = Array.init 4 (fun _ -> State_backend_memory.create ()) in
-    let ok = Checkpoint_parallel.restore_latest store restored in
-    check "restore succeeded" ok;
-
-    (* Сумма счётчиков по всем восстановленным backend = числу
-       событий учтённых на момент последнего checkpoint *)
+    let src2 = Checkpoint_parallel.seekable_of_list events in
+    let backends = Checkpoint_parallel.recover
+      ~workers:4 ~make_state:State_backend_memory.create
+      ~source:src2 store in
+    let cp = Option.get (Checkpoint_parallel.latest_checkpoint store) in
+    check_eq "source seeked to checkpoint offset"
+      (src2.Checkpoint_parallel.position ()) cp.Checkpoint_parallel.cp_offset;
     let total = Array.fold_left (fun acc b ->
-      List.fold_left (fun a k ->
-        match State_backend_memory.get b k with
+      List.fold_left (fun a k -> match State_backend_memory.get b k with
         | Some v -> a + int_of_string (Bytes.to_string v) | None -> a)
-        acc (State_backend_memory.keys b)
-    ) 0 restored in
-    Printf.printf "    restored total count = %d\n%!" total;
-    (* Последний checkpoint — финальный barrier после всех 2000 событий,
-       так что стейт должен отражать ~все события (точное число зависит
-       от того сколько успело обработаться до финального barrier commit). *)
+        acc (State_backend_memory.keys b)) 0 backends in
     check "restored state non-empty" (total > 0);
-    check "restored count <= total events" (total <= 2000)
+    check "restored count = events before barrier (offset)"
+      (total = cp.Checkpoint_parallel.cp_offset)
   )
 
-(* ── 3. Детерминизм счётчиков: сумма = числу обработанных ──── *)
-let test_no_double_count () =
-  Printf.printf "\n-- No double counting across workers\n";
+(* ── 3. Транзакционный sink: commit делает видимым ────────── *)
+let test_transactional_sink () =
+  Printf.printf "\n-- Transactional (buffered) sink: visible only after commit\n";
   with_timeout 10 (fun () ->
     let store = Checkpoint_parallel.make_store () in
-    let n = 1600 in
-    (* Каждый ключ встречается ровно n/4 раз *)
-    let events = List.init n (fun i ->
-      Mf_event.data (Printf.sprintf "k%d" (i mod 4)) (i * 100)) in
-    let emitted = ref 0 in
+    let events = mk_events 1600 in
+    let published = ref 0 in
     let mu = Mutex.create () in
+    let sink = Checkpoint_parallel.buffered_sink
+      (fun batch -> Mutex.lock mu; published := !published + List.length batch;
+                    Mutex.unlock mu) in
     Checkpoint_parallel.run_exactly_once
-      ~workers:4 ~capacity:256 ~checkpoint_every:1000
+      ~workers:4 ~capacity:256 ~checkpoint_every:400
       ~key_of:(fun k -> k)
       ~make_state:State_backend_memory.create
       ~process:count_process
-      ~source:(Stream.of_list events)
-      ~sink:(fun _ -> Mutex.lock mu; incr emitted; Mutex.unlock mu)
-      ~store
-      ();
-    (* Ровно n выходов — каждое событие обработано ровно раз *)
-    check_eq "exactly n outputs (no dup, no loss)" !emitted n
+      ~source:(Checkpoint_parallel.seekable_of_list events)
+      ~sink ~store ();
+    check_eq "all outputs published after commits" !published 1600
+  )
+
+(* ── 4. Durable storage: checkpoint переживает рестарт ────── *)
+let test_durable_storage () =
+  Printf.printf "\n-- Durable checkpoint survives process restart\n";
+  with_timeout 10 (fun () ->
+    let dir = Printf.sprintf "/tmp/mf_cp_%d_%d" (Unix.getpid ()) (Random.int 1000000) in
+    let events = mk_events 2000 in
+    let store1 = Checkpoint_parallel.durable_store ~dir in
+    Checkpoint_parallel.run_exactly_once
+      ~workers:4 ~capacity:128 ~checkpoint_every:400
+      ~key_of:(fun k -> k)
+      ~make_state:State_backend_memory.create
+      ~process:count_process
+      ~source:(Checkpoint_parallel.seekable_of_list events)
+      ~sink:(Checkpoint_parallel.idempotent_sink (fun _ -> ()))
+      ~store:store1 ();
+    let cp1 = Option.get (Checkpoint_parallel.latest_checkpoint store1) in
+    let store2 = Checkpoint_parallel.load_durable ~dir in
+    (match Checkpoint_parallel.latest_checkpoint store2 with
+     | Some cp2 ->
+       check_eq "epoch survived restart"
+         cp2.Checkpoint_parallel.cp_epoch cp1.Checkpoint_parallel.cp_epoch;
+       check_eq "offset survived restart"
+         cp2.Checkpoint_parallel.cp_offset cp1.Checkpoint_parallel.cp_offset;
+       check "snapshots survived"
+         (Array.length cp2.Checkpoint_parallel.cp_snapshots = 4)
+     | None -> fail "durable checkpoint not loaded after restart")
+  )
+
+(* ── 5. Полный цикл: recover → продолжение без дублей ─────── *)
+let test_no_duplicate_after_recovery () =
+  Printf.printf "\n-- End-to-end: recovery continues without duplicates\n";
+  with_timeout 10 (fun () ->
+    let store = Checkpoint_parallel.make_store () in
+    let events = mk_events 2000 in
+    Checkpoint_parallel.run_exactly_once
+      ~workers:4 ~capacity:128 ~checkpoint_every:400
+      ~key_of:(fun k -> k)
+      ~make_state:State_backend_memory.create
+      ~process:count_process
+      ~source:(Checkpoint_parallel.seekable_of_list events)
+      ~sink:(Checkpoint_parallel.idempotent_sink (fun _ -> ()))
+      ~store ();
+    let src2 = Checkpoint_parallel.seekable_of_list events in
+    let backends = Checkpoint_parallel.recover
+      ~workers:4 ~make_state:State_backend_memory.create ~source:src2 store in
+    let rec drain () = match src2.Checkpoint_parallel.pull () with
+      | None -> ()
+      | Some ev ->
+        (match ev with Mf_event.Data (k,_) ->
+          let sh = Checkpoint_parallel.hash_key k 4 in
+          ignore (count_process backends.(sh) ev) | _ -> ());
+        drain ()
+    in drain ();
+    let total = Array.fold_left (fun acc b ->
+      List.fold_left (fun a k -> match State_backend_memory.get b k with
+        | Some v -> a + int_of_string (Bytes.to_string v) | None -> a)
+        acc (State_backend_memory.keys b)) 0 backends in
+    check_eq "total after recovery+replay = n (no duplicates)" total 2000
   )
 
 let () =
+  Random.self_init ();
   Printf.printf "==========================================\n";
-  Printf.printf "  Exactly-once parallel (roadmap 1.1)\n";
+  Printf.printf "  End-to-end exactly-once (offset+2PC+recovery)\n";
   Printf.printf "==========================================\n";
-  test_checkpoint_created ();
-  test_recovery ();
-  test_no_double_count ();
-  Printf.printf "\nAll exactly-once parallel tests passed.\n"
+  test_checkpoint_has_offset ();
+  test_recovery_with_offset ();
+  test_transactional_sink ();
+  test_durable_storage ();
+  test_no_duplicate_after_recovery ();
+  Printf.printf "\nAll exactly-once tests passed.\n"

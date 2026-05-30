@@ -145,6 +145,7 @@ Channel overhead: ~106 нс/msg (Mutex+Condition).
 | Unit + Property тесты       | ✓ 29 тестов, 1400 QCheck      |
 | Schema evolution            | stub → schema_default.ml      |
 | Exactly-once parallel       | ✓ реализовано (barrier + snapshot) |
+| Exactly-once end-to-end     | ✓ offset + 2PC sink + recovery + durable |
 | Persistent state (RocksDB)  | ✓ реализовано (C FFI, librocksdb) |
 | MQTT adapter                | ✓ в miniflink/ (C FFI)        |
 | Kafka adapter               | ✓ в miniflink/ (C FFI)        |
@@ -154,24 +155,22 @@ Channel overhead: ~106 нс/msg (Mutex+Condition).
 Честный список того что {b пока не реализовано}, в порядке приоритета.
 Если чего-то нет в коде — оно здесь, не нужно искать. Двигаемся сверху вниз.
 
-### Приоритет 1 — замкнуть end-to-end exactly-once
+### Приоритет 1 — замкнуть end-to-end exactly-once ✓ ГОТОВО
 
-- [ ] **Source offset в checkpoint.** Снапшот сохраняет стейт операторов,
-  но не позицию чтения источника. Из-за этого после рестарта неоткуда
-  узнать откуда продолжать — возможны дубли/пропуски. Нужно: связать
-  стейт и offset в одну атомарную запись (commit offset только после
-  успешного checkpoint).
-- [ ] **Транзакционный / идемпотентный sink.** Сейчас выход at-least-once:
-  при переобработке после сбоя результаты могут записаться повторно.
-  Два пути: (а) идемпотентная запись через детерминированный ключ +
-  upsert — дёшево, покрывает большинство; (б) 2PC через barrier
-  (`prepare_commit` / `commit` / `abort`) для Kafka/БД — мощнее, дороже.
-- [ ] **Протокол холодного старта после сбоя.** Единый путь: прочитать
-  последний валидный checkpoint → восстановить стейт → перемотать
-  источник → продолжить.
-- [ ] **Checkpoint на durable-хранилище.** Сейчас RocksDB на локальном
-  диске — умирает вместе с сервером. Возможность писать снапшоты на
-  сетевой том / объектное хранилище.
+- [x] **Source offset в checkpoint.** Checkpoint хранит `cp_offset` —
+  число обработанных событий, согласованное со снапшотами стейта
+  (offset = сумма processed по воркерам на момент barrier, не позиция
+  dispatcher — иначе рассинхрон со стейтом).
+- [x] **Транзакционный / идемпотентный sink.** `idempotent_sink`
+  (upsert по детерминированному ключу) и `buffered_sink` (2PC: pre-commit
+  буфер → publish на commit epoch → flush хвоста при завершении).
+  Commit привязан к фиксации checkpoint через barrier.
+- [x] **Протокол холодного старта.** `recover`: прочитать последний
+  checkpoint → восстановить стейт воркеров → перемотать источник на
+  `cp_offset` → продолжить. Переобработка хвоста не создаёт дублей.
+- [x] **Checkpoint на durable-хранилище.** `durable_store ~dir` пишет
+  каждый checkpoint на диск + атомарный указатель `LATEST` через rename;
+  `load_durable ~dir` поднимает последний после рестарта процесса.
 
 ### Приоритет 2 — операционная зрелость
 
