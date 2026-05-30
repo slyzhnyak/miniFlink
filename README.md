@@ -146,6 +146,10 @@ Channel overhead: ~106 нс/msg (Mutex+Condition).
 | Schema evolution            | stub → schema_default.ml      |
 | Exactly-once parallel       | ✓ реализовано (barrier + snapshot) |
 | Exactly-once end-to-end     | ✓ offset + 2PC sink + recovery + durable |
+| Структурированные логи (JSON) | ✓ Log (событие+sink, назначение — за приложением) |
+| Health/readiness            | ✓ Health.check (структура, не сервер) |
+| Queue depth                 | ✓ хук on_queue_depth в parallel |
+| Конфигурация                | ✓ Config (типизированная запись + validate) |
 | Persistent state (RocksDB)  | ✓ реализовано (C FFI, librocksdb) |
 | MQTT adapter                | ✓ в miniflink/ (C FFI)        |
 | Kafka adapter               | ✓ в miniflink/ (C FFI)        |
@@ -172,16 +176,27 @@ Channel overhead: ~106 нс/msg (Mutex+Condition).
   каждый checkpoint на диск + атомарный указатель `LATEST` через rename;
   `load_durable ~dir` поднимает последний после рестарта процесса.
 
-### Приоритет 2 — операционная зрелость
+### Приоритет 2 — операционная зрелость ✓ ГОТОВО
 
-- [ ] **Структурированное логирование (JSON).** Сейчас диагностика через
-  текстовый stderr. Нужны поля: timestamp, event_id, pipeline, level.
-- [ ] **Health/readiness HTTP endpoint.** `/health` (liveness),
-  `/state/size` для мониторинга. `/metrics` уже есть.
-- [ ] **Глубина очереди каналов в метриках.** Watermark lag и счётчики
-  событий есть; не хватает queue depth (ранний сигнал backpressure).
-- [ ] **Внешняя конфигурация (YAML/JSON).** Параметры (число воркеров,
-  интервал checkpoint, пути, таймауты) сейчас зашиты в код.
+Реализовано с соблюдением границы библиотека/приложение: библиотека
+даёт {b механизмы} (структуры, хуки, значения), а решения про I/O
+(HTTP-порт, файлы конфига) остаются приложению.
+
+- [x] **Структурированное логирование (JSON).** Модуль `Log`: события
+  с уровнем, сообщением, полями. Куда писать — задаёт приложение через
+  `Log.set_sink` (по умолчанию JSON в stderr). Библиотека решает {e что}
+  залогировать, приложение — {e куда}.
+- [x] **Health как структура.** `Health.check` собирает статус
+  (readiness, размер стейта, watermark lag, queue depth) из замыканий
+  приложения и отдаёт запись + `to_json`. Поднять `/health` endpoint —
+  дело приложения (не тянем HTTP-стек в библиотеку).
+- [x] **Глубина очереди каналов.** Хук `?on_queue_depth` в
+  `run_parallel_simple`: dispatcher сообщает глубины входных каналов
+  по воркерам (раннее предупреждение о backpressure). Что делать с
+  числом — решает вызывающий.
+- [x] **Конфигурация как типизированная запись.** Модуль `Config`:
+  тип настроек + дефолты + `validate`. Откуда читать (YAML/env/CLI) —
+  дело приложения; библиотека не парсит файлы, принимает значение.
 
 ### Приоритет 3 — надёжность под нагрузкой
 
