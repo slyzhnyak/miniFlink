@@ -292,8 +292,9 @@ let run_exactly_once
          Channel.close in_chans.(i);
          (* Откатываем незакоммиченные выходы текущего epoch этого воркера *)
          sink.ts_abort (Atomic.get current_epoch);
-         Printf.eprintf "[checkpoint] worker %d crashed: %s\n%!"
-           i (Printexc.to_string e))
+         Log.error ~fields:[("worker", string_of_int i);
+                            ("error", Printexc.to_string e)]
+           "checkpoint worker crashed")
     ) ()
   ) in
 
@@ -409,10 +410,12 @@ let recover ~workers ~make_state ~(source : 'a seekable_source) store
   (match restore_latest store backends with
    | Some off ->
      source.seek off;
-     Printf.eprintf "[recover] restored from epoch %d, source seek to offset %d\n%!"
-       (match latest_checkpoint store with Some c -> c.cp_epoch | None -> 0) off
+     Log.info ~fields:[
+       ("epoch", string_of_int (match latest_checkpoint store with Some c -> c.cp_epoch | None -> 0));
+       ("offset", string_of_int off)]
+       "recovered from checkpoint, source seeked"
    | None ->
-     Printf.eprintf "[recover] no checkpoint, cold start from offset 0\n%!");
+     Log.info "no checkpoint, cold start from offset 0");
   backends
 
 (* ── Durable checkpoint storage ──────────────────────────── *)

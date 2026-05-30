@@ -81,7 +81,7 @@ let make_shutdown mode =
   (match mode with
    | Log | Prod ->
      Shutdown_default.register ~on_shutdown:(fun () ->
-       Printf.eprintf "[runtime] shutdown requested, draining...\n%!";
+       Log.info "shutdown requested, draining";
        running := false)
    | _ -> ());
   running,
@@ -159,7 +159,7 @@ let run ?(label="default") cfg
   flush_dlq ();
   let n = count_dlq () in
   if n > 0 then
-    Printf.eprintf "[runtime:%s] done. DLQ: %d messages\n%!" label n
+    Log.info ~fields:[("pipeline", label); ("dlq_messages", string_of_int n)] "pipeline done"
 
 (* ── Codec-aware source with DLQ ────────────────────────── *)
 

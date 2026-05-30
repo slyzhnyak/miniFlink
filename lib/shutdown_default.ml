@@ -13,12 +13,12 @@ let is_requested () = !requested
 
 let register ~on_shutdown =
   Sys.set_signal Sys.sigterm (Sys.Signal_handle (fun _ ->
-    Printf.eprintf "[shutdown] SIGTERM received, draining...\n%!";
+    Log.warn ~fields:[("signal","SIGTERM")] "shutdown signal received, draining";
     on_shutdown ();
     request ()
   ));
   Sys.set_signal Sys.sigint (Sys.Signal_handle (fun _ ->
-    Printf.eprintf "[shutdown] SIGINT received, draining...\n%!";
+    Log.warn ~fields:[("signal","SIGINT")] "shutdown signal received, draining";
     on_shutdown ();
     request ()
   ))
