@@ -24,14 +24,15 @@ let decode t b =
     let ver     = (Char.code (Bytes.get b 0) lsl 8)
                   lor Char.code (Bytes.get b 1) in
     let payload = Bytes.sub b 2 (Bytes.length b - 2) in
-    let migrated =
-      if ver = t.ver then payload
-      else match t.migrate with
-        | None   ->
-          (* Попробуем декодировать как есть — для обратной совместимости *)
-          payload
-        | Some f -> f ver payload
-    in
-    t.dec migrated
+    if ver = t.ver then t.dec payload
+    else match t.migrate with
+      | Some f -> t.dec (f ver payload)
+      | None ->
+        (* Неизвестная версия и нет миграции — это НЕ тихий проброс.
+           Молча декодировать payload чужой версии = риск порчи данных.
+           Явная ошибка: вызывающий узнает что схема рассинхронизирована. *)
+        Error (Printf.sprintf
+          "unknown schema version %d (current %d), no migration provided"
+          ver t.ver)
 
 let current_version t = t.ver
