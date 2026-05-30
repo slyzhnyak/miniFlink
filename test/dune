@@ -119,5 +119,11 @@
 (test
  (name test_health_config)
  (libraries miniflink)
- (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
+ (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_health_config))
+
+(test
+ (name test_retry)
+ (libraries miniflink str)
+ (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
+ (modules test_retry))
