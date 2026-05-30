@@ -79,3 +79,15 @@
  (libraries miniflink unix)
  (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_rocksdb))
+
+(test
+ (name test_codec)
+ (libraries miniflink qcheck-core qcheck-core.runner qcheck)
+ (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
+ (modules test_codec))
+
+(test
+ (name test_channel)
+ (libraries miniflink threads.posix unix)
+ (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
+ (modules test_channel))

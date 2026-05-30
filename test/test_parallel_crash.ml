@@ -45,8 +45,16 @@ let test_worker_crash_no_deadlock () =
 
     (* Если дошли сюда без таймаута — deadlock не случился *)
     pass "completed without deadlock";
-    (* Воркер key_3 упал, но остальные 7 обработали свои события *)
-    if !processed > 0 then pass (Printf.sprintf "other workers processed %d events" !processed)
+    (* Воркер key_3 упал, но остальные 7 обработали свои события.
+       Ключи раскиданы по i mod 8 — упал ровно 1 шард из 8, значит
+       ~7/8 событий должны дойти. Проверяем что выжило большинство,
+       а не просто >0 (иначе тест прошёл бы даже если упали 7 из 8). *)
+    let expected_min = n * 6 / 8 in   (* запас: минимум 6/8 *)
+    if !processed >= expected_min then
+      pass (Printf.sprintf "survivors processed %d events (>= %d expected)" !processed expected_min)
+    else if !processed > 0 then
+      fail (Printf.sprintf "too few survived: %d (expected >= %d) — more workers died than the one crash"
+              !processed expected_min)
     else fail "no events processed at all"
   )
 
