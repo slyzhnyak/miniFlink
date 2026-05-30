@@ -217,12 +217,25 @@ let collect stream =
     | Mf_event.Data (v,_) -> v :: acc | _ -> acc) [] stream)
 
 (* ── Shorthand: seconds / minutes в операторах ───────────── *)
-(** Неперекрывающиеся окна фиксированного размера. *)
-let tumbling size = Tumbling size
+(** Неперекрывающиеся окна фиксированного размера [size] (> 0).
+    @raise Invalid_argument если [size <= 0]. *)
+let tumbling size =
+  if size <= 0 then
+    invalid_arg "Pipe.tumbling: размер окна должен быть > 0";
+  Tumbling size
 
 (** Перекрывающиеся окна: [sliding size step] — окна размера [size]
-    с шагом [step] (при [step < size] окна перекрываются). *)
-let sliding  size step = Sliding (size, step)
+    с шагом [step] (при [step < size] окна перекрываются).
+    @raise Invalid_argument если [size <= 0] или [step <= 0].
+    Замечание: при [step > size] между окнами образуются «дыры» —
+    события в них не попадут ни в одно окно. Это допустимо (downsampling),
+    но обычно непреднамеренно; следи за соотношением осознанно. *)
+let sliding size step =
+  if size <= 0 then
+    invalid_arg "Pipe.sliding: размер окна должен быть > 0";
+  if step <= 0 then
+    invalid_arg "Pipe.sliding: шаг окна должен быть > 0";
+  Sliding (size, step)
 
 (* ── Instrumented operators ──────────────────────────────── *)
 (* Версии операторов с метриками — используются в runtime *)
