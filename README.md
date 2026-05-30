@@ -253,4 +253,5 @@ API-документация генерируется через odoc:
 
 - [Техническая статья (PDF)](docs/miniflink_article.pdf)
 - [Популярная статья (Markdown)](docs/miniflink_popular.md)
+- [**Exactly-once: глубокий разбор** (Markdown)](docs/exactly_once.md) — почему трудно, как ломается, как сделано
 - [Сравнение OCaml vs Go vs TypeScript (PDF)](docs/ocaml_vs_go_ts.pdf) / [Markdown](docs/ocaml_vs_go_ts.md)

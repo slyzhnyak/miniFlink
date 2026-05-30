@@ -263,9 +263,43 @@ trivial here since each worker has a single input channel). Because
 key-sharding routes each key to exactly one worker, a committed
 checkpoint is a consistent cut with no cross-worker double-counting.
 
-This covers operator-state exactly-once within the engine. End-to-end
-exactly-once across an external source/sink (source-offset coordination
-plus transactional sink commit) is a deliberate non-goal.
+\textbf{The offset-consistency pitfall.} The source offset stored in a
+checkpoint must be \emph{consistent with the snapshotted state}. The
+obvious implementation — record the dispatcher's source position at
+barrier injection — is subtly wrong: the dispatcher reads ahead of what
+workers have processed, so it may record \texttt{offset=2000} while the
+snapshots reflect only 1900 processed events (the other 100 still in
+flight in channels). On recovery the source would seek to 2000 and those
+100 events would be lost — neither in state nor replayed. The fix: the
+offset is the \emph{sum of per-worker processed counts captured at the
+barrier}, taken in the same instant as each snapshot. Offset and state
+are then consistent by construction; the discrepancy is physically
+impossible. This bug passed functional tests and surfaced only under a
+consistency check (offset must equal restored state count) — a concrete
+illustration of why exactly-once demands invariant testing, not just
+``does it work'' testing.
+
+\textbf{Transactional output.} State-side exactly-once is not enough:
+replaying the tail after recovery re-runs events through the sink.
+miniFlink offers two paths. \emph{Idempotent}: results carry a
+deterministic key and the sink upserts — a replay overwrites with the
+same value, harmless, no transactions needed (ideal when the output is
+``state'' rather than an event log). \emph{Two-phase commit}: results are
+written to a per-epoch pre-commit buffer, made visible by
+\texttt{ts\_commit} only when that epoch's checkpoint commits, and
+rolled back by \texttt{ts\_abort} on failure — bound to the same barrier
+that commits state. 2PC fits only sinks that separate write from
+visibility (Kafka transactions, RDBMS, file staging+rename); for HTTP or
+notifications, idempotency is the only option. A final \texttt{ts\_flush}
+publishes the post-last-barrier tail at clean shutdown.
+
+Together — consistent snapshot, offset = $\Sigma$ processed, durable
+checkpoint store (atomic \texttt{rename} of a \texttt{LATEST} pointer),
+recovery that seeks the source, and a transactional/idempotent sink —
+these close end-to-end exactly-once on a single node. A dedicated
+deep-dive is in \texttt{docs/exactly\_once.md}. Coordinating a real
+external source/sink (Kafka \texttt{transactional.id}) and multi-input
+barrier alignment remain out of scope.
 
 %%% ── 5. Table and Join ───────────────────────────────────────────────────
 \section{Table and Join}
