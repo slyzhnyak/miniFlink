@@ -238,6 +238,70 @@ let count_tumbling n = CountTumbling n
 (** Count-sliding: окно из [n] событий с шагом [step]. *)
 let count_sliding n step = CountSliding (n, step)
 
+(* ── Global window + custom triggers ──────────────────────── *)
+
+(** Решение триггера при поступлении события. *)
+type trigger_action =
+  | Continue        (** копить дальше *)
+  | Fire            (** эмитить окно, оставить накопленное (накопительно) *)
+  | FireAndPurge    (** эмитить окно и сбросить буфер *)
+
+(** Триггер: чистая функция от (число накопленных, последнее значение) к
+    решению. Отделяет политику «когда фаерить» от группировки. *)
+type 'a trigger = count:int -> last:'a -> trigger_action
+
+(** Триггер «каждые n событий». *)
+let trigger_count n : 'a trigger =
+  fun ~count ~last:_ -> if count >= n then FireAndPurge else Continue
+
+(** Триггер по предикату: фаерит когда событие удовлетворяет условию
+    (например тревожное значение → ранняя эмиссия). *)
+let trigger_on_value (pred : 'a -> bool) : 'a trigger =
+  fun ~count:_ ~last -> if pred last then Fire else Continue
+
+(** [global_window (module K) ~trigger upstream] держит {e одно} окно на
+    ключ (без временных/количественных границ) и фаерит его когда скажет
+    [trigger]. Основа, на которой через триггеры строятся другие политики:
+    assigner (одно окно) отделён от trigger (когда эмитить).
+
+    [Fire] эмитит накопленное не очищая (накопительный результат);
+    [FireAndPurge] эмитит и сбрасывает. На конце потока непустой остаток
+    эмитится. *)
+let global_window
+    (type a)
+    (module K : Keyed.S with type t = a)
+    ~(trigger : a trigger)
+    (upstream : a Mf_event.t Stream.t)
+    : (string * a list) Mf_event.t Stream.t =
+  let buffers : (string, a list) Hashtbl.t = Hashtbl.create 16 in
+  let out : (string * a list) Mf_event.t Queue.t = Queue.create () in
+  let get k = match Hashtbl.find_opt buffers k with Some b -> b | None -> [] in
+  fun () ->
+    let rec pull () =
+      if not (Queue.is_empty out) then Some (Queue.pop out) else
+      match upstream () with
+      | None ->
+        Hashtbl.iter (fun k buf ->
+          if buf <> [] then Queue.push (Mf_event.data (k, List.rev buf) 0) out
+        ) buffers;
+        Hashtbl.reset buffers;
+        if Queue.is_empty out then None else Some (Queue.pop out)
+      | Some (Mf_event.Watermark wm) -> Some (Mf_event.wm wm)
+      | Some (Mf_event.Retract _) -> pull ()
+      | Some (Mf_event.Data (v, _)) ->
+        let k = K.key v in
+        let buf = v :: get k in
+        (match trigger ~count:(List.length buf) ~last:v with
+         | Continue -> Hashtbl.replace buffers k buf
+         | Fire ->
+           Queue.push (Mf_event.data (k, List.rev buf) 0) out;
+           Hashtbl.replace buffers k buf      (* накопительно *)
+         | FireAndPurge ->
+           Queue.push (Mf_event.data (k, List.rev buf) 0) out;
+           Hashtbl.replace buffers k []);     (* сброс *)
+        pull ()
+    in pull ()
+
 (* ── Session windows (с слиянием) ─────────────────────────── *)
 
 (* Сессия одного ключа: интервал [start, last] + накопленные значения.
