@@ -238,6 +238,99 @@ let count_tumbling n = CountTumbling n
 (** Count-sliding: окно из [n] событий с шагом [step]. *)
 let count_sliding n step = CountSliding (n, step)
 
+(* ── Session windows (с слиянием) ─────────────────────────── *)
+
+(* Сессия одного ключа: интервал [start, last] + накопленные значения.
+   gap определяет когда сессии сливаются и когда закрываются. *)
+type 'a session = {
+  s_start : int;          (* начало (мин. ts) *)
+  s_last  : int;          (* конец (макс. ts) *)
+  s_vals  : (int * 'a) list;  (* (ts, value), для слияния по времени *)
+}
+
+(** [session_window (module K) ~gap upstream] группирует события по ключу
+    [K.key] в {e сессии} — периоды активности, разделённые паузами больше
+    [gap]. В отличие от tumbling/sliding границы {e динамические}: сессия
+    растёт пока приходят события в пределах [gap], и {b сливается} с
+    соседней если новое событие перекрывает разрыв между ними.
+
+    Это ломает допущение «окно = чистая функция от timestamp» (которое
+    держит tumbling/sliding): сессия зависит от {e последовательности}
+    событий, а не только от их времени. Поэтому это отдельный оператор
+    со своим состоянием и логикой слияния.
+
+    Сессия закрывается (эмитится [(key, vs)]) когда watermark проходит
+    [last + gap] — позже события уже не могут её продлить. На конце потока
+    все открытые сессии закрываются.
+    @raise Invalid_argument при [gap <= 0]. *)
+let session_window
+    (type a)
+    (module K : Keyed.S with type t = a)
+    ~(gap : int)
+    (upstream : a Mf_event.t Stream.t)
+    : (string * a list) Mf_event.t Stream.t =
+  if gap <= 0 then invalid_arg "session_window: gap должен быть > 0";
+  (* активные сессии на ключ (список, обычно 1-2 штуки) *)
+  let sessions : (string, a session list) Hashtbl.t = Hashtbl.create 16 in
+  let out : (string * a list) Mf_event.t Queue.t = Queue.create () in
+
+  (* добавить событие в сессии ключа, выполнив слияние при необходимости *)
+  let add_event k ts v =
+    let cur = match Hashtbl.find_opt sessions k with Some s -> s | None -> [] in
+    (* новое «точечное» окно события *)
+    let ev_session = { s_start = ts; s_last = ts; s_vals = [(ts, v)] } in
+    (* сессия пересекается с событием если событие в пределах gap от неё:
+       [s_start - gap, s_last + gap] *)
+    let overlaps s =
+      ts >= s.s_start - gap && ts <= s.s_last + gap in
+    let (touched, untouched) = List.partition overlaps cur in
+    (* сливаем все затронутые + новое событие в одну сессию *)
+    let merged = List.fold_left (fun acc s ->
+      { s_start = min acc.s_start s.s_start;
+        s_last  = max acc.s_last s.s_last;
+        s_vals  = s.s_vals @ acc.s_vals })
+      ev_session touched in
+    Hashtbl.replace sessions k (merged :: untouched)
+  in
+
+  (* закрыть сессии ключа, у которых last + gap <= wm *)
+  let close_ready wm =
+    Hashtbl.iter (fun k sess ->
+      let (ready, still) = List.partition (fun s -> s.s_last + gap <= wm) sess in
+      List.iter (fun s ->
+        (* значения в порядке времени *)
+        let vs = List.sort (fun (a,_) (b,_) -> compare a b) s.s_vals
+                 |> List.map snd in
+        Queue.push (Mf_event.data (k, vs) s.s_last) out) ready;
+      if still = [] then Hashtbl.remove sessions k
+      else Hashtbl.replace sessions k still
+    ) (Hashtbl.copy sessions)
+  in
+
+  fun () ->
+    let rec pull () =
+      if not (Queue.is_empty out) then Some (Queue.pop out) else
+      match upstream () with
+      | None ->
+        (* конец потока: закрыть все открытые сессии *)
+        Hashtbl.iter (fun k sess ->
+          List.iter (fun s ->
+            let vs = List.sort (fun (a,_) (b,_) -> compare a b) s.s_vals
+                     |> List.map snd in
+            Queue.push (Mf_event.data (k, vs) s.s_last) out) sess
+        ) sessions;
+        Hashtbl.reset sessions;
+        if Queue.is_empty out then None else Some (Queue.pop out)
+      | Some (Mf_event.Watermark wm) ->
+        close_ready wm;
+        Queue.push (Mf_event.wm wm) out;
+        pull ()
+      | Some (Mf_event.Retract _) -> pull ()
+      | Some (Mf_event.Data (v, t)) ->
+        add_event (K.key v) t v;
+        pull ()
+    in pull ()
+
 (* ── Stateful ─────────────────────────────────────────────── *)
 
 let stateful ~init ~f upstream =
