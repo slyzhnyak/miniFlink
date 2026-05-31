@@ -28,6 +28,27 @@ let pipeline source =
 ```
 
 `key_by` спрятан в `window` через type class `KEYED` — ключ описывается один раз в типе.
+
+Тот же конвейер как поток данных:
+
+```mermaid
+flowchart TD
+    SRC(["source: телеметрия"]) --> WM["with_watermarks<br/><i>latency 3s — граница опоздавших</i>"]
+    DEV[("devices<br/>таблица")] -.-> ENR
+    WM --> ENR["enrich<br/><i>обогащение из справочника</i>"]
+    ENR --> WIN["window · tumbling 30s<br/><i>группировка по ключу и времени</i>"]
+    WIN --> AGG["aggregate<br/><i>Rules.compute</i>"]
+    AGG --> RUL["flat_map<br/><i>Rules.check — правила → алерты</i>"]
+    RUL --> DED["dedup<br/><i>cooldown 5 мин — подавление повторов</i>"]
+    DED --> SINK(["sink: алерты"])
+
+    classDef op fill:#1e293b,stroke:#475569,color:#e2e8f0;
+    classDef io fill:#0f766e,stroke:#134e4a,color:#fff;
+    classDef tbl fill:#7c2d12,stroke:#431407,color:#fff;
+    class WM,ENR,WIN,AGG,RUL,DED op;
+    class SRC,SINK io;
+    class DEV tbl;
+```
 Смена формата (JSON → Protobuf) — одна строка в codec. Pipeline не меняется.
 
 ## Структура
