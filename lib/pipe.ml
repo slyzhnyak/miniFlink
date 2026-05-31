@@ -293,6 +293,9 @@ let global_window
     (upstream : a Mf_event.t Stream.t)
     : (string * a list) Mf_event.t Stream.t =
   let buffers : (string, a list) Hashtbl.t = Hashtbl.create 16 in
+  (* множество ключей, чей буфер уже эмитирован и НЕ менялся с тех пор
+     (нет новых данных). На конце потока такие не эмитим повторно. *)
+  let clean : (string, unit) Hashtbl.t = Hashtbl.create 16 in
   let out : (string * a list) Mf_event.t Queue.t = Queue.create () in
   let get k = match Hashtbl.find_opt buffers k with Some b -> b | None -> [] in
   fun () ->
@@ -300,8 +303,12 @@ let global_window
       if not (Queue.is_empty out) then Some (Queue.pop out) else
       match upstream () with
       | None ->
+        (* конец потока: эмитим только непустые буферы, в которых есть
+           НЕ-эмитированные данные (не помечены clean). Это убирает дубль
+           когда последним действием был Fire без новых событий после него. *)
         Hashtbl.iter (fun k buf ->
-          if buf <> [] then Queue.push (Mf_event.data (k, List.rev buf) 0) out
+          if buf <> [] && not (Hashtbl.mem clean k) then
+            Queue.push (Mf_event.data (k, List.rev buf) 0) out
         ) buffers;
         Hashtbl.reset buffers;
         if Queue.is_empty out then None else Some (Queue.pop out)
@@ -309,15 +316,17 @@ let global_window
       | Some (Mf_event.Retract _) -> pull ()
       | Some (Mf_event.Data (v, _)) ->
         let k = K.key v in
+        Hashtbl.remove clean k;             (* новые данные → буфер «грязный» *)
         let buf = v :: get k in
         (match trigger ~count:(List.length buf) ~last:v with
          | Continue -> Hashtbl.replace buffers k buf
          | Fire ->
            Queue.push (Mf_event.data (k, List.rev buf) 0) out;
-           Hashtbl.replace buffers k buf      (* накопительно *)
+           Hashtbl.replace buffers k buf;     (* накопительно *)
+           Hashtbl.replace clean k ()         (* эмитировано, новых нет *)
          | FireAndPurge ->
            Queue.push (Mf_event.data (k, List.rev buf) 0) out;
-           Hashtbl.replace buffers k []);     (* сброс *)
+           Hashtbl.replace buffers k []);     (* сброс — буфер пуст, не эмитится *)
         pull ()
     in pull ()
 

@@ -63,10 +63,10 @@ let () =
   |> count_windows "Session gap 20с (по активности) — две сессии: до паузы и после:";
 
   (* global + триггер: фаерить когда зашли в корзину.
-     Fire накопительный (не очищает буфер), поэтому на конце потока
-     остаток выйдет ещё раз — см. пояснение в выводе. *)
+     Fire накопительный, но на конце потока без новых данных дубля нет —
+     одна эмиссия при заходе в /cart. *)
   stream ()
   |> Pipe.global_window (module User)
        ~trigger:(Pipe.trigger_on_value (fun c -> c.page = "/cart"))
   |> Pipe.aggregate (fun u cs -> (u, List.map (fun c -> c.page) cs))
-  |> count_windows "Global + trigger (по событию) — эмиссия при заходе в /cart\n  (дважды: при триггере и остаток на конце потока — Fire накопительный):"
+  |> count_windows "Global + trigger (по событию) — эмиссия при заходе в /cart:"

@@ -41,13 +41,33 @@ let test_trigger_on_value () =
     |> Pipe.global_window (module Telemetry)
          ~trigger:(Pipe.trigger_on_value (fun t -> t.speed_kmh > 100.))
     |> windows in
-  (* Fire накопительный (не purge): эмитит при тревоге все 3 события,
-     буфер остаётся → на конце потока тот же остаток выходит снова.
-     Значит 2 окна, оба по 3 события. Это корректное следствие
-     накопительной семантики Fire. *)
-  check "fired on alert + remainder at end (2 windows)" (List.length out = 2);
-  check "alert fire captured all 3 events"
+  (* Fire на тревожном событии эмитит [50,60,150]. После него новых
+     событий нет → на конце потока НЕ дублируем. Ровно одно окно. *)
+  check "fired exactly once, no end-of-stream duplicate" (List.length out = 1);
+  check "fire captured all 3 events"
     (List.exists (fun (_, n) -> n = 3) out)
+
+(* ── Fire + новые данные после него → остаток догоняет на конце ── *)
+let test_fire_then_more () =
+  Printf.printf "\n-- Fire then more data: remainder emitted at end (not a dup)\n";
+  (* тревога на 3-м событии (Fire [a,b,c]), затем ещё 2 события без
+     триггера. На конце потока выходит накопленное [a,b,c,d,e] —
+     это не дубль, а новое состояние с догнавшими данными. *)
+  let events = [
+    Mf_event.data (tel ~speed:50. "A" 0) 0;
+    Mf_event.data (tel ~speed:60. "A" 1) 1;
+    Mf_event.data (tel ~speed:150. "A" 2) 2;   (* Fire [3 события] *)
+    Mf_event.data (tel ~speed:55. "A" 3) 3;    (* новые данные после Fire *)
+    Mf_event.data (tel ~speed:58. "A" 4) 4;
+  ] in
+  let out = Stream.of_list events
+    |> Pipe.global_window (module Telemetry)
+         ~trigger:(Pipe.trigger_on_value (fun t -> t.speed_kmh > 100.))
+    |> windows in
+  check "two emissions: Fire (3) + end-of-stream remainder (5)"
+    (out = [("A", 3); ("A", 5)]);
+  check "no exact duplicate (3 then 5, not 3 then 3)"
+    (List.nth out 1 <> ("A", 3))
 
 (* ── FireAndPurge сбрасывает, Fire накапливает ─────────────── *)
 let test_fire_vs_purge () =
@@ -88,6 +108,7 @@ let () =
   Printf.printf "==========================================\n";
   test_trigger_count ();
   test_trigger_on_value ();
+  test_fire_then_more ();
   test_fire_vs_purge ();
   test_per_key ();
   test_end_remainder ();
