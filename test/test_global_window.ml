@@ -102,6 +102,31 @@ let test_end_remainder () =
     |> Pipe.global_window (module Telemetry) ~trigger:never |> windows in
   check "single window with all 4 at end" (out = [("A", 4)])
 
+(* ── инвариант: FireAndPurge не теряет и не дублирует события ── *)
+let test_purge_conservation () =
+  Printf.printf "\n-- FireAndPurge: every event counted exactly once (no loss/dup)\n";
+  let total = 17 and n = 5 in
+  let events = List.init total (fun i -> Mf_event.data (tel "A" i) i) in
+  let out = Stream.of_list events
+    |> Pipe.global_window (module Telemetry) ~trigger:(Pipe.trigger_count n)
+    |> windows in
+  let summed = List.fold_left (fun acc (_, sz) -> acc + sz) 0 out in
+  check "sum of window sizes = total events (no loss, no dup)"
+    (summed = total)
+
+(* ── инвариант: Fire без новых данных в конце не дублирует ──── *)
+let test_no_end_duplicate () =
+  Printf.printf "\n-- Fire as last action: no end-of-stream duplicate\n";
+  let fire_each : telemetry Pipe.trigger = fun ~count:_ ~last:_ -> Pipe.Fire in
+  let events = List.init 3 (fun i -> Mf_event.data (tel "A" i) i) in
+  let out = Stream.of_list events
+    |> Pipe.global_window (module Telemetry) ~trigger:fire_each
+    |> windows in
+  check "exactly 3 emissions (one per Fire, no trailing dup)"
+    (List.length out = 3);
+  check "last emission is the full buffer once"
+    (List.nth out 2 = ("A", 3))
+
 let () =
   Printf.printf "==========================================\n";
   Printf.printf "  Global window + custom triggers\n";
@@ -112,4 +137,6 @@ let () =
   test_fire_vs_purge ();
   test_per_key ();
   test_end_remainder ();
+  test_purge_conservation ();
+  test_no_end_duplicate ();
   Printf.printf "\nAll global window tests passed.\n"

@@ -96,6 +96,83 @@ let test_update_then_enrich () =
   check "B enriched with zone-2" (List.nth enriched 1 = "B:zone-2");
   check "C unknown (not in table)" (List.nth enriched 2 = "C:?")
 
+(* ── union: одновременные timestamps не теряются ───────────── *)
+let test_union_simultaneous () =
+  Printf.printf "\n-- union handles simultaneous timestamps (tie-break)\n";
+  let a = Stream.of_list [Mf_event.data "a@5" 5; Mf_event.data "a@10" 10] in
+  let b = Stream.of_list [Mf_event.data "b@5" 5; Mf_event.data "b@10" 10] in
+  let out = Mf_event.union a b |> data_ts in
+  check "all 4 events present despite ties" (List.length out = 4);
+  check "tie-break: left stream first at equal ts"
+    (out = ["a@5"; "b@5"; "a@10"; "b@10"])
+
+(* ── union: один вход кончился раньше ──────────────────────── *)
+let test_union_uneven_length () =
+  Printf.printf "\n-- union drains the longer stream's tail\n";
+  let short = Stream.of_list [Mf_event.data "s1" 1] in
+  let long = Stream.of_list
+    [Mf_event.data "l1" 2; Mf_event.data "l2" 3; Mf_event.data "l3" 4] in
+  let out = Mf_event.union short long |> data_ts in
+  check "short then all of long" (out = ["s1"; "l1"; "l2"; "l3"])
+
+(* ── union: вложенный (три потока) сохраняет порядок ───────── *)
+let test_union_associative () =
+  Printf.printf "\n-- nested union (three streams) keeps time order\n";
+  let mk p ts = Mf_event.data p ts in
+  let a () = Stream.of_list [mk "a" 1; mk "a" 7] in
+  let b () = Stream.of_list [mk "b" 3; mk "b" 9] in
+  let c () = Stream.of_list [mk "c" 5; mk "c" 11] in
+  let left  = Mf_event.union (Mf_event.union (a ()) (b ())) (c ()) |> data_ts in
+  let right = Mf_event.union (a ()) (Mf_event.union (b ()) (c ())) |> data_ts in
+  check "(a∪b)∪c time-ordered" (left = ["a"; "b"; "c"; "a"; "b"; "c"]);
+  check "a∪(b∪c) same result" (left = right)
+
+(* ── union watermark монотонен ─────────────────────────────── *)
+let test_union_watermark_monotone () =
+  Printf.printf "\n-- union watermarks are monotone (never go backwards)\n";
+  let a = Stream.of_list
+    [Mf_event.data "a" 10; Mf_event.wm 20; Mf_event.data "a2" 30; Mf_event.wm 40] in
+  let b = Stream.of_list
+    [Mf_event.data "b" 15; Mf_event.wm 25; Mf_event.data "b2" 35; Mf_event.wm 45] in
+  let wms = Mf_event.union a b |> Stream.to_list
+    |> List.filter_map (function Mf_event.Watermark w -> Some w | _ -> None) in
+  let rec monotone = function
+    | x :: (y :: _ as rest) -> x <= y && monotone rest
+    | _ -> true in
+  check "watermarks non-decreasing" (monotone wms)
+
+(* ── update_table: enrich видит обновления ПО ХОДУ ─────────── *)
+let test_update_table_live () =
+  Printf.printf "\n-- enrich sees table updates as they happen (live)\n";
+  let tbl : (string, int) Hashtbl.t = Hashtbl.create 8 in
+  Hashtbl.replace tbl "x" 1;
+  let module K = Keyed.Make (struct type t = string let key _ = "x" end) in
+  let lookup = Table.of_hashtbl tbl in
+  let enrich1 = Stream.of_list [Mf_event.data "before" 1]
+    |> Pipe.enrich (module K) ~from:lookup
+         ~merge:(fun s v -> match v with Some n -> Printf.sprintf "%s=%d" s n | None -> s)
+    |> data_ts in
+  check "enrich sees value 1 before update" (enrich1 = ["before=1"]);
+  Hashtbl.replace tbl "x" 2;
+  let enrich2 = Stream.of_list [Mf_event.data "after" 1]
+    |> Pipe.enrich (module K) ~from:lookup
+         ~merge:(fun s v -> match v with Some n -> Printf.sprintf "%s=%d" s n | None -> s)
+    |> data_ts in
+  check "enrich sees value 2 after update" (enrich2 = ["after=2"])
+
+(* ── update_table: watermark проходит, таблицу не трогает ──── *)
+let test_update_table_watermark () =
+  Printf.printf "\n-- update_table passes watermarks without touching the table\n";
+  let tbl : (string, string * int) Hashtbl.t = Hashtbl.create 8 in
+  let out = Stream.of_list [
+    Mf_event.data ("k", 1) 10;
+    Mf_event.wm 20;
+    Mf_event.data ("k", 2) 30;
+  ] |> Pipe.update_table tbl ~key:(fun (k, _) -> k) |> Stream.to_list in
+  let wms = List.filter (function Mf_event.Watermark _ -> true | _ -> false) out in
+  check "watermark passed through" (List.length wms = 1);
+  check "table has last value" (Hashtbl.find_opt tbl "k" = Some ("k", 2))
+
 let () =
   Printf.printf "==========================================\n";
   Printf.printf "  Union (event-time) + update_table\n";
@@ -104,6 +181,12 @@ let () =
   test_union_complete ();
   test_union_watermark ();
   test_union_empty ();
+  test_union_simultaneous ();
+  test_union_uneven_length ();
+  test_union_associative ();
+  test_union_watermark_monotone ();
   test_update_table ();
+  test_update_table_live ();
+  test_update_table_watermark ();
   test_update_then_enrich ();
   Printf.printf "\nAll union + update_table tests passed.\n"

@@ -11,7 +11,7 @@
      • enrich — телеметрия обогащается зоной/порогом из таблиц
      • tumbling window — средний уровень газа за окно
      • session window — периоды активности человека под землёй
-     • global window + trigger — ранняя реакция на критический газ
+     • global window + trigger — батчи показаний газа (count-триггер)
      • aggregate, flat_map (правила), dedup — алерты без спама
 
    Топология:
@@ -185,5 +185,19 @@ let () =
   |> Pipe.sink (fun (id, n, first, last) ->
        Printf.printf "  👤 %s: сессия %d событий, %ds..%ds (%dс под землёй активен)\n"
          id n (first/1000) (last/1000) ((last - first)/1000));
+
+  (* ── 4г. ГАЗ: global window + count-триггер ───────────────── *)
+  (* Прогрессивная сводка: каждые 2 показания датчика выдаём батч
+     (FireAndPurge — батчи не пересекаются). Показывает триггеры и то,
+     что на конце потока неполный остаток выходит без дублей. *)
+  Printf.printf "\n── Батчи показаний газа (global window, каждые 2 замера) ──\n";
+  enriched ()
+  |> Pipe.filter (fun t -> t.kind = `Gas)
+  |> Pipe.global_window (module Tel) ~trigger:(Pipe.trigger_count 2)
+  |> Pipe.aggregate (fun id readings ->
+       (id, List.map (fun r -> r.ch4) readings))
+  |> Pipe.sink (fun (id, vals) ->
+       Printf.printf "  📦 %s: батч [%s]\n" id
+         (String.concat ", " (List.map (Printf.sprintf "%.1f") vals)));
 
   Printf.printf "\n=== готово ===\n"
