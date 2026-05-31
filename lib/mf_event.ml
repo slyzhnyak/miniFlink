@@ -152,4 +152,55 @@ let with_idle_watermarks
     in
     loop ()
 
+(* ── Union: слияние двух потоков по event-time ────────────── *)
+
+(* Объединяет два потока событий, упорядочивая по event-time (merge).
+   Оба входа должны быть упорядочены по времени (как после источника
+   с watermarks). Тонкость с watermarks: watermark объединённого потока
+   = МИНИМУМ watermarks обоих входов — нельзя гарантировать что время T
+   прошло, пока медленный вход это не подтвердил. Это сохраняет
+   корректность окон ниже по течению. *)
+let union (a : 'v t Stream.t) (b : 'v t Stream.t) : 'v t Stream.t =
+  (* по одному «заглянутому» элементу из каждого входа *)
+  let pa = ref None and pb = ref None in
+  let a_done = ref false and b_done = ref false in
+  (* последние watermarks каждого входа (для вычисления min) *)
+  let wm_a = ref min_int and wm_b = ref min_int in
+  let emitted_wm = ref min_int in
+  let pull_a () =
+    if !a_done then () else
+    match !pa with Some _ -> () | None ->
+      (match a () with None -> a_done := true | Some ev -> pa := Some ev) in
+  let pull_b () =
+    if !b_done then () else
+    match !pb with Some _ -> () | None ->
+      (match b () with None -> b_done := true | Some ev -> pb := Some ev) in
+  fun () ->
+    let rec step () =
+      pull_a (); pull_b ();
+      match !pa, !pb with
+      (* watermarks потребляем отдельно: обновляем границу входа и
+         эмитим объединённый wm = min, только если он продвинулся *)
+      | Some (Watermark w), _ ->
+        pa := None; wm_a := w;
+        let m = min !wm_a !wm_b in
+        if !b_done then (emitted_wm := w; Some (Watermark w))
+        else if m > !emitted_wm then (emitted_wm := m; Some (Watermark m))
+        else step ()
+      | _, Some (Watermark w) ->
+        pb := None; wm_b := w;
+        let m = min !wm_a !wm_b in
+        if !a_done then (emitted_wm := w; Some (Watermark w))
+        else if m > !emitted_wm then (emitted_wm := m; Some (Watermark m))
+        else step ()
+      (* данные с обеих сторон — эмитим меньший по времени *)
+      | Some ea, Some eb ->
+        if ts ea <= ts eb then (pa := None; Some ea)
+        else (pb := None; Some eb)
+      | Some ea, None when !b_done -> pa := None; Some ea
+      | None, Some eb when !a_done -> pb := None; Some eb
+      | None, None when !a_done && !b_done -> None
+      | _ -> step ()   (* один пуст, другой ещё нет — докрутить *)
+    in step ()
+
 let pp_ts t = Printf.sprintf "%d.%03ds" (t/1000) (t mod 1000)

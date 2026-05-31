@@ -62,5 +62,12 @@ val with_idle_watermarks :
   now_ms:(unit -> int) -> sleep_ms:(int -> unit) ->
   (unit -> 'a t option option) -> 'a t Stream.t
 
+(** [union a b] сливает два потока событий, упорядочивая по event-time.
+    Оба входа должны быть упорядочены по времени (как после источника
+    с watermarks). Watermark объединённого потока = {e минимум} watermarks
+    входов: время T считается пройденным только когда оба входа это
+    подтвердили — это сохраняет корректность окон ниже по течению. *)
+val union : 'a t Stream.t -> 'a t Stream.t -> 'a t Stream.t
+
 (** Форматировать время как [«1.234s»] (для отладочного вывода). *)
 val pp_ts : Time.t -> string

@@ -34,6 +34,15 @@ val enrich :
   merge:('a -> 'b option -> 'a) ->
   'a Mf_event.t Stream.t -> 'a Mf_event.t Stream.t
 
+(** [update_table tbl ~key upstream] обновляет изменяемую таблицу [tbl]
+    значениями проходящих событий и пропускает их дальше без изменений.
+    Паттерн «поток обновляет справочник»: один поток наполняет [tbl]
+    через этот оператор, другой обогащается через
+    [enrich ~from:(Table.of_hashtbl tbl)]. *)
+val update_table :
+  ('k, 'a) Hashtbl.t -> key:('a -> 'k) ->
+  'a Mf_event.t Stream.t -> 'a Mf_event.t Stream.t
+
 (** {2 Окна по времени} *)
 
 (** Спецификация временного окна. *)

@@ -34,6 +34,25 @@ let enrich
     (upstream : a Mf_event.t Stream.t) : a Mf_event.t Stream.t =
   emap (fun v -> merge v (from (K.key v))) upstream
 
+(* ── Обновление таблицы из потока ─────────────────────────── *)
+
+(** [update_table tbl ~key upstream] обновляет изменяемую таблицу [tbl]
+    значениями проходящих [Data]-событий (ключ через [~key]), пропуская
+    события дальше без изменений. Паттерн «поток обновляет справочник»:
+    один поток через [update_table] наполняет [tbl], другой через
+    [enrich ~from:(Table.of_hashtbl tbl)] из него обогащается.
+
+    Side-effect на проходе: к моменту когда обогащаемый поток ищет ключ,
+    в [tbl] уже то что прошло через этот оператор. Watermark/Retract
+    проходят прозрачно, таблицу не трогают. *)
+let update_table (tbl : ('k, 'a) Hashtbl.t) ~(key : 'a -> 'k)
+    (upstream : 'a Mf_event.t Stream.t) : 'a Mf_event.t Stream.t =
+  Stream.map (fun ev ->
+    (match ev with
+     | Mf_event.Data (v, _) -> Hashtbl.replace tbl (key v) v
+     | _ -> ());
+    ev) upstream
+
 (* ── Window ───────────────────────────────────────────────── *)
 
 module WMap = Map.Make(struct
