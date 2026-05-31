@@ -87,6 +87,7 @@ variants/            — реализации channel/parallel по версии
   parallel_v5.ml       Domain.spawn / Domain.join
 
 bin/    main.ml        демо pipeline
+examples/              самодостаточные примеры (см. examples/README.md)
 bench/  bench.ml bench_parallel.ml
 test/   27 тест-сюит (core, props, invariants, reliability, metrics,
                      retract, sliding, count_window, session_window,
@@ -115,6 +116,11 @@ dune build
 # Запуск демо
 dune exec bin/main.exe          # тестовые данные (noop режим)
 dune exec bin/main.exe log      # log режим: метрики в stderr
+
+# примеры использования (со своими типами, от простого к сложному)
+dune exec examples/ex01_minimal.exe   # окна + агрегация
+dune exec examples/ex02_alerts.exe    # enrich + правила + dedup
+dune exec examples/ex03_windows.exe   # четыре типа окон
 
 # Бенчмарки
 dune exec bench/bench.exe
