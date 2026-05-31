@@ -154,6 +154,90 @@ let window
     результат [f key vs] (например max-скорость, min-топливо). *)
 let aggregate f = emap (fun (key, vs) -> f key vs)
 
+(* ── Count windows ────────────────────────────────────────── *)
+
+(** Спецификация count-окна: по числу событий, не по времени. *)
+type count_spec =
+  | CountTumbling of int          (** каждые N событий → окно *)
+  | CountSliding  of int * int    (** окно размера N, шаг step (step<=N) *)
+
+(** [count_window (module K) spec upstream] группирует события по ключу
+    [K.key] и {e количеству}, а не времени. Окно эмитится когда у ключа
+    накопилось нужное число событий — watermarks не нужны (это и есть
+    их преимущество: результат без ожидания по event-time).
+
+    - [count_tumbling n]: каждые [n] событий ключа → одно окно [(key, vs)],
+      буфер сбрасывается.
+    - [count_sliding n step]: окно из последних [n] событий, новое окно
+      каждые [step] событий (при [step < n] окна перекрываются).
+
+    Watermark и Retract проходят прозрачно. На конце потока неполные
+    буферы {e не} эмитятся (count-окно по определению требует ровно [n]
+    событий; неполный остаток — не окно).
+    @raise Invalid_argument при [n <= 0] или [step <= 0]. *)
+let count_window
+    (type a)
+    (module K : Keyed.S with type t = a)
+    (spec : count_spec)
+    (upstream : a Mf_event.t Stream.t)
+    : (string * a list) Mf_event.t Stream.t =
+  (match spec with
+   | CountTumbling n -> if n <= 0 then invalid_arg "count_tumbling: n должно быть > 0"
+   | CountSliding (n, step) ->
+     if n <= 0 then invalid_arg "count_sliding: размер должен быть > 0";
+     if step <= 0 then invalid_arg "count_sliding: шаг должен быть > 0");
+  (* буфер на ключ: список накопленных значений (в обратном порядке) +
+     счётчик с последней эмиссии (для sliding) *)
+  let buffers : (string, a list * int) Hashtbl.t = Hashtbl.create 16 in
+  let out : (string * a list) Mf_event.t Queue.t = Queue.create () in
+  let emit k vs = Queue.push (Mf_event.data (k, vs) 0) out in
+  let push_value k v =
+    let (buf, since) = match Hashtbl.find_opt buffers k with
+      | Some x -> x | None -> ([], 0) in
+    let buf = v :: buf in
+    let since = since + 1 in
+    match spec with
+    | CountTumbling n ->
+      if List.length buf >= n then begin
+        emit k (List.rev buf);
+        Hashtbl.replace buffers k ([], 0)
+      end else
+        Hashtbl.replace buffers k (buf, since)
+    | CountSliding (n, step) ->
+      (* держим максимум n последних; эмитим каждые step событий когда
+         накоплено >= n *)
+      let buf = if List.length buf > n
+        then (match List.rev buf with _ :: rest -> List.rev rest | [] -> [])
+        else buf in
+      if List.length buf >= n && since >= step then begin
+        emit k (List.rev buf);
+        Hashtbl.replace buffers k (buf, 0)   (* сдвиг: считаем step заново *)
+      end else
+        Hashtbl.replace buffers k (buf, since)
+  in
+  fun () ->
+    let rec pull () =
+      if not (Queue.is_empty out) then Some (Queue.pop out) else
+      match upstream () with
+      | None -> None   (* неполные буферы не эмитим *)
+      | Some (Mf_event.Watermark wm) ->
+        (* watermark несёт только время — пересоздаём в выходном типе *)
+        Some (Mf_event.wm wm)
+      | Some (Mf_event.Retract _) ->
+        (* retract входного типа в count-окне не транслируется
+           (значение чужого типа) — пропускаем *)
+        pull ()
+      | Some (Mf_event.Data (v, _)) ->
+        push_value (K.key v) v;
+        pull ()
+    in pull ()
+
+(** Count-tumbling: окно каждые [n] событий. *)
+let count_tumbling n = CountTumbling n
+
+(** Count-sliding: окно из [n] событий с шагом [step]. *)
+let count_sliding n step = CountSliding (n, step)
+
 (* ── Stateful ─────────────────────────────────────────────── *)
 
 let stateful ~init ~f upstream =
