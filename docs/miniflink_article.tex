@@ -47,15 +47,20 @@ by encoding the grouping key once in the type, operators \texttt{window},
 \texttt{enrich}, and \texttt{dedup} require no explicit \texttt{\textasciitilde{}key:}
 parameter, making the pipeline read as a specification rather than
 an implementation. We implement event time, watermarks (with periodic
-emission and end-of-stream flush), tumbling/sliding windows, stateful
+emission, end-of-stream flush, and wall-clock idle advancement),
+windowing in five flavors (tumbling, sliding, count, session with
+merging, and a global window with custom triggers), stateful
 operators, exactly-once checkpointing (single-thread and parallel via
-Chandy-Lamport barrier snapshots), table and join semantics with TTL
-eviction, retractions for late data, and production layers (dead letter
-queue, graceful shutdown, Prometheus metrics, RocksDB-backed persistent
-state via C FFI) in approximately 1500 lines, validated by 13 test
-suites including replay-determinism, fuzzing, and soak tests. A parallel
-backend supports both OCaml~4 (Thread + Mutex) and OCaml~5 (Domain +
-Atomic) with measured speedup of $2.48\times$ on 4 workers (1 CPU).
+Chandy-Lamport barrier snapshots, with source-offset recovery and a
+transactional sink), table and join semantics with TTL eviction,
+retractions for late data, and production layers (dead letter queue with
+retry/backoff, graceful shutdown, Prometheus metrics, structured logging,
+health and config as values, RocksDB-backed persistent state via C FFI)
+in approximately 3000 lines, validated by 27 test suites including
+composition-invariant property tests, replay-determinism, fuzzing, and
+soak tests. A parallel backend supports both OCaml~4 (Thread + Mutex)
+and OCaml~5 (Domain + Atomic) with measured speedup of $2.48\times$ on
+4 workers (1 CPU).
 \end{abstract}
 
 \begin{document}
@@ -210,6 +215,20 @@ Window state is a \texttt{WMap.t} from \texttt{(key, start, stop)}
 triples to event lists. Watermarks trigger partition of open windows
 into \emph{closed} (fired) and \emph{open} sets; closed windows emit
 their accumulated events downstream.
+
+Beyond time-based \texttt{tumbling} and \texttt{sliding}, miniFlink
+offers three more window types as separate operators. \textbf{Count
+windows} fire by event count rather than time, needing no watermarks.
+\textbf{Session windows} have data-driven boundaries: a session grows
+while events arrive within \texttt{gap} and \emph{merges} with a
+neighbor when an event bridges the gap between two sessions — this
+breaks the ``window is a pure function of timestamp'' assumption the
+time-based windows rely on, so it carries its own session state and
+merge logic. \textbf{Global windows} hold one window per key and
+delegate the fire decision to a pluggable \emph{trigger}
+($\mathtt{Continue} \mid \mathtt{Fire} \mid \mathtt{FireAndPurge}$),
+separating the assigner (how to group) from the trigger (when to emit)
+— the foundation other firing policies build on.
 
 %%% ── 3. Event Time and Watermarks ───────────────────────────────────────
 \section{Event Time and Watermarks}
@@ -495,12 +514,14 @@ targets the failure modes specific to stream engines:
 \section{Conclusion}
 
 miniFlink demonstrates that the core semantics of Apache Flink —
-event time, watermarks, windowing, stateful operators, exactly-once
-(single-thread and parallel via barrier snapshots), table/join with
-TTL eviction, retractions, and production layers (DLQ, graceful
-shutdown, Prometheus metrics, RocksDB-backed state) — fit in
-$\sim$1500 lines of OCaml across 13 test suites. Two design decisions
-proved most consequential:
+event time, watermarks, windowing (five types including session with
+merging and a trigger-driven global window), stateful operators,
+exactly-once (single-thread and parallel via barrier snapshots, with
+recovery and a transactional sink), table/join with TTL eviction,
+retractions, and production layers (DLQ with retry, graceful shutdown,
+Prometheus metrics, structured logging, health/config, RocksDB-backed
+state) — fit in $\sim$3000 lines of OCaml across 27 test suites. Two
+design decisions proved most consequential:
 
 \begin{enumerate}
 \item The \texttt{KEYED} type class eliminates repeated key

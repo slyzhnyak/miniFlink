@@ -2,9 +2,12 @@
 
 Декларативная потоковая обработка данных на OCaml.
 
-Реализация ключевых концепций Apache Flink: event time, watermarks, windowing,
-stateful operators, exactly-once, table/join, retractions — плюс production слои
-(DLQ, graceful shutdown, Prometheus metrics). ~1200 строк, 42 файла.
+Реализация ключевых концепций Apache Flink: event time, watermarks, windowing
+(tumbling, sliding, count, session со слиянием, global+triggers), stateful
+operators, exactly-once (end-to-end: offset, 2PC sink, recovery, durable),
+table/join с TTL, retractions — плюс production-слои (DLQ + retry/backoff,
+graceful shutdown, Prometheus metrics, структурированные логи, health, config,
+RocksDB state). ~3000 строк OCaml, 27 тест-сюит.
 
 ## Почему декларативно
 
@@ -64,10 +67,13 @@ variants/            — реализации channel/parallel по версии
 
 bin/    main.ml        демо pipeline
 bench/  bench.ml bench_parallel.ml
-test/   13 тест-сюит (core, props, reliability, metrics,
-                     retract, sliding, dedup_evict, parallel_crash,
-                     determinism, watermark, table_ttl,
-                     checkpoint_parallel, rocksdb)
+test/   27 тест-сюит (core, props, invariants, reliability, metrics,
+                     retract, sliding, count_window, session_window,
+                     global_window, dedup_evict, parallel_crash,
+                     determinism, watermark, idle_watermark, table_ttl,
+                     checkpoint_parallel, rocksdb, codec, channel,
+                     window_validation, log, health_config, retry,
+                     schema, backpressure, queue_depth)
 ```
 
 Сборка через **dune**. `channel.ml`/`parallel.ml` выбираются автоматически
@@ -142,8 +148,7 @@ Channel overhead: ~106 нс/msg (Mutex+Condition).
 | Dead Letter Queue           | ✓ реализовано (noop + log)    |
 | Graceful Shutdown           | ✓ реализовано (SIGTERM/INT)   |
 | Prometheus Metrics          | ✓ реализовано (HTTP :9090)    |
-| Unit + Property тесты       | ✓ 29 тестов, 1400 QCheck      |
-| Schema evolution            | stub → schema_default.ml      |
+| Unit + Property тесты       | ✓ 27 сюит, QCheck-инварианты  |
 | Exactly-once parallel       | ✓ реализовано (barrier + snapshot) |
 | Exactly-once end-to-end     | ✓ offset + 2PC sink + recovery + durable |
 | Структурированные логи (JSON) | ✓ Log (событие+sink, назначение — за приложением) |
