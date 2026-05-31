@@ -1,0 +1,154 @@
+(** Операторы конвейера.
+
+    Каждый оператор берёт поток событий ({!Mf_event.t} {!Stream.t}) и
+    возвращает поток. Операторы с группировкой ([window], [enrich],
+    [dedup], count/session/global окна) получают ключ через первый
+    аргумент-модуль {!Keyed.S} — в пользовательском коде нет повторов
+    извлечения ключа.
+
+    Watermark и Retract проходят через операторы прозрачно (где это
+    осмысленно), сохраняя event-time семантику. *)
+
+(** {2 Базовые операторы (по значению)} *)
+
+(** [map f] применяет [f] к значению каждого [Data]/[Retract]; watermark
+    без изменений. *)
+val map : ('a -> 'b) -> 'a Mf_event.t Stream.t -> 'b Mf_event.t Stream.t
+
+(** [filter p] оставляет [Data], удовлетворяющие [p]; watermark и retract
+    проходят. *)
+val filter : ('a -> bool) -> 'a Mf_event.t Stream.t -> 'a Mf_event.t Stream.t
+
+(** [flat_map f] заменяет каждое значение списком [f v], сохраняя
+    event-time и вид события. *)
+val flat_map : ('a -> 'b list) -> 'a Mf_event.t Stream.t -> 'b Mf_event.t Stream.t
+
+(** {2 Обогащение} *)
+
+(** [enrich (module K) ~from ~merge upstream] для каждого события ищет в
+    таблице [from] значение по ключу [K.key] и сливает его в событие
+    через [merge] (left join: [None] если ключа нет). *)
+val enrich :
+  (module Keyed.S with type t = 'a) ->
+  from:(string, 'b) Table.t ->
+  merge:('a -> 'b option -> 'a) ->
+  'a Mf_event.t Stream.t -> 'a Mf_event.t Stream.t
+
+(** {2 Окна по времени} *)
+
+(** Спецификация временного окна. *)
+type win_spec
+
+(** Неперекрывающиеся окна размера [size] (> 0).
+    @raise Invalid_argument при [size <= 0]. *)
+val tumbling : Time.t -> win_spec
+
+(** Перекрывающиеся окна размера [size] с шагом [step]
+    (при [step < size] окна перекрываются).
+    @raise Invalid_argument при [size <= 0] или [step <= 0]. *)
+val sliding : Time.t -> Time.t -> win_spec
+
+(** Какие окна назначаются событию с временем [ts] по спецификации.
+    Низкоуровневая деталь (используется внутри [window]); экспонирована
+    для модульного тестирования логики назначения окон. *)
+val assign : win_spec -> Time.t -> (Time.t * Time.t) list
+
+(** [window (module K) ?latency ?allowed_lateness spec upstream] группирует
+    события по ключу [K.key] и временным окнам [spec]. Окно закрывается
+    (эмитит [(key, values)]) когда watermark проходит его конец.
+    [?allowed_lateness] продлевает приём опоздавших после закрытия. *)
+val window :
+  (module Keyed.S with type t = 'a) ->
+  ?latency:Time.t ->
+  ?allowed_lateness:Time.t ->
+  win_spec ->
+  'a Mf_event.t Stream.t -> (string * 'a list) Mf_event.t Stream.t
+
+(** [aggregate f] сворачивает каждое окно [(key, values)] в результат
+    [f key values]. *)
+val aggregate :
+  (string -> 'a list -> 'b) ->
+  (string * 'a list) Mf_event.t Stream.t -> 'b Mf_event.t Stream.t
+
+(** {2 Count-окна (по количеству событий, без watermarks)} *)
+
+(** Спецификация count-окна. *)
+type count_spec
+
+(** Окно каждые [n] событий (> 0). *)
+val count_tumbling : int -> count_spec
+
+(** Окно из [n] событий с шагом [step] (оба > 0). *)
+val count_sliding : int -> int -> count_spec
+
+(** [count_window (module K) spec upstream] группирует по ключу и числу
+    событий, без watermarks. Неполные хвосты не эмитятся.
+    @raise Invalid_argument при недопустимых параметрах. *)
+val count_window :
+  (module Keyed.S with type t = 'a) ->
+  count_spec ->
+  'a Mf_event.t Stream.t -> (string * 'a list) Mf_event.t Stream.t
+
+(** {2 Session-окна (динамические границы со слиянием)} *)
+
+(** [session_window (module K) ~gap upstream] группирует события в сессии —
+    периоды активности, разделённые паузами больше [gap]. Сессии {e сливаются}
+    когда событие перекрывает разрыв между ними. Закрытие по watermark
+    ([last + gap]) или на конце потока.
+    @raise Invalid_argument при [gap <= 0]. *)
+val session_window :
+  (module Keyed.S with type t = 'a) ->
+  gap:Time.t ->
+  'a Mf_event.t Stream.t -> (string * 'a list) Mf_event.t Stream.t
+
+(** {2 Global-окно с триггерами} *)
+
+(** Решение триггера. *)
+type trigger_action =
+  | Continue        (** копить дальше *)
+  | Fire            (** эмитить, оставив накопленное (накопительно) *)
+  | FireAndPurge    (** эмитить и сбросить буфер *)
+
+(** Триггер: по числу накопленных и последнему значению — решение. *)
+type 'a trigger = count:int -> last:'a -> trigger_action
+
+(** Триггер «каждые [n] событий» (с purge). *)
+val trigger_count : int -> 'a trigger
+
+(** Триггер по предикату значения (ранняя эмиссия). *)
+val trigger_on_value : ('a -> bool) -> 'a trigger
+
+(** [global_window (module K) ~trigger upstream] — одно окно на ключ,
+    эмиссия по [trigger]. Отделяет группировку от политики «когда фаерить». *)
+val global_window :
+  (module Keyed.S with type t = 'a) ->
+  trigger:'a trigger ->
+  'a Mf_event.t Stream.t -> (string * 'a list) Mf_event.t Stream.t
+
+(** {2 Состояние и дедупликация} *)
+
+(** [stateful ~init ~f upstream] — оператор с состоянием: [f state event]
+    возвращает новое состояние и список выходных событий. Watermark
+    проходит прозрачно. *)
+val stateful :
+  init:'s ->
+  f:('s -> 'a Mf_event.t -> 's * 'b Mf_event.t list) ->
+  'a Mf_event.t Stream.t -> 'b Mf_event.t Stream.t
+
+(** [dedup (module K) ~rule ~cooldown upstream] подавляет повторы с
+    одинаковым [(K.key, rule)] в пределах [cooldown]. Состояние ограничено:
+    при watermark записи старше [wm - cooldown] удаляются. *)
+val dedup :
+  (module Keyed.S with type t = 'a) ->
+  rule:('a -> string) ->
+  cooldown:Time.t ->
+  'a Mf_event.t Stream.t -> 'a Mf_event.t Stream.t
+
+(** {2 Терминальные} *)
+
+(** [sink f stream] вызывает [f] на каждом [Data]-значении (ради эффекта),
+    проходя поток до конца. *)
+val sink : ('a -> unit) -> 'a Mf_event.t Stream.t -> unit
+
+(** Собрать [Data]-значения потока в список. *)
+val collect : 'a Mf_event.t Stream.t -> 'a list

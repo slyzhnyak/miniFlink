@@ -71,8 +71,8 @@ let make_metrics _mode label =
     max_event_ts = mk_g "max_event_ts_ms" }
 
 (* noop метрики — не регистрируются в реестре *)
-type noop_metrics = unit
 let noop_metrics _ = ()
+
 
 (* ── Shutdown ────────────────────────────────────────────── *)
 

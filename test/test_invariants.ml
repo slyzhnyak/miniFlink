@@ -43,8 +43,8 @@ let prop_map_fusion =
     (make (gen_events 30)) (fun evs ->
       let f (t:telemetry) = { t with speed_kmh = t.speed_kmh +. 1. } in
       let g (t:telemetry) = { t with speed_kmh = t.speed_kmh *. 2. } in
-      let lhs = Stream.of_list evs |> Pipe.emap f |> Pipe.emap g |> data_values in
-      let rhs = Stream.of_list evs |> Pipe.emap (fun x -> g (f x)) |> data_values in
+      let lhs = Stream.of_list evs |> Pipe.map f |> Pipe.map g |> data_values in
+      let rhs = Stream.of_list evs |> Pipe.map (fun x -> g (f x)) |> data_values in
       lhs = rhs)
 
 (* A2. filter p >> filter q == filter (x. p x && q x) *)
@@ -53,8 +53,8 @@ let prop_filter_compose =
     (make (gen_events 40)) (fun evs ->
       let p (t:telemetry) = t.speed_kmh > 50. in
       let q (t:telemetry) = t.speed_kmh < 150. in
-      let lhs = Stream.of_list evs |> Pipe.efilt p |> Pipe.efilt q |> data_values in
-      let rhs = Stream.of_list evs |> Pipe.efilt (fun x -> p x && q x) |> data_values in
+      let lhs = Stream.of_list evs |> Pipe.filter p |> Pipe.filter q |> data_values in
+      let rhs = Stream.of_list evs |> Pipe.filter (fun x -> p x && q x) |> data_values in
       lhs = rhs)
 
 (* A3. window сохраняет события при ЛЮБОМ размере окна (>0) *)
