@@ -35,7 +35,7 @@ let to_json s =
   match s.detail with
   | Some d ->
     (* экранируем кавычки в detail *)
-    let esc = String.concat "\\\"" (String.split_on_char '"' d) in
+    let esc = Log.json_escape d in
     Printf.sprintf "%s,\"detail\":\"%s\"}" base esc
   | None -> base ^ "}"
 

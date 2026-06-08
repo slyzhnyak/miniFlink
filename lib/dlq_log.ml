@@ -10,13 +10,22 @@ let create () = { n = 0; mu = Mutex.create () }
 let send t e =
   Mutex.lock t.mu;
   t.n <- t.n + 1;
-  Printf.eprintf "[DLQ] topic=%s attempt=%d error=%s payload=%S ts=%d\n%!"
-    e.topic e.attempt e.error
-    (if Bytes.length e.payload > 200
-     then Bytes.sub_string e.payload 0 200 ^ "..."
-     else Bytes.to_string e.payload)
-    e.ts;
-  Mutex.unlock t.mu
+  Mutex.unlock t.mu;
+  (* через Log.warn — единый JSON-формат с остальными логами (иначе
+     текстовые DLQ-строки проваливаются мимо JSON-парсеров агрегаторов
+     вроде Loki/Vector). Log.warn сам экранирует поля. *)
+  let payload =
+    if Bytes.length e.payload > 200
+    then Bytes.sub_string e.payload 0 200 ^ "..."
+    else Bytes.to_string e.payload in
+  Log.warn ~fields:[
+    ("event", "dlq_message");
+    ("topic", e.topic);
+    ("attempt", string_of_int e.attempt);
+    ("error", e.error);
+    ("payload", payload);
+    ("ts", string_of_int e.ts);
+  ] "dead letter"
 
 let flush _ = ()
 let count t = t.n

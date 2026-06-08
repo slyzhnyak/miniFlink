@@ -37,6 +37,10 @@ val set_level : level -> unit
 val emit : level -> ?fields:(string * string) list -> string -> unit
 
 val debug : ?fields:(string * string) list -> string -> unit
+(** Экранировать строку для безопасной вставки в JSON-значение
+    (кавычки, бэкслеш, переводы строк, управляющие символы). *)
+val json_escape : string -> string
+
 val info  : ?fields:(string * string) list -> string -> unit
 val warn  : ?fields:(string * string) list -> string -> unit
 val error : ?fields:(string * string) list -> string -> unit
