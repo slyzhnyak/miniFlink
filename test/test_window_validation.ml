@@ -47,6 +47,20 @@ let test_valid_windows_still_work () =
   check "sliding 10/30 (step>size): ts=45 не падает, отдаёт окна"
     (List.length gap >= 0)
 
+(* R4: отрицательный event-time должен попадать в окно которое его
+   реально содержит (s <= ts < s+size), а не [0,size) из-за деления
+   к нулю. *)
+let test_negative_ts () =
+  Printf.printf "\n-- negative event-time assigns to a window that contains it\n";
+  let check_contains spec ts =
+    let wins = Pipe.assign spec ts in
+    List.for_all (fun (s, e) -> s <= ts && ts < e) wins
+    && List.length wins >= 1 in
+  check "tumbling: ts=-5 in its window" (check_contains (Pipe.tumbling 10) (-5));
+  check "tumbling: ts=-15 in its window" (check_contains (Pipe.tumbling 10) (-15));
+  check "tumbling: ts=-10 (boundary) in its window" (check_contains (Pipe.tumbling 10) (-10));
+  check "sliding: ts=-5 in all assigned windows" (check_contains (Pipe.sliding 10 5) (-5))
+
 let () =
   Printf.printf "==========================================\n";
   Printf.printf "  Window validation (no Division_by_zero)\n";
@@ -54,4 +68,5 @@ let () =
   test_tumbling_validation ();
   test_sliding_validation ();
   test_valid_windows_still_work ();
+  test_negative_ts ();
   Printf.printf "\nAll window validation tests passed.\n"

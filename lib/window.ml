@@ -38,18 +38,24 @@ let sliding size step =
     invalid_arg "Pipe.sliding: шаг окна должен быть > 0";
   Sliding (size, step)
 
+(* floor-деление: для отрицательных ts обычное (/) в OCaml округляет
+   к нулю, и событие на ts=-5 попало бы в [0,size) вместо [-size,0).
+   floor_div даёт корректное окно для любого знака event-time. *)
+let floor_div a b = if a >= 0 then a / b else (a - b + 1) / b
+
 let assign spec ts =
   match spec with
   | Tumbling size ->
-    let s = (ts / size) * size in [(s, s + size)]
+    let s = (floor_div ts size) * size in [(s, s + size)]
   | Sliding (size, step) ->
-    (* Событие ts принадлежит окну [s, s+size) когда s <= ts < s+size.
-       Окна начинаются на кратных step. Наибольший подходящий старт —
-       наибольшее кратное step, не превышающее ts. Идём вниз пока
-       окно ещё накрывает ts (s + size > ts) и s >= 0. *)
-    let last = (ts / step) * step in
+    (* Наибольший старт-кратный step, не превышающий ts; идём вниз пока
+       окно ещё накрывает ts. Для ts >= 0 окна выравниваются от 0 (старт
+       не уходит в отрицательные — соглашение, как в Flink от epoch).
+       Для ts < 0 floor_div и отрицательные старты корректны. *)
+    let last = (floor_div ts step) * step in
+    let min_start = if ts >= 0 then 0 else min_int in
     let rec go s acc =
-      if s < 0 || s + size <= ts then acc
+      if s + size <= ts || s < min_start then acc
       else go (s - step) ((s, s + size) :: acc)
     in go last []
 
