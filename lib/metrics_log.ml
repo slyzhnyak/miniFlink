@@ -126,37 +126,49 @@ let dump () =
 
 (* ── stderr reporter ─────────────────────────────────────── *)
 
-let start_reporter ~interval_s =
-  let _t = Thread.create (fun () ->
-    while true do
-      Unix.sleep interval_s;
-      let d = dump () in
-      if d <> "" then
-        Printf.eprintf "--- metrics [%s] ---\n%s\n%!"
-          (let t = Unix.gettimeofday () in
-           let tm = Unix.gmtime t in
-           Printf.sprintf "%02d:%02d:%02d" tm.Unix.tm_hour
-             tm.Unix.tm_min tm.Unix.tm_sec)
-          d
+let start_reporter ?(stop = fun () -> false) ~interval_s () =
+  ignore (Thread.create (fun () ->
+    (* спим маленькими шагами чтобы реагировать на stop, а не висеть
+       весь interval_s после запроса остановки *)
+    let slept = ref 0 in
+    while not (stop ()) do
+      Thread.delay 0.5;
+      slept := !slept + 1;
+      if !slept >= interval_s * 2 then begin
+        slept := 0;
+        let d = dump () in
+        if d <> "" then
+          Printf.eprintf "--- metrics [%s] ---\n%s\n%!"
+            (let t = Unix.gettimeofday () in
+             let tm = Unix.gmtime t in
+             Printf.sprintf "%02d:%02d:%02d" tm.Unix.tm_hour
+               tm.Unix.tm_min tm.Unix.tm_sec)
+            d
+      end
     done
-  ) () in
-  ()
+  ) ())
 
 (* ── Prometheus HTTP endpoint ────────────────────────────── *)
 (* Простой TCP server: GET /metrics → Prometheus exposition format *)
 
-let start_server ?(port=9090) () =
-  let _t = Thread.create (fun () ->
+let start_server ?(stop = fun () -> false) ?(port=9090) () =
+  ignore (Thread.create (fun () ->
     let sock = Unix.socket Unix.PF_INET Unix.SOCK_STREAM 0 in
     Unix.setsockopt sock Unix.SO_REUSEADDR true;
     Unix.bind sock (Unix.ADDR_INET (Unix.inet_addr_any, port));
     Unix.listen sock 5;
+    (* accept с таймаутом, чтобы периодически проверять stop и не
+       висеть вечно *)
+    Unix.setsockopt_float sock Unix.SO_RCVTIMEO 1.0;
     Printf.eprintf "[metrics] Prometheus endpoint: http://0.0.0.0:%d/metrics\n%!" port;
-    while true do
+    while not (stop ()) do
       (try
         let (client, _) = Unix.accept sock in
+        (* таймаут на чтение запроса — защита от slowloris (медленный
+           клиент не должен заблокировать поток навсегда) *)
+        Unix.setsockopt_float client Unix.SO_RCVTIMEO 5.0;
         let ic = Unix.in_channel_of_descr client in
-        let _req = input_line ic in   (* читаем первую строку запроса *)
+        let _req = input_line ic in
         let body = dump () in
         let response = Printf.sprintf
           "HTTP/1.1 200 OK\r\nContent-Type: text/plain; version=0.0.4\r\nContent-Length: %d\r\n\r\n%s"
@@ -165,7 +177,17 @@ let start_server ?(port=9090) () =
         output_string oc response;
         flush oc;
         Unix.close client
-      with _ -> ())
-    done
-  ) () in
-  ()
+      with
+      | Unix.Unix_error ((Unix.EAGAIN | Unix.EWOULDBLOCK), _, _) ->
+        ()  (* таймаут accept — просто перепроверяем stop *)
+      | Unix.Unix_error (Unix.EMFILE, _, _) ->
+        (* дескрипторы исчерпаны — НЕ спиним на 100% CPU, ждём *)
+        Log.error "metrics server: too many open files, backing off";
+        Thread.delay 1.0
+      | e ->
+        Log.error ~fields:[("error", Printexc.to_string e)]
+          "metrics server: request failed";
+        Thread.delay 0.1)
+    done;
+    (try Unix.close sock with _ -> ())
+  ) ())

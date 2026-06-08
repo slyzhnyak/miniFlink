@@ -12,4 +12,4 @@ let add       _ _ = ()
 let set_gauge _ _ = ()
 let observe   _ _ = ()
 let dump      ()  = ""
-let start_reporter ~interval_s:_ = ()
+let start_reporter ?stop:_ ~interval_s:_ () = ()

@@ -29,4 +29,4 @@ val observe   : histogram -> float -> unit
 val dump : unit -> string
 
 (** Периодически писать метрики в лог (каждые interval_s секунд) *)
-val start_reporter : interval_s:int -> unit
+val start_reporter : ?stop:(unit -> bool) -> interval_s:int -> unit -> unit

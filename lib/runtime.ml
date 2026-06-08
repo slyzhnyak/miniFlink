@@ -130,10 +130,12 @@ let run ?(label="default") cfg
         let lag = !max_ts - t in
         if !max_ts > min_int then
           Metrics_log.set_gauge m.wm_lag_ms (float_of_int (max 0 lag))),
-      (fun () -> Metrics_log.start_reporter ~interval_s:30),
+      (fun () -> Metrics_log.start_reporter
+                   ~stop:Shutdown_default.is_requested ~interval_s:30 ()),
       (fun () ->
         if cfg.metrics_port > 0 then
-          Metrics_log.start_server ~port:cfg.metrics_port ())
+          Metrics_log.start_server
+            ~stop:Shutdown_default.is_requested ~port:cfg.metrics_port ())
     | _ ->
       noop_metrics, noop_metrics,
       (fun _ -> ()), (fun _ -> ()),
