@@ -189,16 +189,25 @@ let union (a : 'v t Stream.t) (b : 'v t Stream.t) : 'v t Stream.t =
          эмитим объединённый wm = min, только если он продвинулся *)
       | Some (Watermark w), _ ->
         pa := None; wm_a := w;
-        let m = min !wm_a !wm_b in
-        if !b_done then (emitted_wm := w; Some (Watermark w))
-        else if m > !emitted_wm then (emitted_wm := m; Some (Watermark m))
-        else step ()
+        (* B исчерпан → его данные больше не придут, ограничивает только A.
+           Но watermark не должен откатываться ниже уже эмитированного
+           (монотонность) — иначе закрытые окна «переоткроются». *)
+        if !b_done then
+          (if w > !emitted_wm then (emitted_wm := w; Some (Watermark w))
+           else step ())
+        else
+          let m = min !wm_a !wm_b in
+          if m > !emitted_wm then (emitted_wm := m; Some (Watermark m))
+          else step ()
       | _, Some (Watermark w) ->
         pb := None; wm_b := w;
-        let m = min !wm_a !wm_b in
-        if !a_done then (emitted_wm := w; Some (Watermark w))
-        else if m > !emitted_wm then (emitted_wm := m; Some (Watermark m))
-        else step ()
+        if !a_done then
+          (if w > !emitted_wm then (emitted_wm := w; Some (Watermark w))
+           else step ())
+        else
+          let m = min !wm_a !wm_b in
+          if m > !emitted_wm then (emitted_wm := m; Some (Watermark m))
+          else step ()
       (* данные с обеих сторон — эмитим меньший по времени *)
       | Some ea, Some eb ->
         if ts ea <= ts eb then (pa := None; Some ea)

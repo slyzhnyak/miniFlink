@@ -142,6 +142,22 @@ let test_union_watermark_monotone () =
     | _ -> true in
   check "watermarks non-decreasing" (monotone wms)
 
+(* Краевой случай (review 3.8): один вход подтвердил высокий watermark и
+   закончился, другой потом даёт НИЗКИЙ — объединённый не должен
+   откатиться назад (иначе закрытые окна «переоткрылись» бы). *)
+let test_union_done_no_regression () =
+  Printf.printf "\n-- union: finished input does not let watermark go backwards\n";
+  (* B подтверждает wm=100 и заканчивается; A потом даёт wm=50 *)
+  let a = Stream.of_list [Mf_event.data "a" 10; Mf_event.wm 50] in
+  let b = Stream.of_list [Mf_event.data "b" 20; Mf_event.wm 100] in
+  let wms = Mf_event.union a b |> Stream.to_list
+    |> List.filter_map (function Mf_event.Watermark w -> Some w | _ -> None) in
+  let rec monotone = function
+    | x :: (y :: _ as rest) -> x <= y && monotone rest | _ -> true in
+  check "no backwards watermark after input finishes" (monotone wms);
+  check "max emitted watermark not lost"
+    (match List.rev wms with last :: _ -> last >= 50 | [] -> false)
+
 (* ── update_table: enrich видит обновления ПО ХОДУ ─────────── *)
 let test_update_table_live () =
   Printf.printf "\n-- enrich sees table updates as they happen (live)\n";
@@ -186,6 +202,7 @@ let () =
   test_union_uneven_length ();
   test_union_associative ();
   test_union_watermark_monotone ();
+  test_union_done_no_regression ();
   test_update_table ();
   test_update_table_live ();
   test_update_table_watermark ();
