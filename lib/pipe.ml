@@ -173,6 +173,94 @@ let window
     результат [f key vs] (например max-скорость, min-топливо). *)
 let aggregate f = emap (fun (key, vs) -> f key vs)
 
+(* ── Incremental window aggregation ───────────────────────── *)
+
+(* Инкрементальная агрегация: вместо хранения всех событий окна списком
+   и свёртки post-factum, окно держит АККУМУЛЯТОР и обновляет его на
+   каждом событии через [~add]. Это убирает материализацию списка
+   (меньше памяти, нет O(n) reverse, лучше locality) — главный perf-win
+   для окон с большим числом событий.
+
+   Состояние окна — (acc, есть ли хоть одно событие). Пустые окна не
+   эмитятся. Late data в закрытое окно сворачивается в сохранённый acc
+   и пере-эмитится (retract старого результата + новый), как и в [window]. *)
+type 'acc fold_state =
+  | FOpen  of 'acc * bool        (* аккумулятор, был ли хоть один add *)
+  | FFired of 'acc * bool
+
+(** [window_fold (module K) ?latency ?allowed_lateness spec ~init ~add
+    upstream] — окно с {e инкрементальной} агрегацией. Вместо накопления
+    списка событий сворачивает каждое событие в аккумулятор [~add acc v]
+    сразу при поступлении, начиная с [~init ()]. Эмитит [(key, acc)] при
+    закрытии окна.
+
+    Отличие от [window |> aggregate]: тот хранит весь список окна и
+    сворачивает в конце (O(n) память на окно); этот хранит только
+    аккумулятор (O(1) на окно по числу событий). Используйте когда
+    агрегат инкрементален (сумма, счёт, max, min, среднее как (сумма,
+    счёт)) — это даёт меньше памяти и GC-давления на больших окнах.
+
+    [~init] — функция (а не значение), чтобы у каждого окна был свой
+    свежий аккумулятор (важно для mutable-аккумуляторов). *)
+let window_fold
+    (type a) (type acc)
+    (module K : Keyed.S with type t = a)
+    ?(latency = 0)
+    ?(allowed_lateness = 0)
+    (spec : win_spec)
+    ~(init : unit -> acc)
+    ~(add  : acc -> a -> acc)
+    (upstream : a Mf_event.t Stream.t)
+    : (string * acc) Mf_event.t Stream.t =
+  let tbl : acc fold_state WMap.t ref = ref WMap.empty in
+  let out : (string * acc) Mf_event.t Queue.t = Queue.create () in
+  let emit_data k stop acc = Queue.push (Mf_event.data (k, acc) stop) out in
+  let emit_retract k stop acc = Queue.push (Mf_event.retract (k, acc) stop) out in
+  fun () ->
+    let rec pull () =
+      if not (Queue.is_empty out) then Some (Queue.pop out) else
+      match upstream () with
+      | None ->
+        WMap.iter (fun (k,_,stop) st ->
+          match st with FOpen (acc, true) -> emit_data k stop acc | _ -> ()
+        ) !tbl;
+        tbl := WMap.empty;
+        if Queue.is_empty out then None else Some (Queue.pop out)
+      | Some (Mf_event.Watermark wm) ->
+        WMap.iter (fun (k,s,stop) st ->
+          match st with
+          | FOpen (acc, nonempty) when stop + latency <= wm ->
+            if nonempty then emit_data k stop acc;
+            tbl := WMap.add (k,s,stop) (FFired (acc, nonempty)) !tbl
+          | _ -> ()
+        ) !tbl;
+        tbl := WMap.filter (fun (_,_,stop) st ->
+          match st with
+          | FFired _ -> stop + latency + allowed_lateness > wm
+          | FOpen _  -> true
+        ) !tbl;
+        Queue.push (Mf_event.wm wm) out;
+        pull ()
+      | Some (Mf_event.Retract _) -> pull ()
+      | Some (Mf_event.Data (v,t)) ->
+        List.iter (fun (s, stop) ->
+          let mk = (K.key v, s, stop) in
+          match WMap.find_opt mk !tbl with
+          | None ->
+            tbl := WMap.add mk (FOpen (add (init ()) v, true)) !tbl
+          | Some (FOpen (acc, _)) ->
+            tbl := WMap.add mk (FOpen (add acc v, true)) !tbl
+          | Some (FFired (acc, _)) ->
+            (* late data: сворачиваем в сохранённый acc, пере-эмитим *)
+            emit_retract (K.key v) stop acc;
+            let acc' = add acc v in
+            emit_data (K.key v) stop acc';
+            tbl := WMap.add mk (FFired (acc', true)) !tbl
+        ) (assign spec t);
+        pull ()
+    in pull ()
+
+
 (* ── Count windows ────────────────────────────────────────── *)
 
 (** Спецификация count-окна: по числу событий, не по времени. *)

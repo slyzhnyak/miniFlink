@@ -79,6 +79,25 @@ val aggregate :
   (string -> 'a list -> 'b) ->
   (string * 'a list) Mf_event.t Stream.t -> 'b Mf_event.t Stream.t
 
+(** [window_fold (module K) ?latency ?allowed_lateness spec ~init ~add
+    upstream] — окно с {e инкрементальной} агрегацией. Сворачивает каждое
+    событие в аккумулятор сразу ([add acc v], старт [init ()]), а не
+    копит список и агрегирует в конце. Эмитит [(key, acc)] при закрытии.
+
+    В отличие от [window |> aggregate] (O(n) памяти на окно — весь
+    список), хранит только аккумулятор (O(1) по числу событий). Подходит
+    для инкрементальных агрегатов (сумма, счёт, max, min, среднее как
+    пара сумма/счёт) — меньше памяти и GC-давления на больших окнах.
+    [~init] — функция, чтобы у каждого окна был свежий аккумулятор. *)
+val window_fold :
+  (module Keyed.S with type t = 'a) ->
+  ?latency:Time.t ->
+  ?allowed_lateness:Time.t ->
+  win_spec ->
+  init:(unit -> 'acc) ->
+  add:('acc -> 'a -> 'acc) ->
+  'a Mf_event.t Stream.t -> (string * 'acc) Mf_event.t Stream.t
+
 (** {2 Count-окна (по количеству событий, без watermarks)} *)
 
 (** Спецификация count-окна. *)
