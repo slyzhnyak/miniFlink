@@ -17,7 +17,7 @@ Apache Flink **на одном узле**. Акцент — на чистоте 
 operators, exactly-once (end-to-end: offset, 2PC sink, recovery, durable),
 table/join с TTL, union потоков, retractions — плюс production-слои
 (DLQ + retry/backoff, graceful shutdown, Prometheus metrics, структурированные
-логи, health, config, RocksDB state). ~3900 строк OCaml, 31 тест-сюит.
+логи, health, config, RocksDB state). ~3900 строк OCaml, 34 тест-сюит.
 
 ## Почему декларативно
 
@@ -99,9 +99,10 @@ variants/            — реализации channel/parallel по версии
 bin/    main.ml        демо pipeline
 examples/              самодостаточные примеры (см. examples/README.md)
 bench/  bench.ml bench_parallel.ml
-test/   31 тест-сюит (core, props, invariants, reliability, metrics,
+test/   34 тест-сюит (core, props, invariants, reliability, metrics,
                      retract, sliding, count_window, session_window,
                      global_window, window_fold, agg, union, safe,
+                     recovery, differential, cardinality,
                      dedup_evict, parallel_crash,
                      determinism, watermark, idle_watermark, table_ttl,
                      checkpoint_parallel, rocksdb, codec, channel,
@@ -205,9 +206,9 @@ Channel overhead: ~106 нс/msg (Mutex+Condition).
 | Graceful Shutdown           | ✓ реализовано (SIGTERM/INT)   |
 | Prometheus Metrics          | ✓ реализовано (HTTP :9090)    |
 | Изоляция исключений         | ✓ safe_map / safe_filter (битое событие → on_error, не падение) |
-| Unit + Property тесты       | ✓ 31 сюит, QCheck-инварианты  |
+| Unit + Property тесты       | ✓ 34 сюит, QCheck-инварианты  |
 | Exactly-once parallel       | ✓ реализовано (barrier + snapshot) |
-| Exactly-once end-to-end     | ✓ offset + 2PC sink + recovery + durable |
+| Exactly-once end-to-end     | ✓ offset + 2PC sink + recovery + durable (E2E recovery harness: kill→recover→output совпадает) |
 | Структурированные логи (JSON) | ✓ Log (событие+sink, назначение — за приложением) |
 | Health/readiness            | ✓ Health.check (структура, не сервер) |
 | Queue depth                 | ✓ хук on_queue_depth в parallel |

@@ -188,3 +188,21 @@
  (libraries miniflink)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_safe))
+
+(test
+ (name test_recovery)
+ (libraries miniflink)
+ (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
+ (modules test_recovery))
+
+(test
+ (name test_differential)
+ (libraries miniflink)
+ (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
+ (modules test_differential))
+
+(test
+ (name test_cardinality)
+ (libraries miniflink)
+ (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
+ (modules test_cardinality))
