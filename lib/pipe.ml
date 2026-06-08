@@ -154,6 +154,36 @@ let map      = emap
 let filter   = efilt
 let flat_map = eflatmap
 
+(* ── Изоляция исключений из пользовательского кода ────────── *)
+
+(* По умолчанию исключение из пользовательской функции в map/filter/etc.
+   роняет весь пайплайн (как и в любом OCaml-коде). Для прода, где битые
+   события неизбежны, safe_* ловят исключение, зовут ~on_error и
+   ПРОПУСКАЮТ событие — один плохой элемент не валит весь поток.
+   Это аналог safe_decode для произвольных пользовательских функций. *)
+
+(** [safe_map ~on_error f] как [map f], но исключение из [f] на событии
+    перехватывается: вызывается [on_error exn] и событие отбрасывается
+    (поток продолжается). Watermark/Retract проходят как обычно. *)
+let safe_map ~on_error f upstream =
+  Stream.flat_map (function
+    | Mf_event.Data (v, t) ->
+      (try [Mf_event.data (f v) t]
+       with e -> on_error e; [])
+    | Mf_event.Watermark wm -> [Mf_event.wm wm]
+    | Mf_event.Retract (_, _) -> [])   (* retract входного типа не транслируется *)
+    upstream
+
+(** [safe_filter ~on_error p] как [filter p], но исключение из [p]
+    перехватывается: [on_error exn], событие отбрасывается. *)
+let safe_filter ~on_error p upstream =
+  Stream.flat_map (function
+    | Mf_event.Data (v, _) as ev ->
+      (try if p v then [ev] else []
+       with e -> on_error e; [])
+    | Mf_event.Watermark _ | Mf_event.Retract _ as ev -> [ev])
+    upstream
+
 (* ── Sink helpers ─────────────────────────────────────────── *)
 
 let sink f stream =

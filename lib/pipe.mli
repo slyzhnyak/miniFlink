@@ -23,6 +23,26 @@ val filter : ('a -> bool) -> 'a Mf_event.t Stream.t -> 'a Mf_event.t Stream.t
     event-time и вид события. *)
 val flat_map : ('a -> 'b list) -> 'a Mf_event.t Stream.t -> 'b Mf_event.t Stream.t
 
+(** {2 Изоляция исключений из пользовательского кода} *)
+
+(** По умолчанию исключение из пользовательской функции в [map]/[filter]/
+    [aggregate]/[window_fold]/... роняет весь пайплайн (обычная семантика
+    OCaml). В проде, где битые события неизбежны, изолируй их: [safe_*]
+    ловят исключение, зовут [~on_error] и {e пропускают} событие — один
+    плохой элемент не валит весь поток (аналог поведения decode→DLQ). *)
+
+(** Как {!map}, но исключение из [f] на событии перехватывается:
+    вызывается [on_error exn], событие отбрасывается, поток продолжается. *)
+val safe_map :
+  on_error:(exn -> unit) -> ('a -> 'b) ->
+  'a Mf_event.t Stream.t -> 'b Mf_event.t Stream.t
+
+(** Как {!filter}, но исключение из предиката перехватывается:
+    [on_error exn], событие отбрасывается. *)
+val safe_filter :
+  on_error:(exn -> unit) -> ('a -> bool) ->
+  'a Mf_event.t Stream.t -> 'a Mf_event.t Stream.t
+
 (** {2 Обогащение} *)
 
 (** [enrich (module K) ~from ~merge upstream] для каждого события ищет в
