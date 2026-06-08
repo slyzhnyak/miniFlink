@@ -113,6 +113,24 @@ test/   30 тест-сюит (core, props, invariants, reliability, metrics,
 по версии OCaml через `(rule (enabled_if (>= %{ocaml_version} 5.0.0)))` —
 никакого ручного `cp`.
 
+## Использование как зависимость
+
+В своём проекте добавь зависимость и подтяни miniFlink через opam pin
+из git (публикации в opam-репозиторий нет — это своя библиотека):
+
+```bash
+opam pin add miniflink https://github.com/slyzhnyak/miniFlink.git
+```
+
+В `dune-project` приложения: `(depends miniflink ...)`, в `dune`
+библиотеки/бинаря приложения — `(libraries miniflink ...)`. Модули под
+namespace `Miniflink.*` (`Miniflink.Pipe`, `Miniflink.Stream`, ...), либо
+`open Miniflink` в начале файла.
+
+Системное требование: **`librocksdb-dev`** должна быть установлена (C FFI
+для персистентного state backend) — opam её не ставит сам, поставь
+вручную (`apt install librocksdb-dev`) перед сборкой.
+
 ## Запуск
 
 ```bash
