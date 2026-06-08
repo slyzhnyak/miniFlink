@@ -107,6 +107,7 @@ type coordinator = {
   workers   : int;
   store     : checkpoint_store;
   pending   : worker_snapshot option array;
+  alive     : bool array;        (* воркер ещё жив? упавших не ждём *)
   co_mu     : Mutex.t;
   co_done   : Condition.t;
 }
@@ -115,30 +116,54 @@ let make_coordinator ~workers ~store = {
   workers;
   store;
   pending = Array.make workers None;
+  alive   = Array.make workers true;
   co_mu   = Mutex.create ();
   co_done = Condition.create ();
 }
 
+(* Пометить воркера выбывшим (после краха) — определено ниже, после
+   try_close, т.к. использует его. *)
+
 (* Воркер сообщает свой снапшот. Когда собраны все N — commit
    вместе с зафиксированным offset источника. *)
-let submit_snapshot c (snap : worker_snapshot) =
-  Mutex.lock c.co_mu;
-  c.pending.(snap.worker) <- Some snap;
-  if Array.for_all Option.is_some c.pending then begin
-    (* Все воркеры достигли barrier — атомарный commit.
-       offset = сумма обработанных событий по воркерам. Это число
-       гарантированно согласовано со снапшотами: и счётчик, и снапшот
-       сняты в один момент (когда воркер обработал barrier), после всех
-       Data-событий до barrier в его FIFO-канале. *)
-    let snapshots = Array.map Option.get c.pending in
+(* Закрыть checkpoint если снапшоты пришли от всех ЖИВЫХ воркеров.
+   Вызывается под co_mu из submit_snapshot и mark_failed. epoch берём
+   из любого присланного снапшота. *)
+let try_close c =
+  let idxs = Array.init c.workers (fun i -> i) in
+  let all_alive_ready =
+    Array.for_all (fun i -> not c.alive.(i) || Option.is_some c.pending.(i)) idxs
+    && Array.exists (fun i -> c.alive.(i) && Option.is_some c.pending.(i)) idxs in
+  if all_alive_ready then begin
+    let snapshots =
+      Array.to_list c.pending
+      |> List.filteri (fun i _ -> c.alive.(i))
+      |> List.filter_map (fun x -> x)
+      |> Array.of_list in
+    let epoch = snapshots.(0).epoch in
     let total_processed =
       Array.fold_left (fun a s -> a + s.processed) 0 snapshots in
-    commit c.store { cp_epoch = snap.epoch;
+    commit c.store { cp_epoch = epoch;
                      cp_offset = total_processed;
                      cp_snapshots = snapshots };
     Array.fill c.pending 0 c.workers None;
     Condition.broadcast c.co_done
-  end;
+  end
+
+let submit_snapshot c (snap : worker_snapshot) =
+  Mutex.lock c.co_mu;
+  c.pending.(snap.worker) <- Some snap;
+  try_close c;
+  Mutex.unlock c.co_mu
+
+(* Пометить воркера выбывшим (после краха). Координатор перестаёт ждать
+   его снапшот; если он был последним недостающим — текущий checkpoint
+   закрывается по оставшимся живым. *)
+let mark_failed c worker =
+  Mutex.lock c.co_mu;
+  if worker < c.workers then c.alive.(worker) <- false;
+  c.pending.(worker) <- None;
+  try_close c;
   Mutex.unlock c.co_mu
 
 (* Ждать коммита данного epoch (для теста/синхронизации) *)
@@ -289,6 +314,9 @@ let run_exactly_once
          in loop ()
        with e ->
          failed.(i) <- true;
+         (* сообщаем координатору что воркер выбыл — иначе он будет
+            ждать снапшот мёртвого и checkpoint залипнет (R1) *)
+         mark_failed coord i;
          Channel.close in_chans.(i);
          (* Откатываем незакоммиченные выходы текущего epoch этого воркера *)
          sink.ts_abort (Atomic.get current_epoch);
@@ -353,7 +381,12 @@ let run_exactly_once
          end
        | Mf_event.Watermark _ ->
          Array.iteri (fun i ch -> send_to i ch (Event ev)) in_chans
-       | Mf_event.Retract _ -> ());
+       | Mf_event.Retract (v, _) ->
+         (* ретракт шардируем по ключу как Data — иначе он терялся бы
+            (R2) и retract-семантика в EO-пути расходилась бы с обычным
+            Pipe-путём *)
+         let shard = hash_key (key_of v) workers in
+         send_to shard in_chans.(shard) (Event ev));
       drive ()
   in
   drive ();
