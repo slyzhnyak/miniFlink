@@ -220,8 +220,7 @@ Channel overhead: ~106 нс/msg (Mutex+Condition).
 | Типы окон                   | ✓ tumbling, sliding, count, session (слияние), global+triggers |
 | Агрегация окон              | ✓ инкрементальная (window_fold) + комбинируемые агрегаторы (Agg) |
 | Persistent state (RocksDB)  | ✓ реализовано (C FFI, librocksdb) |
-| MQTT adapter                | ✓ в miniflink/ (C FFI)        |
-| Kafka adapter               | ✓ в miniflink/ (C FFI)        |
+| Источники/sink              | in-memory (seekable_of_list) + функции pull/push; MQTT/Kafka-адаптеров нет (источник подключает приложение) |
 
 ## TODO — чего ещё нет
 
