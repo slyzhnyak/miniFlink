@@ -196,7 +196,23 @@ val global_window :
 
 (** [stateful ~init ~f upstream] — оператор с состоянием: [f state event]
     возвращает новое состояние и список выходных событий. Watermark
-    проходит прозрачно. *)
+    проходит прозрачно.
+
+    {b Внимание:} состояние {e одно на весь поток}, НЕ per-key (в отличие
+    от Flink keyed state). Если нужно состояние по ключу — держи [Hashtbl]
+    по [K.key] внутри замыкания [f] и обновляй нужную ячейку:
+    {[
+      let table = Hashtbl.create 64 in
+      Pipe.stateful ~init:() ~f:(fun () ev ->
+        match ev with
+        | Mf_event.Data (v, t) ->
+          let k = K.key v in
+          let s = Option.value ~default:init (Hashtbl.find_opt table k) in
+          let s', outs = step s v in
+          Hashtbl.replace table k s';
+          (), List.map (fun o -> Mf_event.data o t) outs
+        | _ -> (), [])
+    ]} *)
 val stateful :
   init:'s ->
   f:('s -> 'a Mf_event.t -> 's * 'b Mf_event.t list) ->
