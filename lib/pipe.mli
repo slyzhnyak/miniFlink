@@ -98,6 +98,19 @@ val window_fold :
   add:('acc -> 'a -> 'acc) ->
   'a Mf_event.t Stream.t -> (string * 'acc) Mf_event.t Stream.t
 
+(** [window_agg (module K) ?latency ?allowed_lateness spec agg upstream] —
+    оконная агрегация готовым комбинируемым агрегатором {!Agg.t}.
+    Инкрементально (поверх {!window_fold}): O(1) памяти на окно. Эмитит
+    [(key, результат)] при закрытии. Удобнее ручного [~init ~add], и
+    несколько агрегатов считаются за один проход через [Agg.both]. *)
+val window_agg :
+  (module Keyed.S with type t = 'a) ->
+  ?latency:Time.t ->
+  ?allowed_lateness:Time.t ->
+  win_spec ->
+  ('a, 'r) Agg.t ->
+  'a Mf_event.t Stream.t -> (string * 'r) Mf_event.t Stream.t
+
 (** {2 Count-окна (по количеству событий, без watermarks)} *)
 
 (** Спецификация count-окна. *)

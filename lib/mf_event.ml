@@ -90,6 +90,12 @@ let with_watermarks_ext ~latency ?(interval = 0) (src : 'a t Stream.t)
     максимум). Обратно совместимая форма. *)
 let with_watermarks ~latency src = with_watermarks_ext ~latency ~interval:0 src
 
+(** [of_list ~ts xs] — поток Data-событий из списка значений, event-time
+    каждого берётся из [ts]. Убирает повторяющееся
+    [Stream.of_list (List.map (fun v -> data v (ts v)) xs)]. *)
+let of_list ~ts xs =
+  Stream.of_list (List.map (fun v -> Data (v, ts v)) xs)
+
 (** Idle watermark: продвигает watermark по {e wall-clock} когда источник
     замолчал, чтобы окна не висели открытыми в тишине.
 

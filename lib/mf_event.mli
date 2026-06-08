@@ -48,6 +48,11 @@ val with_watermarks_ext :
     [~interval:0] (watermark на каждый новый максимум). *)
 val with_watermarks : latency:Time.t -> 'a t Stream.t -> 'a t Stream.t
 
+(** [of_list ~ts xs] — поток [Data]-событий из списка значений, event-time
+    каждого берётся из [ts v]. Убирает повторяющийся шаблон
+    [Stream.of_list (List.map (fun v -> data v (ts v)) xs)]. *)
+val of_list : ts:('a -> Time.t) -> 'a list -> 'a t Stream.t
+
 (** Idle watermark: продвигает watermark по {e wall-clock} когда источник
     замолчал, чтобы окна не висели в тишине.
 

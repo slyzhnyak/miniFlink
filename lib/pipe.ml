@@ -80,6 +80,27 @@ let session_window   = Window.session_window
     результат [f key vs] (например max-скорость, min-топливо). *)
 let aggregate f = emap (fun (key, vs) -> f key vs)
 
+(** [window_agg (module K) ?latency ?allowed_lateness spec agg upstream] —
+    оконная агрегация готовым комбинируемым агрегатором {!Agg.t}.
+    Инкрементально (через [window_fold]): O(1) памяти на окно. Эмитит
+    [(key, результат_агрегата)] при закрытии окна.
+
+    {[
+      ... |> Pipe.window_agg (module Sensor) (Pipe.tumbling (seconds 10))
+                Agg.(both (mean temp) (max_by temp))
+    ]} *)
+let window_agg
+    (type a) (type r)
+    (module K : Keyed.S with type t = a)
+    ?latency ?allowed_lateness
+    (spec : Window.win_spec)
+    (agg : (a, r) Agg.t)
+    (upstream : a Mf_event.t Stream.t)
+    : (string * r) Mf_event.t Stream.t =
+  Agg.with_parts agg { Agg.k = fun init add finish ->
+    window_fold (module K) ?latency ?allowed_lateness spec ~init ~add upstream
+    |> emap (fun (key, acc) -> (key, finish acc)) }
+
 (* ── Stateful ─────────────────────────────────────────────── *)
 
 let stateful ~init ~f upstream =

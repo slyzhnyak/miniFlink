@@ -33,13 +33,10 @@ let pipeline source =
   |> Pipe.filter (fun r -> r.celsius > -100. && r.celsius < 200.)
   (* watermark: данные могут опоздать на 2с *)
   |> Mf_event.with_watermarks ~latency:(seconds 2)
-  (* окна по 10 секунд, группировка по sensor_id *)
-  |> Pipe.window (module Sensor) (Pipe.tumbling (seconds 10))
-  (* средняя температура в каждом окне *)
-  |> Pipe.aggregate (fun sensor readings ->
-       let n = List.length readings in
-       let sum = List.fold_left (fun a r -> a +. r.celsius) 0. readings in
-       (sensor, sum /. float_of_int n, n))
+  (* окна по 10 секунд + агрегаторы: среднее и счёт за один проход.
+     Никакой ручной свёртки — готовые комбинируемые агрегаты. *)
+  |> Pipe.window_agg (module Sensor) (Pipe.tumbling (seconds 10))
+       Agg.(both (mean (fun r -> r.celsius)) count)
 
 (* ── 4. Данные и запуск ───────────────────────────────────── *)
 let sample = [
@@ -57,11 +54,12 @@ let sample = [
 
 let () =
   Printf.printf "=== Пример 1: средняя температура по датчику за окно 10с ===\n\n";
-  Stream.of_list (List.map (fun r -> Mf_event.data r r.ts) sample)
+  Mf_event.of_list ~ts:(fun (r:reading) -> r.ts) sample
   |> pipeline
   |> Stream.to_list
   |> List.iter (function
-       | Mf_event.Data ((sensor, avg, n), window_end) ->
-         Printf.printf "окно[..%ds]  датчик %s:  средняя %.1f°C  (%d показаний)\n"
-           (window_end / 1000) sensor avg n
+       | Mf_event.Data ((sensor, (avg, n)), window_end) ->
+         let avg_s = match avg with Some a -> Printf.sprintf "%.1f°C" a | None -> "—" in
+         Printf.printf "окно[..%ds]  датчик %s:  средняя %s  (%d показаний)\n"
+           (window_end / 1000) sensor avg_s n
        | _ -> ())
