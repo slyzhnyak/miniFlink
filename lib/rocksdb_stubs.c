@@ -15,6 +15,7 @@
 #include <caml/memory.h>
 #include <caml/fail.h>
 #include <caml/custom.h>
+#include <caml/threads.h>   /* caml_enter/leave_blocking_section */
 
 /* Обёртка для rocksdb* в OCaml custom block */
 #define Rocksdb_val(v) (*((rocksdb_t **) Data_custom_val(v)))
@@ -43,12 +44,24 @@ CAMLprim value mf_rocksdb_open(value path) {
   CAMLparam1(path);
   CAMLlocal1(result);
 
+  /* копируем путь до blocking section */
+  size_t plen = caml_string_length(path);
+  char *pbuf = malloc(plen + 1);
+  if (!pbuf) caml_failwith("rocksdb_open: oom");
+  memcpy(pbuf, String_val(path), plen);
+  pbuf[plen] = '\0';
+
   char *err = NULL;
   rocksdb_options_t *opts = rocksdb_options_create();
   rocksdb_options_set_create_if_missing(opts, 1);
 
-  rocksdb_t *db = rocksdb_open(opts, String_val(path), &err);
+  /* открытие БД — блокирующий дисковый I/O, отпускаем runtime */
+  caml_enter_blocking_section();
+  rocksdb_t *db = rocksdb_open(opts, pbuf, &err);
   rocksdb_options_destroy(opts);
+  caml_leave_blocking_section();
+
+  free(pbuf);
 
   if (err != NULL) {
     char msg[512];
@@ -79,13 +92,29 @@ CAMLprim value mf_rocksdb_put(value v, value key, value data) {
   rocksdb_t *db = Rocksdb_val(v);
   if (db == NULL) caml_failwith("rocksdb_put: db closed");
 
+  /* Скопировать key/data в C-память ДО blocking section: внутри секции
+     другие домены работают и GC может двигать OCaml-кучу — трогать
+     String_val/Bytes_val там нельзя. */
+  size_t klen = caml_string_length(key);
+  size_t dlen = caml_string_length(data);
+  char *kbuf = malloc(klen);
+  char *dbuf = malloc(dlen);
+  if ((klen && !kbuf) || (dlen && !dbuf)) {
+    free(kbuf); free(dbuf); caml_failwith("rocksdb_put: oom");
+  }
+  memcpy(kbuf, String_val(key), klen);
+  memcpy(dbuf, Bytes_val(data), dlen);
+
   char *err = NULL;
   rocksdb_writeoptions_t *wopts = rocksdb_writeoptions_create();
-  rocksdb_put(db, wopts,
-              String_val(key), caml_string_length(key),
-              Bytes_val(data), caml_string_length(data),
-              &err);
+  /* Отпустить runtime на время блокирующего дискового I/O — другие
+     домены продолжают работать (иначе на OCaml 5 встал бы весь процесс). */
+  caml_enter_blocking_section();
+  rocksdb_put(db, wopts, kbuf, klen, dbuf, dlen, &err);
   rocksdb_writeoptions_destroy(wopts);
+  caml_leave_blocking_section();
+
+  free(kbuf); free(dbuf);
 
   if (err != NULL) {
     char msg[512];
@@ -104,13 +133,21 @@ CAMLprim value mf_rocksdb_get(value v, value key) {
   rocksdb_t *db = Rocksdb_val(v);
   if (db == NULL) caml_failwith("rocksdb_get: db closed");
 
+  /* копируем ключ до blocking section (см. mf_rocksdb_put) */
+  size_t klen = caml_string_length(key);
+  char *kbuf = malloc(klen ? klen : 1);
+  if (!kbuf) caml_failwith("rocksdb_get: oom");
+  memcpy(kbuf, String_val(key), klen);
+
   char *err = NULL;
   size_t vlen = 0;
   rocksdb_readoptions_t *ropts = rocksdb_readoptions_create();
-  char *val = rocksdb_get(db, ropts,
-                          String_val(key), caml_string_length(key),
-                          &vlen, &err);
+  caml_enter_blocking_section();
+  char *val = rocksdb_get(db, ropts, kbuf, klen, &vlen, &err);
   rocksdb_readoptions_destroy(ropts);
+  caml_leave_blocking_section();
+
+  free(kbuf);
 
   if (err != NULL) {
     char msg[512];
@@ -124,7 +161,8 @@ CAMLprim value mf_rocksdb_get(value v, value key) {
     CAMLreturn(Val_int(0));
   }
 
-  /* Some bytes — копируем немедленно, затем free C-буфер */
+  /* Some bytes — аллоцируем OCaml ПОСЛЕ blocking section, копируем,
+     затем освобождаем C-буфер */
   data = caml_alloc_string(vlen);
   memcpy(Bytes_val(data), val, vlen);
   free(val);
@@ -140,11 +178,19 @@ CAMLprim value mf_rocksdb_delete(value v, value key) {
   rocksdb_t *db = Rocksdb_val(v);
   if (db == NULL) caml_failwith("rocksdb_delete: db closed");
 
+  size_t klen = caml_string_length(key);
+  char *kbuf = malloc(klen ? klen : 1);
+  if (!kbuf) caml_failwith("rocksdb_delete: oom");
+  memcpy(kbuf, String_val(key), klen);
+
   char *err = NULL;
   rocksdb_writeoptions_t *wopts = rocksdb_writeoptions_create();
-  rocksdb_delete(db, wopts,
-                 String_val(key), caml_string_length(key), &err);
+  caml_enter_blocking_section();
+  rocksdb_delete(db, wopts, kbuf, klen, &err);
   rocksdb_writeoptions_destroy(wopts);
+  caml_leave_blocking_section();
+
+  free(kbuf);
 
   if (err != NULL) {
     char msg[512];
