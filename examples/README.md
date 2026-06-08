@@ -6,7 +6,7 @@
 
 | Пример | Что показывает |
 |--------|----------------|
-| [`ex01_minimal.ml`](ex01_minimal.ml) | Минимум: свой тип, `KEYED`-модуль для ключа, `filter → window → aggregate`. Средняя температура датчиков по окнам. |
+| [`ex01_minimal.ml`](ex01_minimal.ml) | Минимум: свой тип, `KEYED`-модуль для ключа, `filter → window_agg`. Среднее и счёт по датчикам через комбинируемые агрегаторы (`Agg.both`). |
 | [`ex02_alerts.ml`](ex02_alerts.ml) | `enrich` из справочной таблицы, генерация алертов через `flat_map`, `dedup` с cooldown (подавление дублей). Вход и выход — разные типы. |
 | [`ex03_windows.ml`](ex03_windows.ml) | Четыре типа окон на одном потоке: tumbling (время), count (количество), session (паузы активности), global + trigger (по событию). |
 | [`ex04_mine.ml`](ex04_mine.ml) | **Комплексная топология** (мониторинг шахты): три источника, `union` (слияние по event-time), `update_table` (таблица порогов из потока конфигурации), `enrich` из таблиц, tumbling + session окна, агрегация, правила, `dedup`. Показывает весь функционал вместе. |
@@ -39,11 +39,12 @@ let pipeline source =
   source
   |> Pipe.filter (fun r -> r.celsius < 200.)
   |> Mf_event.with_watermarks ~latency:(Time.seconds 2)
-  |> Pipe.window (module Sensor) (Pipe.tumbling (Time.seconds 10))
-  |> Pipe.aggregate (fun key readings -> ...)
+  (* окно + готовые агрегаторы (среднее и максимум за один проход) *)
+  |> Pipe.window_agg (module Sensor) (Pipe.tumbling (Time.seconds 10))
+       Agg.(both (mean (fun r -> r.celsius)) (max_by (fun r -> r.celsius)))
 
-(* 4. подать данные *)
-Stream.of_list (List.map (fun r -> Mf_event.data r r.ts) data)
+(* 4. подать данные — of_list берёт event-time из ~ts *)
+Mf_event.of_list ~ts:(fun r -> r.ts) data
 |> pipeline |> Stream.to_list
 ```
 

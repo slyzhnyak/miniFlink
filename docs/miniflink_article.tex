@@ -49,7 +49,9 @@ parameter, making the pipeline read as a specification rather than
 an implementation. We implement event time, watermarks (with periodic
 emission, end-of-stream flush, and wall-clock idle advancement),
 windowing in five flavors (tumbling, sliding, count, session with
-merging, and a global window with custom triggers), stateful
+merging, and a global window with custom triggers) with both
+materializing and incremental ($O(1)$-memory) aggregation plus a
+library of composable aggregators, stateful
 operators, exactly-once checkpointing (single-thread and parallel via
 Chandy-Lamport barrier snapshots, with source-offset recovery and a
 transactional sink), table and join semantics with TTL eviction,
@@ -229,6 +231,24 @@ delegate the fire decision to a pluggable \emph{trigger}
 ($\mathtt{Continue} \mid \mathtt{Fire} \mid \mathtt{FireAndPurge}$),
 separating the assigner (how to group) from the trigger (when to emit)
 — the foundation other firing policies build on.
+
+Aggregation over windows comes in two forms. The materializing path
+(\texttt{window |> aggregate}) keeps the full event list and folds it
+post-hoc — $O(n)$ memory per window. The incremental path
+(\texttt{window\_fold \textasciitilde{}init \textasciitilde{}add})
+folds each event into an accumulator on arrival — $O(1)$ memory in the
+event count. On top sits a small library of composable aggregators
+(\texttt{Agg}): \texttt{count}, \texttt{sum}, \texttt{mean},
+\texttt{min\_by}/\texttt{max\_by}, \texttt{arg\_min}/\texttt{arg\_max},
+etc. An aggregator hides its accumulator type behind a GADT
+existential, so aggregators with different accumulators combine
+uniformly; \texttt{both} (and an applicative \texttt{let+}/\texttt{and+})
+compute several aggregates in a single pass. Feeding such an aggregator
+to a window (\texttt{window\_agg}) requires applying the hidden
+accumulator inside \texttt{window\_fold}; this is done with a rank-2
+continuation (a record with a universally-quantified field) so the
+existential accumulator type does not escape its scope — a small but
+genuine use of the GADT/rank-2 combination, not decoration.
 
 %%% ── 3. Event Time and Watermarks ───────────────────────────────────────
 \section{Event Time and Watermarks}
