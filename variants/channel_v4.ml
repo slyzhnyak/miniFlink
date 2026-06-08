@@ -40,6 +40,8 @@ let make_bounded capacity =
     not_empty = Condition.create ();
   }
 
+let make_bounded_spsc = make_bounded
+
 (* try_push: записать значение, вернуть true если доставлено.
    Блокирует если bounded и полный. Возвращает false если канал закрыт
    (например, consumer-воркер упал) — это предотвращает deadlock. *)

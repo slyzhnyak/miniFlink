@@ -8,7 +8,19 @@
     - {b OCaml 4}: Mutex + Condition (Thread);
     - {b OCaml 5}: Atomic lock-free SPSC ring buffer (Domain).
 
-    Sentinel [None] из {!pop} означает что канал закрыт и пуст. *)
+    Sentinel [None] из {!pop} означает что канал закрыт и пуст.
+
+    {b ВАЖНО — контракт SPSC.} На OCaml 5 bounded-канал — это lock-free
+    SPSC (Single Producer, Single Consumer) ring buffer: корректен ТОЛЬКО
+    при {e ровно одном} producer (push/try_push) и {e ровно одном}
+    consumer (pop/try_pop) одновременно. Это наш случай по топологии
+    (dispatcher → worker). Использование как MPMC (несколько producer'ов
+    или consumer'ов на одном канале) {b не безопасно} — гонки и порча
+    данных. Контракт не кодируется типами (ограничение API) и соблюдается
+    топологией; модель памяти и обоснование корректности — в
+    [variants/channel_v5.ml]. Для нового кода предпочтителен
+    {!make_bounded_spsc} — то же что {!make_bounded}, но имя называет
+    контракт на месте вызова. *)
 
 (** Непрозрачный тип канала элементов ['a]. *)
 type 'a t
@@ -16,8 +28,13 @@ type 'a t
 (** Создать неограниченный канал (без backpressure). *)
 val make_unbounded : unit -> 'a t
 
-(** Создать ограниченный канал заданной ёмкости (с backpressure). *)
+(** Создать ограниченный канал заданной ёмкости (с backpressure).
+    {b SPSC} — только один producer и один consumer (см. шапку). *)
 val make_bounded : int -> 'a t
+
+(** Псевдоним {!make_bounded} с явным именем: подчёркивает SPSC-контракт
+    на месте вызова. Предпочтителен в новом коде. *)
+val make_bounded_spsc : int -> 'a t
 
 (** Записать значение. Блокирует если канал bounded и полон. *)
 val push : 'a t -> 'a -> unit
