@@ -1,3 +1,4 @@
+open Miniflink
 (* ============================================================
    Bench_parallel.ml — сравнение sequential vs parallel
 

@@ -1,3 +1,4 @@
+open Miniflink
 (* Тест roadmap 2.2: настоящий RocksDB backend через C FFI *)
 
 let pass name = Printf.printf "  OK %s\n%!" name

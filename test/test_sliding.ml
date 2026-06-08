@@ -1,3 +1,4 @@
+open Miniflink
 (* Тест бага #1: sliding window assign *)
 open Time
 

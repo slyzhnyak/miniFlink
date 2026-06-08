@@ -1,3 +1,4 @@
+open Miniflink
 (* Прямые тесты Channel — фундамент параллелизма, тестировался только
    косвенно (0 прямых тестов). Проверяем FIFO, bounded backpressure,
    close-семантику, try_push/try_pop на границах. *)

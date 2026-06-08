@@ -9,7 +9,7 @@
 
 (library
  (name miniflink)
- (wrapped false)
+ (wrapped true)
  (libraries unix threads.posix yojson ppx_deriving_yojson.runtime)
  (preprocess (pps ppx_deriving_yojson ppx_deriving.show))
  (flags (:standard -w +a-27-32-33-37-39-69-70))

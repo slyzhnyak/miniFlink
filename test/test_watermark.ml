@@ -1,3 +1,4 @@
+open Miniflink
 (* Тест 1.3: периодическая эмиссия watermark + финальный flush *)
 open Time
 

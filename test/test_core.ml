@@ -1,3 +1,4 @@
+open Miniflink
 (* Unit тесты для ядра miniFlink *)
 
 open Domain

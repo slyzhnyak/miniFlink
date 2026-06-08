@@ -1,3 +1,4 @@
+open Miniflink
 (* Тест бага #4: воркер падает → dispatcher не зависает (no deadlock) *)
 
 let pass name = Printf.printf "  OK %s\n%!" name

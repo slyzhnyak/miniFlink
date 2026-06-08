@@ -1,3 +1,4 @@
+open Miniflink
 (* Тест валидации окон. Раньше Pipe.tumbling 0 / Pipe.sliding _ 0
    приводили к Division_by_zero в глубине assign (ts / 0). Теперь
    конструкторы отвергают невалидные параметры сразу через

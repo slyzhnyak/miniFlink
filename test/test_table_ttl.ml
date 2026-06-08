@@ -1,3 +1,4 @@
+open Miniflink
 (* Тест 1.2: state eviction в table через TTL *)
 open Time
 

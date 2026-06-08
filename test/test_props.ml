@@ -1,3 +1,4 @@
+open Miniflink
 (* ============================================================
    Test_props.ml — property-based тесты с QCheck
 

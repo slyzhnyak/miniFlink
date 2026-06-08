@@ -1,3 +1,4 @@
+open Miniflink
 (* Тесты багов #5 (dedup eviction) и #6 (hash_key no negative) *)
 open Domain
 open Time

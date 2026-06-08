@@ -1,3 +1,4 @@
+open Miniflink
 (* Тесты end-to-end exactly-once: offset + 2PC sink + recovery + durable *)
 
 let pass name = Printf.printf "  OK %s\n%!" name

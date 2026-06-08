@@ -1,3 +1,4 @@
+open Miniflink
 (* Тест сквозного backpressure. В pull/bounded-архитектуре backpressure
    распространяется естественно: медленный sink → воркер реже читает →
    канал заполняется → dispatcher блокируется на push → source перестаёт

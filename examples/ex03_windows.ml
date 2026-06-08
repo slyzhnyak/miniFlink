@@ -9,6 +9,8 @@
    Запуск: dune exec examples/03_windows.exe
    ============================================================ *)
 
+open Miniflink
+
 open Time
 
 type click = { user : string; page : string; ts : int }

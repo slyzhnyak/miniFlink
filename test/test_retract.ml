@@ -1,3 +1,4 @@
+open Miniflink
 (* Тест бага #2: window обрабатывает late data через retractions *)
 open Domain
 open Time
