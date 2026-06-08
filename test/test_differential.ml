@@ -95,11 +95,45 @@ let test_noop_consistent () =
   check "noop size always 0" (State_backend_noop.size n = 0);
   check "noop keys always empty" (State_backend_noop.keys n = [])
 
+(* N2: restore должен ЗАМЕНЯТЬ состояние снапшотом, не объединять.
+   Ключи записанные после снапшота должны исчезнуть после restore.
+   memory и rocksdb обязаны вести себя ОДИНАКОВО. *)
+let test_restore_replaces_state () =
+  Printf.printf "\n-- restore replaces state (drops post-snapshot keys), both backends\n";
+  let check_backend name ~create ~set ~delete:_ ~keys ~snapshot ~restore =
+    let b = create () in
+    set b "a" (Bytes.of_string "1");
+    set b "b" (Bytes.of_string "2");
+    let snap = snapshot b in           (* снапшот: {a, b} *)
+    set b "c" (Bytes.of_string "3");   (* добавили c ПОСЛЕ снапшота *)
+    restore b snap;                    (* должно вернуть ровно {a, b} *)
+    let ks = List.sort compare (keys b) in
+    check (Printf.sprintf "%s: restore drops post-snapshot key c" name)
+      (ks = ["a"; "b"]) in
+  check_backend "memory"
+    ~create:State_backend_memory.create
+    ~set:State_backend_memory.set
+    ~delete:State_backend_memory.delete
+    ~keys:State_backend_memory.keys
+    ~snapshot:State_backend_memory.snapshot
+    ~restore:State_backend_memory.restore;
+  let dir = Printf.sprintf "/tmp/miniflink_restore_%d" (Random.int 1000000) in
+  let rocks = State_backend_rocksdb.create_at dir in
+  let snap_r =
+    State_backend_rocksdb.set rocks "a" (Bytes.of_string "1");
+    State_backend_rocksdb.set rocks "b" (Bytes.of_string "2");
+    let s = State_backend_rocksdb.snapshot rocks in
+    State_backend_rocksdb.set rocks "c" (Bytes.of_string "3");
+    State_backend_rocksdb.restore rocks s;
+    List.sort compare (State_backend_rocksdb.keys rocks) in
+  check "rocksdb: restore drops post-snapshot key c" (snap_r = ["a"; "b"])
+
 let () =
   Printf.printf "==========================================\n";
   Printf.printf "  Differential backend testing\n";
   Printf.printf "==========================================\n";
   test_memory_vs_rocksdb ();
   test_snapshot_restore_diff ();
+  test_restore_replaces_state ();
   test_noop_consistent ();
   Printf.printf "\nDifferential backend tests passed.\n"

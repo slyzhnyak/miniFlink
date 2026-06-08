@@ -20,7 +20,14 @@ let default_dir = "/tmp/miniflink_rocksdb"
 
 let create_at path =
   (try Unix.mkdir (Filename.dirname path) 0o755
-   with Unix.Unix_error (Unix.EEXIST,_,_) -> () | _ -> ());
+   with
+   | Unix.Unix_error (Unix.EEXIST, _, _) -> ()   (* уже есть — норма *)
+   | Unix.Unix_error (err, _, _) ->
+     (* EACCES/ENOSPC/EROFS/... — не глотаем молча: дальше open_db
+        упадёт с потерянным контекстом, лучше залогировать причину *)
+     Log.warn ~fields:[("dir", Filename.dirname path);
+                       ("error", Unix.error_message err)]
+       "rocksdb: mkdir failed (continuing to open_db)");
   { db = Rocksdb_ffi.open_db path; path; known = Hashtbl.create 64 }
 
 let create () = create_at default_dir
@@ -50,5 +57,10 @@ let snapshot t =
   Marshal.to_bytes pairs []
 
 let restore t b =
+  (* очищаем текущее состояние перед загрузкой снапшота — restore
+     ЗАМЕНЯЕТ состояние, не объединяет (иначе ключи записанные после
+     снапшота остались бы, расходясь с memory-backend и ломая recovery) *)
+  Hashtbl.iter (fun k () -> Rocksdb_ffi.delete t.db k) t.known;
+  Hashtbl.clear t.known;
   let pairs : (string * bytes) list = Marshal.from_bytes b 0 in
   List.iter (fun (k,v) -> set t k v) pairs
