@@ -10,6 +10,7 @@
 | [`ex02_alerts.ml`](ex02_alerts.ml) | `enrich` из справочной таблицы, генерация алертов через `flat_map`, `dedup` с cooldown (подавление дублей). Вход и выход — разные типы. |
 | [`ex03_windows.ml`](ex03_windows.ml) | Четыре типа окон на одном потоке: tumbling (время), count (количество), session (паузы активности), global + trigger (по событию). |
 | [`ex04_mine.ml`](ex04_mine.ml) | **Комплексная топология** (мониторинг шахты): три источника, `union` (слияние по event-time), `update_table` (таблица порогов из потока конфигурации), `enrich` из таблиц, tumbling + session окна, агрегация, правила, `dedup`. Показывает весь функционал вместе. |
+| [`ex05_fleet.ml`](ex05_fleet.ml) | **Production-путь** (телеметрия флота электробусов): `safe_map` (изоляция битых показаний), `window_agg` + `Agg.both` (три метрики за один проход), `schema` (версионированный codec состояния), **exactly-once с recovery** (краш процесса → восстановление из checkpoint, результат совпадает с эталоном), `retry` с backoff, `health`/`Mf_event.of_list`. Дополняет ex04 production-стеком. |
 
 ## Запуск
 
@@ -18,6 +19,7 @@ dune exec examples/ex01_minimal.exe
 dune exec examples/ex02_alerts.exe
 dune exec examples/ex03_windows.exe
 dune exec examples/ex04_mine.exe
+dune exec examples/ex05_fleet.exe
 ```
 
 ## С чего начать своё

@@ -151,6 +151,8 @@ dune exec bin/main.exe log      # log режим: метрики в stderr
 dune exec examples/ex01_minimal.exe   # окна + агрегация
 dune exec examples/ex02_alerts.exe    # enrich + правила + dedup
 dune exec examples/ex03_windows.exe   # четыре типа окон
+dune exec examples/ex04_mine.exe      # комплексная топология (шахта)
+dune exec examples/ex05_fleet.exe     # production-путь: EO+recovery, Agg, safe_map, schema
 
 # Бенчмарки
 dune exec bench/bench.exe
