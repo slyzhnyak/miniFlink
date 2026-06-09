@@ -49,18 +49,24 @@ let prop_window_preserves_count =
     ~count:100
     (make (gen_ordered_events 20))
     (fun events ->
-       (* Все события должны попасть ровно в одно tumbling окно каждое *)
+       (* Все события должны попасть ровно в одно tumbling окно каждое.
+          События, опоздавшие сверх allowed_lateness, теперь идут в
+          side output (on_late) — считаем и их, чтобы проверить что
+          ничего не ПОТЕРЯНО (просто перенаправлено). *)
        let window_size = seconds 60 in
        let total_in  = List.length events in
+       let late = ref 0 in
        let counts_out =
          Stream.of_list events
          |> Mf_event.with_watermarks ~latency:(seconds 3)
-         |> Pipe.window (module Telemetry) (Pipe.tumbling window_size)
+         |> Pipe.window (module Telemetry)
+              ~on_late:(fun _ -> incr late)
+              (Pipe.tumbling window_size)
          |> Pipe.aggregate (fun _k events -> List.length events)
          |> Stream.to_list
          |> List.filter_map (function Mf_event.Data(n,_) -> Some n | _ -> None)
        in
-       let total_out = List.fold_left (+) 0 counts_out in
+       let total_out = List.fold_left (+) 0 counts_out + !late in
        total_out = total_in)
 
 (* ── Property 2: dedup идемпотентен ─────────────────────── *)

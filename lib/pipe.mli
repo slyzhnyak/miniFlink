@@ -90,8 +90,12 @@ val window :
   (module Keyed.S with type t = 'a) ->
   ?latency:Time.t ->
   ?allowed_lateness:Time.t ->
+  ?on_late:('a -> unit) ->
   win_spec ->
   'a Mf_event.t Stream.t -> (string * 'a list) Mf_event.t Stream.t
+(** [?on_late] — side output: событие, пришедшее позже
+    [allowed_lateness] (его окно уже удалено по watermark), передаётся
+    в этот callback вместо тихой потери. По умолчанию игнорируется. *)
 
 (** [aggregate f] сворачивает каждое окно [(key, values)] в результат
     [f key values]. *)

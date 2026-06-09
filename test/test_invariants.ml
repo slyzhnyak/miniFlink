@@ -63,15 +63,18 @@ let prop_window_conserves_any_size =
   Test.make ~count:300 ~name:"window conserves events for any size>0"
     (make (Gen.tup2 (gen_events 50) (Gen.int_range 1 100))) (fun (evs, sz) ->
       let total_in = List.length evs in
+      let late = ref 0 in
       let total_out =
         Stream.of_list evs
         |> Mf_event.with_watermarks ~latency:(seconds 1)
-        |> Pipe.window (module Telemetry) (Pipe.tumbling (seconds sz))
+        |> Pipe.window (module Telemetry)
+             ~on_late:(fun _ -> incr late)
+             (Pipe.tumbling (seconds sz))
         |> Pipe.aggregate (fun _k es -> List.length es)
         |> Stream.to_list
         |> List.filter_map (function Mf_event.Data (n,_) -> Some n | _ -> None)
         |> List.fold_left (+) 0
-      in total_out = total_in)
+      in total_out + !late = total_in)
 
 (* A4. dedup идемпотентен при ЛЮБОМ cooldown *)
 let prop_dedup_idempotent_any =

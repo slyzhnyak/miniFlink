@@ -88,10 +88,12 @@ let window
     (module K : Keyed.S with type t = a)
     ?(latency = 0)
     ?(allowed_lateness = 0)
+    ?(on_late = fun _ -> ())
     (spec     : win_spec)
     (upstream : a Mf_event.t Stream.t)
     : (string * a list) Mf_event.t Stream.t =
   let tbl : a win_state WMap.t ref = ref WMap.empty in
+  let cur_wm = ref min_int in   (* последний виденный watermark *)
   let out : (string * a list) Mf_event.t Queue.t = Queue.create () in
   let emit_data k stop vs =
     Queue.push (Mf_event.data (k, List.rev vs) stop) out in
@@ -109,6 +111,7 @@ let window
         tbl := WMap.empty;
         if Queue.is_empty out then None else Some (Queue.pop out)
       | Some (Mf_event.Watermark wm) ->
+        cur_wm := wm;
         (* Open окна со stop+latency <= wm → закрываем (Fire) *)
         WMap.iter (fun (k,s,stop) st ->
           match st with
@@ -131,11 +134,18 @@ let window
           let mk = (K.key v, s, stop) in
           match WMap.find_opt mk !tbl with
           | None ->
-            tbl := WMap.add mk (Open [v]) !tbl
+            (* окна нет. Если его граница уже прошла порог окончательного
+               удаления (stop+latency+allowed_lateness <= wm), значит
+               событие опоздало СВЕРХ allowed_lateness — в side output,
+               не создаём «призрачное» окно которое закроется в одиночку *)
+            if stop + latency + allowed_lateness <= !cur_wm then
+              on_late v
+            else
+              tbl := WMap.add mk (Open [v]) !tbl
           | Some (Open vs) ->
             tbl := WMap.add mk (Open (v :: vs)) !tbl
           | Some (Fired vs) ->
-            (* Late data: переоткрываем окно.
+            (* Late data в пределах allowed_lateness: переоткрываем окно.
                Retract старого результата, Data нового. *)
             emit_retract (K.key v) stop vs;
             let vs' = v :: vs in

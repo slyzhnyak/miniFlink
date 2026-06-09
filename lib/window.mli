@@ -18,6 +18,7 @@ val assign : win_spec -> Time.t -> (Time.t * Time.t) list
 val window :
   (module Keyed.S with type t = 'a) ->
   ?latency:Time.t -> ?allowed_lateness:Time.t ->
+  ?on_late:('a -> unit) ->
   win_spec ->
   'a Mf_event.t Stream.t -> (string * 'a list) Mf_event.t Stream.t
 
