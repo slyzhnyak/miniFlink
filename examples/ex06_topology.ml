@@ -58,17 +58,17 @@ let partition_b = [
 let () =
   Printf.printf "=== Пример 6: модель исполнения B+C (шахта) ===\n\n";
 
-  (* (1) merge_partitioned: сливаем две партиции газа в один поток.
+  (* собираем топологию: 2 партиции газа → merge → fan_out → 2 пайплайна *)
+
+  (* merge_partitioned: сливаем две партиции газа в один поток.
      Wall_clock_timeout — если партиция замолчит, не вешаем watermark. *)
-  Printf.printf "[1] merge_partitioned: 2 партиции газа → один поток\n";
   let merged =
     Merge.merge_partitioned ~idle:(Merge.Wall_clock_timeout 1000)
       [ Stream.of_list partition_a; Stream.of_list partition_b ] in
 
-  (* (2) fan_out: один поток → две обработки, у каждой СВОЯ политика.
+  (* fan_out: один поток → две обработки, у каждой СВОЯ политика.
      Аварии — Block (не терять ни одного показания).
      Дашборд — Drop_oldest (важна свежесть, переполнение допустимо). *)
-  Printf.printf "[2] fan_out: аварии=Block, дашборд=Drop_oldest\n";
   let outlets = Fan_out.[
     { name="alerts";    buffer_cap=64; on_pressure=Block };
     { name="dashboard"; buffer_cap=16; on_pressure=Drop_oldest };
@@ -79,9 +79,8 @@ let () =
 
   (* собранные результаты обоих пайплайнов *)
   let alarms = ref [] in
-  let dash_count = ref 0 in
 
-  (* (3) два пайплайна под supervisor, у каждого своя failure-стратегия *)
+  (* два пайплайна под supervisor, у каждого своя failure-стратегия *)
 
   (* пайплайн АВАРИЙ: фильтр критичного метана. Crash_all — если упадёт,
      весь мониторинг должен остановиться (молчать об авариях нельзя). *)
@@ -94,31 +93,33 @@ let () =
 
   (* пайплайн ДАШБОРДА: средний метан по сенсору в окне. Restart —
      некритично, при сбое просто перезапустить. *)
+  let dashboard = ref [] in
   let dashboard_pipeline () =
     dash_in
     |> Pipe.window_agg (module BySensor) (Pipe.tumbling (seconds 10))
          (Agg.mean (fun r -> r.ch4))
-    |> Pipe.sink (fun _ -> incr dash_count)
+    |> Pipe.sink (fun (sensor, avg) ->
+         match avg with Some a -> dashboard := (sensor, a) :: !dashboard | None -> ())
   in
 
-  Printf.printf "[3] supervisor: аварии=Crash_all, дашборд=Restart\n\n";
   let specs = Supervisor.[
     { label="alerts";    run=alerts_pipeline;    on_failure=Crash_all };
     { label="dashboard"; run=dashboard_pipeline; on_failure=Restart { max_retries=3; backoff_ms=0 } };
   ] in
   let statuses = Supervisor.supervise_result specs in
 
-  (* ── Результаты ───────────────────────────────────────── *)
-  Printf.printf "Статусы пайплайнов:\n";
+  (* ── Вывод сервиса ────────────────────────────────────── *)
   List.iter (fun (label, st) ->
-    Printf.printf "  %-10s %s\n" label
-      (match st with `Ok -> "OK" | `Failed -> "FAILED")) statuses;
+    if st = `Failed then
+      Printf.printf "пайплайн %s остановлен\n" label) statuses;
 
-  Printf.printf "\nАварии по метану (>= %.1f%%):\n" critical_ch4;
-  List.iter (fun (s, ch4, h) ->
-    Printf.printf "  %s на горизонте %dм: %.1f%% CH4\n" s h ch4)
-    (List.sort compare !alarms);
+  Printf.printf "Аварии по метану (>= %.1f%%):\n" critical_ch4;
+  (match List.sort compare !alarms with
+   | [] -> Printf.printf "  нет\n"
+   | xs -> List.iter (fun (s, ch4, h) ->
+       Printf.printf "  %s на горизонте %dм: %.1f%% CH4\n" s h ch4) xs);
 
-  Printf.printf "\nДашборд: эмиссий окон %d\n" !dash_count;
-  Printf.printf "\nОбе аварии (S2 -160м, S4 -240м) пойманы из РАЗНЫХ партиций\n";
-  Printf.printf "через merge → fan_out(Block) → пайплайн под supervisor.\n"
+  Printf.printf "\nДашборд (средний метан по сенсору):\n";
+  List.sort compare !dashboard
+  |> List.iter (fun (sensor, avg) ->
+       Printf.printf "  %s: %.1f%%\n" sensor avg)
