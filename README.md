@@ -15,9 +15,9 @@ Apache Flink **на одном узле**. Акцент — на чистоте 
 (tumbling, sliding, count, session со слиянием, global+triggers) с
 инкрементальной агрегацией и комбинируемыми агрегаторами, stateful
 operators, exactly-once (end-to-end: offset, 2PC sink, recovery, durable),
-table/join с TTL, union потоков, retractions — плюс production-слои
+table/join с TTL (+ temporal as-of join), union потоков, retractions — плюс production-слои
 (DLQ + retry/backoff, graceful shutdown, Prometheus metrics, структурированные
-логи, health, config, RocksDB state). ~3900 строк OCaml, 34 тест-сюит.
+логи, health, config, RocksDB state). ~4100 строк OCaml, 36 тест-сюит.
 
 ## Почему декларативно
 
@@ -99,11 +99,11 @@ variants/            — реализации channel/parallel по версии
 bin/    main.ml        демо pipeline
 examples/              самодостаточные примеры (см. examples/README.md)
 bench/  bench.ml bench_parallel.ml
-test/   34 тест-сюит (core, props, invariants, reliability, metrics,
+test/   36 тест-сюит (core, props, invariants, reliability, metrics,
                      retract, sliding, count_window, session_window,
                      global_window, window_fold, agg, union, safe,
-                     recovery, differential, cardinality,
-                     dedup_evict, parallel_crash,
+                     recovery, differential, cardinality, temporal,
+                     dedup_evict, parallel_crash, crash_checkpoint,
                      determinism, watermark, idle_watermark, table_ttl,
                      checkpoint_parallel, rocksdb, codec, channel,
                      window_validation, log, health_config, retry,
@@ -208,7 +208,7 @@ Channel overhead: ~106 нс/msg (Mutex+Condition).
 | Graceful Shutdown           | ✓ реализовано (SIGTERM/INT)   |
 | Prometheus Metrics          | ✓ реализовано (HTTP :9090)    |
 | Изоляция исключений         | ✓ safe_map / safe_filter (битое событие → on_error, не падение) |
-| Unit + Property тесты       | ✓ 34 сюит, QCheck-инварианты  |
+| Unit + Property тесты       | ✓ 36 сюит, QCheck-инварианты  |
 | Exactly-once parallel       | ✓ реализовано (barrier + snapshot) |
 | Exactly-once end-to-end     | ✓ offset + 2PC sink + recovery + durable (E2E recovery harness: kill→recover→output совпадает) |
 | Структурированные логи (JSON) | ✓ Log (событие+sink, назначение — за приложением) |
@@ -221,6 +221,7 @@ Channel overhead: ~106 нс/msg (Mutex+Condition).
 | Schema evolution            | ✓ версия + миграция, явная ошибка на неизвестной версии |
 | Типы окон                   | ✓ tumbling, sliding, count, session (слияние), global+triggers |
 | Агрегация окон              | ✓ инкрементальная (window_fold) + комбинируемые агрегаторы (Agg) |
+| Stream-table join           | ✓ enrich (snapshot) + temporal_join (as-of, корректен при опоздавших апдейтах) |
 | Persistent state (RocksDB)  | ✓ реализовано (C FFI, librocksdb) |
 | Источники/sink              | in-memory (seekable_of_list) + функции pull/push; MQTT/Kafka-адаптеров нет (источник подключает приложение) |
 

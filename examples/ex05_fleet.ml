@@ -28,6 +28,10 @@
                                        приписки наполняется из ОТДЕЛЬНОГО
                                        потока и эволюционирует, телеметрия
                                        обогащается актуальным депо
+                                       (snapshot-семантика, [F])
+     • temporal_join                 — депо НА МОМЕНТ события (as-of),
+                                       корректно даже при ОПОЗДАВШЕМ
+                                       апдейте справочника ([G])
      • dedup                         — подавление задвоенных показаний
 
    (session/global/count окна и sliding — в ex03/ex04, где они
@@ -410,4 +414,42 @@ let () =
   Printf.printf "  после dedup + enrich: %d уникальных показаний с депо:\n" (List.length result);
   List.iter (fun t ->
     Printf.printf "    %s @%ds → депо %s (скорость %.0f)\n"
-      t.bus_id (t.ts/1000) t.depot t.speed) result
+      t.bus_id (t.ts/1000) t.depot t.speed) result;
+  Printf.printf "\n";
+
+  (* (G) TEMPORAL join: депо НА МОМЕНТ показания, корректно даже при
+     ОПОЗДАВШЕМ апдейте. Контраст с [F]: там enrich дал «текущее» депо
+     (south для всех B1, т.к. таблица отражает финал); здесь показание
+     получает депо, актуальное на ЕГО event-time. *)
+  Printf.printf "[G] temporal join (депо на момент события; опоздавший апдейт)\n";
+
+  (* Поток апдейтов приписки с watermark. ОПОЗДАВШИЙ порядок: апдейт
+     "B1→south с t=100" приходит ПЕРЕД апдейтом "B1→north с t=0". *)
+  let assignment_updates = Stream.of_list [
+    Mf_event.data { a_bus="B1"; a_depot="south"; a_ts=seconds 100 } (seconds 100);
+    Mf_event.data { a_bus="B1"; a_depot="north"; a_ts=seconds 0 }   (seconds 0); (* опоздал! *)
+    Mf_event.wm (seconds 200);
+  ] in
+  (* Показания B1: одно ДО перевода (t=50 → north), одно ПОСЛЕ (t=150 → south) *)
+  let b1_readings = Mf_event.of_list ~ts:(fun t -> t.ts) [
+    { bus_id="B1"; depot="?"; speed=42.; charge=80.; ts=seconds 50 };
+    { bus_id="B1"; depot="?"; speed=44.; charge=78.; ts=seconds 150 };
+  ] in
+  let temporal_result =
+    b1_readings
+    |> Mf_event.with_watermarks ~latency:0
+    |> Temporal.temporal_join
+         ~key_main:(fun t -> t.bus_id)
+         ~key_upd:(fun a -> a.a_bus)
+         ~valid_from:(fun a -> a.a_ts)
+         ~merge:(fun t assign ->
+           match assign with Some a -> { t with depot = a.a_depot } | None -> t)
+         ~updates:assignment_updates
+    |> Stream.to_list
+    |> List.filter_map (function Mf_event.Data (t,_) -> Some t | _ -> None) in
+  Printf.printf "  апдейт 'B1→north@0' пришёл ПОСЛЕ 'B1→south@100' (опоздал)\n";
+  List.iter (fun t ->
+    Printf.printf "    B1 @%ds → депо %s  (на момент события)\n" (t.ts/1000) t.depot)
+    temporal_result;
+  let ok = List.map (fun t -> (t.ts/1000, t.depot)) temporal_result = [(50,"north"); (150,"south")] in
+  Printf.printf "  === temporal даёт верное депо НА МОМЕНТ события даже при опоздавшем апдейте: %b ===\n" ok
