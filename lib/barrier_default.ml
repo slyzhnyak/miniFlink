@@ -1,6 +1,16 @@
 (* ============================================================
    Barrier_default.ml — Chandy-Lamport distributed snapshot
 
+   ⚠️  СТАТУС: референсная реализация, НЕ используется рабочим путём.
+   run_exactly_once в checkpoint_parallel.ml содержит собственный
+   координатор (с учётом упавших воркеров — alive-set). Этот модуль
+   оставлен как самостоятельная иллюстрация barrier-алгоритма. Если
+   будешь подключать его в реальный путь — учти: (1) сброс ready в
+   wait_all_ready и инъекция следующего epoch должны быть согласованы,
+   иначе worker_ready нового epoch может потеряться; (2) нет обработки
+   упавших воркеров (wait_all_ready ждёт всех N — при крахе залипнет,
+   ср. R1 в checkpoint_parallel).
+
    Алгоритм:
    1. coordinator.next_epoch() → инкрементирует epoch,
       рассылает Barrier(epoch) всем воркерам через их каналы
@@ -35,7 +45,7 @@ let worker_ready c ~worker ~epoch:_ =
   Mutex.lock c.mu;
   c.ready.(worker) <- true;
   if Array.for_all Fun.id c.ready then
-    Condition.signal c.all_ready;
+    Condition.broadcast c.all_ready;
   Mutex.unlock c.mu
 
 let wait_all_ready c ~epoch:_ =
