@@ -254,3 +254,9 @@
  (libraries miniflink)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_supervisor))
+
+(test
+ (name test_merge)
+ (libraries miniflink)
+ (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
+ (modules test_merge))
