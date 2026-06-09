@@ -17,7 +17,7 @@ Apache Flink **на одном узле**. Акцент — на чистоте 
 operators, exactly-once (end-to-end: offset, 2PC sink, recovery, durable),
 table/join с TTL (+ temporal as-of join), union потоков, retractions — плюс production-слои
 (DLQ + retry/backoff, graceful shutdown, Prometheus metrics, структурированные
-логи, health, config, RocksDB state). ~4100 строк OCaml, 37 тест-сюит.
+логи, health, config, RocksDB state). ~4100 строк OCaml, 39 тест-сюит.
 
 ## Почему декларативно
 
@@ -99,9 +99,10 @@ variants/            — реализации channel/parallel по версии
 bin/    main.ml        демо pipeline
 examples/              самодостаточные примеры (см. examples/README.md)
 bench/  bench.ml bench_parallel.ml
-test/   37 тест-сюит (core, props, invariants, reliability, metrics,
+test/   39 тест-сюит (core, props, invariants, reliability, metrics,
                      retract, sliding, count_window, session_window,
                      global_window, window_fold, agg, union, safe, parallel_retract,
+                     side_output, ttl_state,
                      recovery, differential, cardinality, temporal,
                      dedup_evict, parallel_crash, crash_checkpoint,
                      determinism, watermark, idle_watermark, table_ttl,
@@ -208,7 +209,7 @@ Channel overhead: ~106 нс/msg (Mutex+Condition).
 | Graceful Shutdown           | ✓ реализовано (SIGTERM/INT)   |
 | Prometheus Metrics          | ✓ реализовано (HTTP :9090)    |
 | Изоляция исключений         | ✓ safe_map / safe_filter (битое событие → on_error, не падение) |
-| Unit + Property тесты       | ✓ 37 сюит, QCheck-инварианты  |
+| Unit + Property тесты       | ✓ 39 сюит, QCheck-инварианты  |
 | CI                          | ⚙ workflow готов (.github/workflows/ci.yml): сборка + тесты на OCaml 4.14 и 5.2 |
 | Exactly-once parallel       | ✓ реализовано (barrier + snapshot) |
 | Exactly-once end-to-end     | ✓ offset + 2PC sink + recovery + durable (E2E recovery harness: kill→recover→output совпадает) |
@@ -343,17 +344,19 @@ Channel overhead: ~106 нс/msg (Mutex+Condition).
 
 Быстрые и ценные (чистая семантика, ложатся на существующее):
 
-- [ ] **Side output для опоздавших.** Данные позже `allowed_lateness`
-  сейчас теряются; Flink отправляет их в отдельный «late data» поток.
-  `allowed_lateness` в окне уже есть — не хватает отдельного выхода.
-  Низкая-средняя сложность.
+- [x] **Side output для опоздавших.** Данные позже `allowed_lateness`
+  больше не теряются: `Pipe.window ?on_late` направляет их в отдельный
+  callback (как «late data» поток во Flink). Раньше такое событие тихо
+  создавало «призрачное» окно. Покрыто тестом + обновлены инварианты
+  сохранения (окна + side output = вход).
 - [ ] **Богатое состояние: ListState / MapState / ReducingState /
   AggregatingState.** Сейчас стейт — `bytes` через key-value backend.
   Типизированные структуры с эффективными операциями (добавить в
   список, обновить ключ). Удобство, не новая семантика. Средняя сложность.
-- [ ] **Общий State TTL.** TTL есть для Table; обобщить на любое
-  состояние оператора (автоистечение по времени). Механизм уже есть —
-  низкая сложность.
+- [x] **Общий State TTL.** Модуль `Ttl_state`: keyed key-value с
+  автоистечением записей по event-time (TTL от последнего обновления),
+  `advance` чистит истёкшие. Обобщает TTL Table'а на произвольное
+  состояние оператора. Покрыто тестом.
 - [ ] **Broadcast state.** Состояние, реплицируемое на всех воркеров
   (правила/конфиг, видимые всем). На single-node проще чем в
   распределённом. Низкая-средняя сложность.
