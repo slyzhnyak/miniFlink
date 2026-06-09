@@ -13,6 +13,10 @@ open Time
    инвариантами. Hazelcast Jet использует ровно q1/q2/q5/q8 как
    репрезентативный набор — мы покрываем их и ещё несколько.
 
+   Версии NEXMark (чтобы не путать число запросов): оригинал 2002 — мелкий
+   SQL-draft; канон Beam/Flink — q0–q13 (~14), с ним сверяемся; расширенная
+   Ververica/Feldera — q0–q22 (~23), q14–q22 в основном SQL вне нашей области.
+
    Что НЕ реализовано и почему — см. TODO в README (раздел NEXMark):
    q3 (нужны таймеры/ProcessFunction), q4/q6 (retraction-over-window),
    q9–q13 (SQL-специфика, filesystem-коннекторы, UDF).
