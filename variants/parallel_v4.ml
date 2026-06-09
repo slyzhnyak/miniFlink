@@ -113,9 +113,10 @@ let run_parallel
       incr wm_count;
       (* Watermark рассылаем всем воркерам *)
       Array.iter (fun ch -> Channel.push ch ev) in_chans
-    | Mf_event.Retract _ ->
+    | Mf_event.Retract (v, _) ->
       (* Ретракции: шардируем по ключу как Data *)
-      ()  (* упрощение: ретракции пока не шардируем *)
+      let shard = hash_key (key_of v) workers in
+      Channel.push in_chans.(shard) ev
   ) source;
 
   (* Закрываем все входные каналы *)
@@ -194,7 +195,9 @@ let run_parallel_simple
     | Mf_event.Watermark _ ->
       Array.iteri (fun i ch ->
         if not failed.(i) then ignore (Channel.try_push ch ev)) in_chans
-    | Mf_event.Retract _ -> ()
+    | Mf_event.Retract (v,_) ->
+      let shard = hash_key (key_of v) workers in
+      if not failed.(shard) then ignore (Channel.try_push in_chans.(shard) ev)
   ) source;
 
   Array.iter Channel.close in_chans;

@@ -80,13 +80,23 @@ let run_parallel_simple
     match ev with
     | Mf_event.Data (v,_) ->
       let shard = hash_key (key_of v) workers in
-      if not failed.(shard) then
-        ignore (Channel.try_push in_chans.(shard) ev);
+      if not failed.(shard) then begin
+        (* try_push спинит при полном канале (backpressure) и вернёт
+           false только если воркер УПАЛ (канал закрыт) — тогда событие
+           его шарда обработать некем; логируем, а не глотаем молча *)
+        if not (Channel.try_push in_chans.(shard) ev) then
+          Printf.eprintf "[parallel] dropped event for dead worker %d\n%!" shard
+      end;
       report_depth ()
     | Mf_event.Watermark _ ->
       Array.iteri (fun i ch ->
         if not failed.(i) then ignore (Channel.try_push ch ev)) in_chans
-    | Mf_event.Retract _ -> ()
+    | Mf_event.Retract (v,_) ->
+      (* ретракт шардируем по ключу как Data — иначе он терялся бы и
+         retract-семантика расходилась бы с однопоточным путём *)
+      let shard = hash_key (key_of v) workers in
+      if not failed.(shard) then
+        ignore (Channel.try_push in_chans.(shard) ev)
   ) source;
 
   Array.iter Channel.close in_chans;
