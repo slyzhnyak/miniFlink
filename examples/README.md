@@ -10,7 +10,7 @@
 | [`ex02_alerts.ml`](ex02_alerts.ml) | `enrich` из справочной таблицы, генерация алертов через `flat_map`, `dedup` с cooldown (подавление дублей). Вход и выход — разные типы. |
 | [`ex03_windows.ml`](ex03_windows.ml) | Четыре типа окон на одном потоке: tumbling (время), count (количество), session (паузы активности), global + trigger (по событию). |
 | [`ex04_mine.ml`](ex04_mine.ml) | **Комплексная топология** (мониторинг шахты): три источника, `union` (слияние по event-time), `update_table` (таблица порогов из потока конфигурации), `enrich` из таблиц, tumbling + session окна, агрегация, правила, `dedup`. Показывает весь функционал вместе. |
-| [`ex05_fleet.ml`](ex05_fleet.ml) | **Production-путь + полный набор** (телеметрия флота электробусов): данные приходят **вразнобой — опоздавшие, дубли, out-of-order**, окна группируют по event-time и `allowed_lateness` пере-считывает опоздавших (итог совпадает с упорядоченным прогоном); `safe_map` (изоляция битых), `window_agg` + `Agg.both` (три метрики за проход), `schema` (версионированный codec), **exactly-once с recovery** (краш → восстановление, результат совпадает с эталоном), `retry`, `health`; плюс **`union`** (слияние двух источников), **`update_table`+`enrich`** (stream-table join: таблица приписки наполняется из потока и эволюционирует), **`temporal_join`** (as-of join: депо на момент события, корректно даже при **опоздавшем апдейте** справочника), **`dedup`** (подавление дублей). `retry` с backoff, `health`/`Mf_event.of_list`. Дополняет ex04 production-стеком. 📖 [Подробный разбор](../docs/example_fleet_walkthrough.md). |
+| [`ex06_topology.ml`](ex06_topology.ml) | **Модель исполнения B+C** (мониторинг шахты): `merge_partitioned` (две партиции газа с разным event-time → один поток, idle-стратегия `Wall_clock_timeout`), `fan_out` (один поток → две обработки, политика на выход: аварии `Block` не теряют, дашборд `Drop_oldest`), `supervisor` (два пайплайна, политика на пайплайн: аварии `Crash_all`, дашборд `Restart`). Обе аварии из разных партиций пойманы через всю цепочку. Фундамент под Kafka-топологию (см. `connectors/kafka/`). |
 
 ## Запуск
 
@@ -20,6 +20,7 @@ dune exec examples/ex02_alerts.exe
 dune exec examples/ex03_windows.exe
 dune exec examples/ex04_mine.exe
 dune exec examples/ex05_fleet.exe
+dune exec examples/ex06_topology.exe
 ```
 
 ## С чего начать своё
