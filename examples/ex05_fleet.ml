@@ -23,6 +23,15 @@
      • retry с backoff               — устойчивый «commit» в внешний
                                        приёмник
      • health/config                 — операционные сводки
+     • union                         — слияние двух источников в поток
+     • update_table + enrich         — stream-table join: таблица
+                                       приписки наполняется из ОТДЕЛЬНОГО
+                                       потока и эволюционирует, телеметрия
+                                       обогащается актуальным депо
+     • dedup                         — подавление задвоенных показаний
+
+   (session/global/count окна и sliding — в ex03/ex04, где они
+   центральные; здесь tumbling, чтобы не дублировать.)
 
    Сценарий: автобусы шлют телеметрию (id, скорость, заряд %, депо).
    Часть показаний битые (сенсор сбоит) — их надо пропускать, не роняя
@@ -46,11 +55,22 @@ type telemetry = {
   ts     : Time.t;
 }
 
-(* KEYED-модуль: группируем по депо *)
+(* KEYED по депо — для оконной агрегации *)
 module ByDepot = Keyed.Make (struct
   type t = telemetry
   let key t = t.depot
 end)
+
+(* KEYED по bus_id — для enrich (join с таблицей приписки) и dedup *)
+module ById = Keyed.Make (struct
+  type t = telemetry
+  let key t = t.bus_id
+end)
+
+(* Поток назначений: «автобус приписан к депо». Приходит ОТДЕЛЬНО и
+   МЕНЯЕТСЯ во времени (автобус перевели) — справочные данные, которыми
+   обогащается основной поток телеметрии (stream-table join, секция [F]). *)
+type assignment = { a_bus : string; a_depot : string; a_ts : Time.t }
 
 (* ── 2. Версионированная схема состояния (schema) ──────────── *)
 (* Состояние агрегата по депо сериализуем с версией — на будущее, когда
@@ -226,6 +246,34 @@ let flaky_publish payload =
   if !flaky_counter < 3 then failwith "external sink temporarily unavailable";
   Printf.printf "    published to external sink: %s\n" payload
 
+(* ── 6b. Данные для stream-table join (секция [F]) ─────────── *)
+(* Депо в telemetry будет ПЕРЕЗАПИСАНО из таблицы приписки через enrich —
+   показания приходят с bus_id, актуальное депо берётся из справочника. *)
+
+(* Поток назначений: B1 сначала в north, потом ПЕРЕВЕД�ён в south.
+   Таблица обновляется из этого потока (update_table). *)
+let assignments = [
+  { a_bus="B1"; a_depot="north"; a_ts=seconds 0 };
+  { a_bus="B2"; a_depot="north"; a_ts=seconds 0 };
+  { a_bus="B3"; a_depot="south"; a_ts=seconds 0 };
+  { a_bus="B1"; a_depot="south"; a_ts=seconds 100 };  (* B1 перевели в south *)
+]
+
+(* Два источника телеметрии: городские и пригородные автобусы.
+   Сольём их в один поток через union. depot здесь — заглушка "?",
+   реальное депо подставит enrich из таблицы приписки. *)
+let city_buses = [
+  { bus_id="B1"; depot="?"; speed=42.; charge=80.; ts=seconds 2 };
+  { bus_id="B2"; depot="?"; speed=38.; charge=60.; ts=seconds 4 };
+  { bus_id="B1"; depot="?"; speed=44.; charge=78.; ts=seconds 6 };
+  { bus_id="B2"; depot="?"; speed=38.; charge=60.; ts=seconds 4 };  (* ДУБЛЬ *)
+]
+let suburb_buses = [
+  { bus_id="B3"; depot="?"; speed=55.; charge=90.; ts=seconds 3 };
+  { bus_id="B1"; depot="?"; speed=40.; charge=75.; ts=seconds 5 };
+  { bus_id="B3"; depot="?"; speed=55.; charge=90.; ts=seconds 3 };  (* ДУБЛЬ *)
+]
+
 (* ── 7. Запуск и вывод ────────────────────────────────────── *)
 
 let () =
@@ -315,4 +363,51 @@ let () =
   (* (E) health-сводка *)
   Printf.printf "[E] health-сводка\n";
   let h = Health.check ~state_size:(fun () -> List.length events) () in
-  Printf.printf "  %s\n" (Health.to_json h)
+  Printf.printf "  %s\n\n" (Health.to_json h);
+
+  (* (F) stream-table join: union + update_table + enrich + dedup.
+     Два источника телеметрии сливаются (union); таблица приписки
+     автобус→депо наполняется из ОТДЕЛЬНОГО потока назначений
+     (update_table) и enrich подставляет актуальное депо; dedup убирает
+     задвоенные показания. *)
+  Printf.printf "[F] stream-table join (union + update_table + enrich + dedup)\n";
+
+  (* 1. таблица приписки наполняется из потока назначений.
+     update_table наполняет Hashtbl по мере прохождения событий; последнее
+     назначение по ключу побеждает — B1 окажется в south (его перевели). *)
+  let depot_of : (string, assignment) Hashtbl.t = Hashtbl.create 8 in
+  Mf_event.of_list ~ts:(fun a -> a.a_ts) assignments
+  |> Pipe.update_table depot_of ~key:(fun a -> a.a_bus)
+  |> Stream.to_list |> ignore;          (* прогнали — таблица наполнена *)
+  Printf.printf "  таблица приписки наполнена из потока: %d автобусов" (Hashtbl.length depot_of);
+  Printf.printf " (B1 → %s, его перевели)\n"
+    (match Hashtbl.find_opt depot_of "B1" with Some a -> a.a_depot | None -> "?");
+
+  (* 2. union двух источников телеметрии в один поток *)
+  let city = Mf_event.of_list ~ts:(fun t -> t.ts) city_buses in
+  let suburb = Mf_event.of_list ~ts:(fun t -> t.ts) suburb_buses in
+  let merged = Mf_event.union city suburb in
+
+  (* 3. dedup (по bus_id+ts) → enrich (актуальное депо из таблицы) *)
+  let depot_table : (string, assignment) Table.t =
+    Table.of_hashtbl depot_of in
+  let result =
+    merged
+    |> Mf_event.with_watermarks ~latency:0
+    |> Pipe.dedup (module ById)
+         ~rule:(fun t -> string_of_int t.ts)   (* ключ дедупа: bus + время события *)
+         ~cooldown:(seconds 60)   (* окно дедупа > разброса дублей в потоке *)
+    |> Pipe.enrich (module ById)
+         ~from:depot_table
+         ~merge:(fun t assign ->
+           match assign with
+           | Some a -> { t with depot = a.a_depot }   (* подставили депо *)
+           | None -> t)
+    |> Stream.to_list
+    |> List.filter_map (function Mf_event.Data (t,_) -> Some t | _ -> None) in
+  let total_in = List.length city_buses + List.length suburb_buses in
+  Printf.printf "  union: %d событий из двух источников\n" total_in;
+  Printf.printf "  после dedup + enrich: %d уникальных показаний с депо:\n" (List.length result);
+  List.iter (fun t ->
+    Printf.printf "    %s @%ds → депо %s (скорость %.0f)\n"
+      t.bus_id (t.ts/1000) t.depot t.speed) result
