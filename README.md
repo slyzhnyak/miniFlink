@@ -17,7 +17,7 @@ Apache Flink **на одном узле**. Акцент — на чистоте 
 operators, exactly-once (end-to-end: offset, 2PC sink, recovery, durable),
 table/join с TTL (+ temporal as-of join), union потоков, retractions — плюс production-слои
 (DLQ + retry/backoff, graceful shutdown, Prometheus metrics, структурированные
-логи, health, config, RocksDB state). ~4100 строк OCaml, 39 тест-сюит.
+логи, health, config, RocksDB state). ~4100 строк OCaml, 40 тест-сюит.
 
 ## Почему декларативно
 
@@ -99,10 +99,10 @@ variants/            — реализации channel/parallel по версии
 bin/    main.ml        демо pipeline
 examples/              самодостаточные примеры (см. examples/README.md)
 bench/  bench.ml bench_parallel.ml
-test/   39 тест-сюит (core, props, invariants, reliability, metrics,
+test/   40 тест-сюит (core, props, invariants, reliability, metrics,
                      retract, sliding, count_window, session_window,
                      global_window, window_fold, agg, union, safe, parallel_retract,
-                     side_output, ttl_state,
+                     side_output, ttl_state, nexmark,
                      recovery, differential, cardinality, temporal,
                      dedup_evict, parallel_crash, crash_checkpoint,
                      determinism, watermark, idle_watermark, table_ttl,
@@ -209,7 +209,7 @@ Channel overhead: ~106 нс/msg (Mutex+Condition).
 | Graceful Shutdown           | ✓ реализовано (SIGTERM/INT)   |
 | Prometheus Metrics          | ✓ реализовано (HTTP :9090)    |
 | Изоляция исключений         | ✓ safe_map / safe_filter (битое событие → on_error, не падение) |
-| Unit + Property тесты       | ✓ 39 сюит, QCheck-инварианты  |
+| Unit + Property тесты       | ✓ 40 сюит, QCheck-инварианты  |
 | CI                          | ⚙ workflow готов (.github/workflows/ci.yml): сборка + тесты на OCaml 4.14 и 5.2 |
 | Exactly-once parallel       | ✓ реализовано (barrier + snapshot) |
 | Exactly-once end-to-end     | ✓ offset + 2PC sink + recovery + durable (E2E recovery harness: kill→recover→output совпадает) |
@@ -379,6 +379,32 @@ Channel overhead: ~106 нс/msg (Mutex+Condition).
 (парсер + планировщик + оптимизатор — это целый язык, не семантика),
 **savepoints** (в основном операционка; durable checkpoint и schema
 evolution уже частично покрывают).
+
+### NEXMark — индустриальный корректностный набор
+
+NEXMark (модель онлайн-аукциона Person/Auction/Bid) — де-факто стандарт
+для стриминга (Flink, Beam, Hazelcast Jet, RisingWave, Feldera).
+`test_nexmark.ml` реализует применимое подмножество на нашем API и
+сверяет результат с эталоном — проверка против ВНЕШНЕ определённой
+семантики, а не самодельных инвариантов.
+
+Покрыто (✓): **q1** currency conversion (map), **q2** selection (filter),
+**q5** auctions with most bids per window (оконный max-count), **q7**
+highest-price bid per period (window + arg_max), **q8** windowed join
+persons⋈auctions (union + оконная группировка), **q12** bids per user в
+global window по count-триггеру. (Hazelcast Jet использует q1/q2/q5/q8
+как репрезентативный набор — покрываем их и ещё два.)
+
+Не реализовано — честно, с причинами:
+- [ ] **q3** (LOCAL_ITEM_SUGGESTION) — incremental join через per-key
+  state + **таймеры**. Упирается в отсутствие ProcessFunction с таймерами
+  (см. Приоритет 6). Это базовый блок; q3 подтверждает его приоритет.
+- [ ] **q4 / q6** — сложные агрегации с retraction поверх OVER WINDOW
+  (среднее по последним N закрытым аукционам). Даже Ververica/Flink имеют
+  ограничения здесь (FLINK-19059).
+- [ ] **q9–q13** — в основном SQL-специфика, filesystem-коннекторы (q10,
+  q13), UDF, session windows в SQL-форме (q11). Коннекторы и SQL — наши
+  non-goals; session window как оператор у нас есть (см. P5).
 
 ### Рассмотрено и отклонено
 
