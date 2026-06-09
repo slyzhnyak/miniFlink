@@ -372,6 +372,36 @@ seen, and evicts any key whose $last\_ts < \mathtt{max\_ts} - ttl$ on
 each pump — the same watermark-driven eviction used by \texttt{dedup},
 bounding table size under a growing key space.
 
+\subsection{Temporal (As-Of) Join}
+
+The snapshot/live tables above answer ``what is the current value of the
+dimension''. A \emph{temporal} join answers ``what was the value
+\emph{as of} the row's event-time'' --- the Flink
+\texttt{FOR SYSTEM\_TIME AS OF} semantics. The dimension is a
+\emph{versioned} table: per key, a history of $(valid\_from, value)$ kept
+sorted, so a late update with an old \texttt{valid\_from} is inserted in
+its correct place. \texttt{as\_of k ts} returns the version with the
+largest $valid\_from \leq ts$.
+
+\begin{lstlisting}
+let temporal_join ~key_main ~key_upd ~valid_from ~merge ~updates main =
+  (* main event at T held until updates-watermark >= T, then
+     enriched with as_of(key, T) *)
+\end{lstlisting}
+
+Correctness under \emph{late} updates is the whole point, and it rests on
+watermarks exactly as elsewhere: a main event at time $T$ is
+\emph{buffered} until the updates stream's watermark reaches $T$. Only
+then are all updates with $valid\_from \leq T$ guaranteed to have arrived
+--- including ones that were delayed in transit --- so \texttt{as\_of}
+returns the correct version. This converts the arrival race into a
+deterministic event-time result: the output is identical regardless of
+the order in which rows and updates physically arrive. The cost is the
+usual event-time trade-off --- buffering adds latency and memory, and a
+silent updates stream stalls the watermark (addressed separately by
+idle-watermarks). The guarantee is only as strong as the updates
+watermark's promise that no earlier-stamped update is still coming.
+
 %%% ── 6. Retractions ──────────────────────────────────────────────────────
 \section{Retractions for Late Data}
 
