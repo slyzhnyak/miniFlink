@@ -1,0 +1,26 @@
+; Kafka-коннектор — основная (тестируемая) часть.
+; БЕЗ librdkafka: абстрактный клиент + in-memory фейк + адаптер.
+; Логика offset-маппинга/seek/EO проверяется на фейке без брокера.
+(library
+ (name kafka_connector)
+ (libraries miniflink)
+ (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
+ (modules kafka_client kafka_fake kafka_source))
+
+(test
+ (name test_kafka_source)
+ (libraries miniflink kafka_connector)
+ (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
+ (modules test_kafka_source))
+
+; ── Прод-биндинг к librdkafka (НЕ собирается по умолчанию) ──
+; Требует системную librdkafka. Чтобы включить: раскомментируй и
+; убедись что librdkafka-dev установлена. kafka_rdkafka реализует
+; Kafka_client.CONSUMER/PRODUCER через C-стабы (kafka_stubs.c).
+;
+; (library
+;  (name kafka_rdkafka_binding)
+;  (libraries miniflink kafka_connector)
+;  (foreign_stubs (language c) (names kafka_stubs))
+;  (c_library_flags (-lrdkafka))
+;  (modules kafka_rdkafka))
