@@ -165,19 +165,13 @@ let () =
 
   (* 1. Метрики по депо: считаем окна, реагируем на низкий заряд *)
   Printf.printf "Метрики по депо (окна 10с):\n";
-  let metrics =
-    Mf_event.of_list ~ts:(fun r -> r.r_ts) incoming
-    |> depot_metrics
-    |> Stream.to_list in
-  (* финальное состояние каждого окна (после пере-счёта опоздавших) *)
-  let windows = Hashtbl.create 8 in
-  List.iter (function
-    | Mf_event.Data ((depot, m), wend) -> Hashtbl.replace windows (depot, wend) (Some m)
-    | Mf_event.Retract ((depot, _), wend) -> Hashtbl.replace windows (depot, wend) None
-    | _ -> ()) metrics;
-  Hashtbl.fold (fun (d,w) v acc -> match v with Some m -> ((d,w),m)::acc | None -> acc) windows []
+  (* финальное состояние каждого окна (materialize применяет retract'ы
+     пере-счёта опоздавших; идентичность записи = (депо, конец окна)) *)
+  Mf_event.of_list ~ts:(fun r -> r.r_ts) incoming
+  |> depot_metrics
+  |> Pipe.materialize ~by:(fun (depot, _) wend -> (depot, wend))
   |> List.sort compare
-  |> List.iter (fun ((depot, wend), ((avg, min_c), low)) ->
+  |> List.iter (fun ((depot, wend), (_, ((avg, min_c), low))) ->
        let avg_s = match avg with Some a -> Printf.sprintf "%.0f км/ч" a | None -> "—" in
        let mc_s  = match min_c with Some c -> Printf.sprintf "%.0f%%" c | None -> "—" in
        Printf.printf "  [%2ds] %-6s ср.скорость %-8s мин.заряд %-5s"

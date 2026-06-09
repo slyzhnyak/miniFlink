@@ -193,6 +193,20 @@ let collect stream =
   List.rev (Stream.fold (fun acc -> function
     | Mf_event.Data (v,_) -> v :: acc | _ -> acc) [] stream)
 
+(* materialize: свернуть поток с retract'ами в финальную таблицу записей.
+   [by v ts] задаёт идентичность записи (например (ключ, конец окна));
+   Data кладёт/заменяет запись, Retract убирает. Возвращает финальные
+   (идентичность, значение) после применения всех retract. Декларативная
+   замена ручного Hashtbl-цикла. *)
+let materialize ~(by : 'a -> Time.t -> 'k) (stream : 'a Mf_event.t Stream.t)
+    : ('k * 'a) list =
+  let tbl : ('k, 'a) Hashtbl.t = Hashtbl.create 64 in
+  Stream.fold (fun () -> function
+    | Mf_event.Data (v, ts)    -> Hashtbl.replace tbl (by v ts) v
+    | Mf_event.Retract (v, ts) -> Hashtbl.remove tbl (by v ts)
+    | _ -> ()) () stream;
+  Hashtbl.fold (fun k v acc -> (k, v) :: acc) tbl []
+
 (* ── Shorthand: seconds / minutes в операторах ───────────── *)
 
 (* ── Instrumented operators ──────────────────────────────── *)

@@ -77,29 +77,35 @@ let () =
   let alerts_in = List.nth streams 0 in
   let dash_in   = List.nth streams 1 in
 
-  (* собранные результаты обоих пайплайнов *)
+  (* Результаты пайплайнов. Под supervisor пайплайн — сервис с побочным
+     эффектом (публикует результат), поэтому общая ссылка здесь отражает
+     реальную границу: пайплайн пишет наружу. Но ВНУТРИ пайплайна сбор
+     декларативен (collect / materialize), без ручных циклов. *)
   let alarms = ref [] in
+  let dashboard = ref [] in
 
   (* два пайплайна под supervisor, у каждого своя failure-стратегия *)
 
-  (* пайплайн АВАРИЙ: фильтр критичного метана. Crash_all — если упадёт,
-     весь мониторинг должен остановиться (молчать об авариях нельзя). *)
+  (* пайплайн АВАРИЙ: критичный метан. collect собирает события
+     декларативно. Crash_all — молчать об авариях нельзя. *)
   let alerts_pipeline () =
-    alerts_in
-    |> Pipe.filter (fun r -> r.ch4 >= critical_ch4)
-    |> Pipe.sink (fun r ->
-         alarms := (r.sensor, r.ch4, r.horizon) :: !alarms)
+    alarms :=
+      alerts_in
+      |> Pipe.filter (fun r -> r.ch4 >= critical_ch4)
+      |> Pipe.collect
+      |> List.map (fun r -> (r.sensor, r.ch4, r.horizon))
   in
 
-  (* пайплайн ДАШБОРДА: средний метан по сенсору в окне. Restart —
-     некритично, при сбое просто перезапустить. *)
-  let dashboard = ref [] in
+  (* пайплайн ДАШБОРДА: средний метан по сенсору в окне. materialize
+     даёт финальное значение каждого окна. Restart — некритично. *)
   let dashboard_pipeline () =
-    dash_in
-    |> Pipe.window_agg (module BySensor) (Pipe.tumbling (seconds 10))
-         (Agg.mean (fun r -> r.ch4))
-    |> Pipe.sink (fun (sensor, avg) ->
-         match avg with Some a -> dashboard := (sensor, a) :: !dashboard | None -> ())
+    dashboard :=
+      dash_in
+      |> Pipe.window_agg (module BySensor) (Pipe.tumbling (seconds 10))
+           (Agg.mean (fun r -> r.ch4))
+      |> Pipe.materialize ~by:(fun (sensor, _) wend -> (sensor, wend))
+      |> List.filter_map (fun (_, (sensor, avg)) ->
+           match avg with Some a -> Some (sensor, a) | None -> None)
   in
 
   let specs = Supervisor.[
