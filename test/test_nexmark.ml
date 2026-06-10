@@ -18,7 +18,7 @@ open Time
    Ververica/Feldera — q0–q22 (~23), q14–q22 в основном SQL вне нашей области.
 
    Что НЕ реализовано и почему — см. TODO в README (раздел NEXMark):
-   q3 (нужны таймеры/ProcessFunction), q4/q6 (retraction-over-window),
+   q4/q6 (retraction-over-window),
    q9–q13 (SQL-специфика, filesystem-коннекторы, UDF).
    ════════════════════════════════════════════════════════════ *)
 
@@ -62,6 +62,70 @@ let test_q2 () =
     |> List.filter_map (function Mf_event.Data (b,_) -> Some b.b_auction | _ -> None)
     |> List.sort compare in
   check "only wanted auctions pass" (out = [1007; 1020])
+
+(* ── Q3 (LOCAL_ITEM_SUGGESTION): incremental join person⋈auction ─ *)
+(* «Кто продаёт в определённых штатах?» Incremental join по seller id
+   через per-key state + timer. Семантика Beam: auction может прийти
+   РАНЬШЕ person продавца — буферизуем такие auction'ы, пока не появится
+   person; затем все аукционы этого продавца используют сохранённого
+   person. person-state истекает по таймеру (не висит вечно если продавец
+   так и не пришёл). Фильтр: только person из заданных штатов. *)
+
+type pa3 = P3 of person | A3 of auction
+module BySeller = Keyed.Make (struct
+  type t = pa3
+  let key = function P3 p -> string_of_int p.p_id | A3 a -> string_of_int a.a_seller
+end)
+
+let test_q3 () =
+  Printf.printf "\n-- Q3 LOCAL_ITEM_SUGGESTION: incremental join (state + timer)\n";
+  let wanted_states = ["OR"; "ID"; "CA"] in
+  let state_ttl = 100 in   (* person-state истекает через 100 после установки *)
+  (* person 1 (OR) приходит ПОСЛЕ своего первого аукциона — проверяем
+     буферизацию. person 2 (NY) не в списке штатов — фильтр отсечёт.
+     person 3 (CA) приходит, потом его аукцион. *)
+  let events = [
+    A3 { a_id=100; a_seller=1; a_category=1; a_ts=seconds 1 };  (* до person 1 — буфер *)
+    P3 { p_id=2; p_name="bob";   p_state="NY"; p_ts=seconds 2 };
+    A3 { a_id=200; a_seller=2; a_category=1; a_ts=seconds 3 };  (* NY → фильтр отсечёт *)
+    P3 { p_id=1; p_name="alice"; p_state="OR"; p_ts=seconds 4 };(* теперь матчим буфер *)
+    P3 { p_id=3; p_name="carol"; p_state="CA"; p_ts=seconds 5 };
+    A3 { a_id=300; a_seller=3; a_category=2; a_ts=seconds 6 };  (* person уже есть *)
+    A3 { a_id=101; a_seller=1; a_category=1; a_ts=seconds 7 };  (* ещё один у alice *)
+  ] in
+  (* состояние продавца: сохранённый person + буфер ранних аукционов *)
+  let matches = ref [] in
+  let _ =
+    Mf_event.of_list ~ts:(fun e -> match e with P3 p -> p.p_ts | A3 a -> a.a_ts) events
+    |> Pipe.process_keyed (module BySeller)
+         ~init:(fun () -> (ref None, ref []))   (* (person option, pending auctions) *)
+         ~on_event:(fun ctx _key (pers, pending) e ->
+           match e with
+           | P3 p ->
+             if List.mem p.p_state wanted_states then begin
+               pers := Some p;
+               ctx.Pipe.set_event_timer (p.p_ts + state_ttl);  (* истечение person-state *)
+               (* матчим накопленные аукционы *)
+               List.iter (fun a -> ctx.Pipe.emit (p.p_name, a.a_id)) (List.rev !pending);
+               pending := []
+             end
+           | A3 a ->
+             (match !pers with
+              | Some p -> ctx.Pipe.emit (p.p_name, a.a_id)   (* person известен *)
+              | None -> pending := a :: !pending))           (* буферизуем до person *)
+         ~on_timer:(fun _ctx _key (pers, pending) _t _kind ->
+           (* person-state истёк — очищаем (последующие аукционы снова буфер) *)
+           pers := None; pending := [])
+    |> Stream.to_list
+    |> List.iter (function
+       | Mf_event.Data ((name, aid), _) -> matches := (name, aid) :: !matches
+       | _ -> ()) in
+  let got = List.sort compare !matches in
+  (* alice (OR): аукционы 100 (буфер) и 101 (после) → (alice,100),(alice,101)
+     carol (CA): аукцион 300 → (carol,300)
+     bob (NY): отфильтрован *)
+  check "Q3 matches: alice's 100+101, carol's 300, bob(NY) filtered out"
+    (got = [("alice",100); ("alice",101); ("carol",300)])
 
 (* ── Q5: какие аукционы собрали больше всего ставок за период ─ *)
 (* Sliding window + агрегация: за каждое окно — аукцион(ы) с
@@ -212,6 +276,7 @@ let () =
   Printf.printf "==========================================\n";
   test_q1 ();
   test_q2 ();
+  test_q3 ();
   test_q5 ();
   test_q7 ();
   test_q8 ();

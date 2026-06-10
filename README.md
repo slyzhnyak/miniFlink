@@ -404,16 +404,15 @@ NEXMark (модель онлайн-аукциона Person/Auction/Bid) — де
 определённой семантики, а не самодельных инвариантов.
 
 Покрыто (✓): **q1** currency conversion (map), **q2** selection (filter),
+**q3** local item suggestion (incremental join person⋈auction через
+per-key state + таймер истечения, фильтр по штату — на `process_keyed`),
 **q5** auctions with most bids per window (оконный max-count), **q7**
 highest-price bid per period (window + arg_max), **q8** windowed join
 persons⋈auctions (union + оконная группировка), **q12** bids per user в
 global window по count-триггеру. (Hazelcast Jet использует q1/q2/q5/q8
-как репрезентативный набор — покрываем их и ещё два.)
+как репрезентативный набор — покрываем их и ещё три.)
 
 Не реализовано — честно, с причинами:
-- [ ] **q3** (LOCAL_ITEM_SUGGESTION) — incremental join через per-key
-  state + **таймеры**. Упирается в отсутствие ProcessFunction с таймерами
-  (см. Приоритет 6). Это базовый блок; q3 подтверждает его приоритет.
 - [ ] **q4 / q6** — сложные агрегации с retraction поверх OVER WINDOW
   (среднее по последним N закрытым аукционам). Даже Ververica/Flink имеют
   ограничения здесь (FLINK-19059).
