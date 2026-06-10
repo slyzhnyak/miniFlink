@@ -177,3 +177,44 @@ let test_clear_state () =
   check "state re-initialized after clear (2 inits, not 1)" (!inits = 2)
 
 let () = test_clear_state ()
+
+(* Паттерн пере-регистрации (документирован в process_fn.mli): таймеры
+   НЕ переживают перезапуск, но СОСТОЯНИЕ переживает (checkpoint). Держим
+   last_seen в состоянии; после «рестарта» при любой активности потока
+   пере-регистрируем heartbeat-таймеры из снапшота состояния — пропавший
+   до рестарта шахтёр всё равно обнаруживается. *)
+let test_reregistration_pattern () =
+  Printf.printf "\n-- re-registration: missing miner detected even across restart\n";
+  let threshold = 30 in
+  let fired = ref [] in
+  (* «снапшот состояния», переживший рестарт: last_seen по ключам.
+     M1 видели на ts=10 и он ПРОПАЛ до рестарта. *)
+  let snapshot = [("M1", 10)] in
+  (* процесс ПОСЛЕ рестарта: таймеров нет, но при старте пайплайн
+     пере-регистрирует их из снапшота — здесь через первое же событие
+     служебного ключа/любую активность. Для простоты прогоняем
+     пере-регистрацию на первом on_event любого ключа. *)
+  let reregistered = ref false in
+  let src = Stream.of_list [
+    Mf_event.data { miner="M2"; ts=50 } 50;   (* активность другого ключа *)
+    Mf_event.wm 100;                           (* 10+30=40 <= 100 -> M1 fired *)
+  ] in
+  let _ =
+    src |> Pipe.process_keyed (module ByMiner)
+      ~init:(fun () -> ref None)
+      ~on_event:(fun ctx _k st p ->
+        if not !reregistered then begin
+          (* пере-регистрация из снапшота: таймеры пропавших ключей *)
+          List.iter (fun (k, last) ->
+            ctx.Pipe.set_event_timer_for k (last + threshold)) snapshot;
+          reregistered := true
+        end;
+        st := Some p.ts;
+        ())
+      ~on_timer:(fun _ctx key _st t _kind ->
+        fired := (key, t) :: !fired; ())
+    |> Stream.to_list in
+  check "M1 (silent since BEFORE restart) detected via snapshot timer"
+    (List.mem ("M1", 40) !fired)
+
+let () = test_reregistration_pattern ()

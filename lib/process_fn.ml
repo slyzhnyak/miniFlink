@@ -24,6 +24,7 @@ type 'out ctx = {
   clear_state             : unit -> unit;   (* удалить состояние текущего ключа *)
   emit                    : 'out -> unit;
   set_event_timer         : Time.t -> unit;
+  set_event_timer_for     : string -> Time.t -> unit;
   set_processing_timer    : Time.t -> unit;
   cancel_event_timer      : Time.t -> unit;
   cancel_event_timers     : unit -> unit;      (* снять все event-таймеры этого ключа *)
@@ -61,6 +62,7 @@ let process_keyed
     clear_state = (fun () -> Hashtbl.remove states key);
     emit = (fun o -> Queue.push (Mf_event.data o emit_ts) out_q);
     set_event_timer = (fun t -> ev_timers := TimerSet.add (key, t) !ev_timers);
+    set_event_timer_for = (fun k t -> ev_timers := TimerSet.add (k, t) !ev_timers);
     set_processing_timer = (fun t -> pt_timers := TimerSet.add (key, t) !pt_timers);
     cancel_event_timer = (fun t -> ev_timers := TimerSet.remove (key, t) !ev_timers);
     cancel_event_timers = (fun () ->
