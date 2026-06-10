@@ -89,13 +89,14 @@ let depot_metrics source =
          incr dropped;
          Log.warn ~fields:[("error", Printexc.to_string e)] "skipped bad reading")
        validate
-  |> Mf_event.with_watermarks ~latency:(seconds 1)
+  |> Pipe.event_time ~lateness:(seconds 1)
   |> Pipe.window_agg (module ByDepot)
-       ~latency:(seconds 1) ~allowed_lateness:(seconds 30)
+       ~allowed_lateness:(seconds 30)
        (Pipe.tumbling (seconds 10))
-       Agg.(both (both (mean (fun t -> t.speed))
-                       (min_by (fun t -> t.charge)))
-                 (count_if (fun t -> t.charge < low_charge_threshold)))
+       Agg.(let+ avg_speed  = mean   (fun t -> t.speed)
+            and+ min_charge = min_by (fun t -> t.charge)
+            and+ low_count  = count_if (fun t -> t.charge < low_charge_threshold)
+            in (avg_speed, min_charge, low_count))
 
 (* ── Сервис 2: накопительная статистика по депо (exactly-once) ─ *)
 (* Суммарная статистика по депо ведётся с exactly-once и durable
@@ -171,7 +172,7 @@ let () =
   |> depot_metrics
   |> Pipe.materialize ~by:(fun (depot, _) wend -> (depot, wend))
   |> List.sort compare
-  |> List.iter (fun ((depot, wend), (_, ((avg, min_c), low))) ->
+  |> List.iter (fun ((depot, wend), (_, (avg, min_c, low))) ->
        let avg_s = match avg with Some a -> Printf.sprintf "%.0f км/ч" a | None -> "—" in
        let mc_s  = match min_c with Some c -> Printf.sprintf "%.0f%%" c | None -> "—" in
        Printf.printf "  [%2ds] %-6s ср.скорость %-8s мин.заряд %-5s"

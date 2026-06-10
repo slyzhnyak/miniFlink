@@ -47,7 +47,7 @@ let () =
 
   (* по времени: окна по 30 секунд *)
   stream ()
-  |> Mf_event.with_watermarks ~latency:0
+  |> Pipe.event_time ~lateness:0
   |> Pipe.window (module User) (Pipe.tumbling (seconds 30))
   |> Pipe.aggregate (fun u cs -> (u, List.map (fun c -> c.page) cs))
   |> count_windows "Tumbling 30с (по времени) — всплеск и второй всплеск в разных окнах:";

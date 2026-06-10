@@ -15,6 +15,11 @@
     без изменений. *)
 val map : ('a -> 'b) -> 'a Mf_event.t Stream.t -> 'b Mf_event.t Stream.t
 
+val event_time : lateness:Time.t -> 'a Mf_event.t Stream.t -> 'a Mf_event.t Stream.t
+(** Пометить поток для обработки по event-time с допуском [lateness] на
+    опоздание. Доменный псевдоним {!Mf_event.with_watermarks}: окна
+    закрываются по времени событий, а не по порядку прихода. *)
+
 (** [filter p] оставляет [Data], удовлетворяющие [p]; watermark и retract
     проходят. *)
 val filter : ('a -> bool) -> 'a Mf_event.t Stream.t -> 'a Mf_event.t Stream.t

@@ -126,7 +126,7 @@ let () =
   (* для примера материализуем обогащённый поток в список и переиспользуем *)
   let enriched_list =
     telemetry
-    |> Mf_event.with_watermarks ~latency:(seconds 2)
+    |> Pipe.event_time ~lateness:(seconds 2)
     |> Pipe.enrich (module Tel)
          ~from:(fun id ->
            (* зону берём по горизонту, но enrich даёт по ключу id —

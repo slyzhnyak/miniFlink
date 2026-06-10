@@ -151,6 +151,11 @@ let dedup
 (* ── Map / Filter / FlatMap ───────────────────────────────── *)
 
 let map      = emap
+
+(* event_time: пометить поток для обработки по event-time с допуском
+   [lateness] на опоздание (псевдоним Mf_event.with_watermarks с
+   доменным именем — читается как «обрабатываем по времени событий»). *)
+let event_time ~lateness stream = Mf_event.with_watermarks ~latency:lateness stream
 let filter   = efilt
 let flat_map = eflatmap
 

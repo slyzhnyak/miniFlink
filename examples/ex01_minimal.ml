@@ -34,7 +34,7 @@ let pipeline source =
   (* отбрасываем явно битые показания *)
   |> Pipe.filter (fun r -> r.celsius > -100. && r.celsius < 200.)
   (* watermark: данные могут опоздать на 2с *)
-  |> Mf_event.with_watermarks ~latency:(seconds 2)
+  |> Pipe.event_time ~lateness:(seconds 2)
   (* окна по 10 секунд + агрегаторы: среднее и счёт за один проход.
      Никакой ручной свёртки — готовые комбинируемые агрегаты. *)
   |> Pipe.window_agg (module Sensor) (Pipe.tumbling (seconds 10))
