@@ -109,6 +109,16 @@ val window :
     [allowed_lateness] (его окно уже удалено по watermark), передаётся
     в этот callback вместо тихой потери. По умолчанию игнорируется. *)
 
+val window_keyed :
+  by:('a -> string) ->
+  ?latency:Time.t ->
+  ?allowed_lateness:Time.t ->
+  ?on_late:('a -> unit) ->
+  win_spec ->
+  'a Mf_event.t Stream.t -> (string * 'a list) Mf_event.t Stream.t
+(** Как {!window}, но ключ задаётся функцией [~by] прямо в вызове, без
+    объявления модуля {!Keyed.S}. Сахар поверх {!window}. *)
+
 (** [aggregate f] сворачивает каждое окно [(key, values)] в результат
     [f key values]. *)
 val aggregate :
@@ -147,7 +157,15 @@ val window_agg :
   ('a, 'r) Agg.t ->
   'a Mf_event.t Stream.t -> (string * 'r) Mf_event.t Stream.t
 
-(** {2 Count-окна (по количеству событий, без watermarks)} *)
+val window_agg_keyed :
+  by:('a -> string) ->
+  ?latency:Time.t ->
+  ?allowed_lateness:Time.t ->
+  win_spec ->
+  ('a, 'r) Agg.t ->
+  'a Mf_event.t Stream.t -> (string * 'r) Mf_event.t Stream.t
+(** Как {!window_agg}, но ключ функцией [~by] инлайн. Сахар поверх
+    {!window_agg}. *)
 
 (** Спецификация count-окна. *)
 type count_spec

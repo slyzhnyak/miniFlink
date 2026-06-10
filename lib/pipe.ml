@@ -59,6 +59,11 @@ let tumbling = Window.tumbling
 let sliding  = Window.sliding
 let assign   = Window.assign
 let window   = Window.window
+
+(* window_keyed ~by — как window, но ключ функцией инлайн (без module).
+   Сахар поверх window через Keyed.of_fun; ядро не тронуто. *)
+let window_keyed ~by ?latency ?allowed_lateness ?on_late spec stream =
+  window (Keyed.of_fun by) ?latency ?allowed_lateness ?on_late spec stream
 let window_fold = Window.window_fold
 type count_spec = Window.count_spec
 let count_tumbling = Window.count_tumbling
@@ -100,6 +105,10 @@ let window_agg
   Agg.with_parts agg { Agg.k = fun init add finish ->
     window_fold (module K) ?latency ?allowed_lateness spec ~init ~add upstream
     |> emap (fun (key, acc) -> (key, finish acc)) }
+
+(* window_agg_keyed ~by — window_agg с ключом-функцией инлайн. *)
+let window_agg_keyed ~by ?latency ?allowed_lateness spec agg stream =
+  window_agg (Keyed.of_fun by) ?latency ?allowed_lateness spec agg stream
 
 (* ── Stateful ─────────────────────────────────────────────── *)
 

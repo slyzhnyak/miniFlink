@@ -32,11 +32,6 @@ type telemetry = {
   ts     : Time.t;
 }
 
-module ByDepot = Keyed.Make (struct
-  type t = telemetry
-  let key t = t.depot
-end)
-
 let low_charge_threshold = 20.   (* % — ниже этого автобус скоро встанет *)
 
 (* ── Приём сырой телеметрии и валидация ───────────────────── *)
@@ -90,7 +85,7 @@ let depot_metrics source =
          Log.warn ~fields:[("error", Printexc.to_string e)] "skipped bad reading")
        validate
   |> Pipe.event_time ~lateness:(seconds 1)
-  |> Pipe.window_agg (module ByDepot)
+  |> Pipe.window_agg_keyed ~by:(fun t -> t.depot)
        ~allowed_lateness:(seconds 30)
        (Pipe.tumbling (seconds 10))
        Agg.(let+ avg_speed  = mean   (fun t -> t.speed)

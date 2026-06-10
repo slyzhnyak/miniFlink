@@ -19,3 +19,8 @@ end
       end)
     ]} *)
 module Make (T : sig type t val key : t -> string end) : S with type t = T.t
+
+val of_fun : ('a -> string) -> (module S with type t = 'a)
+(** Создать {!S} из функции ключа инлайн, без объявления модуля заранее:
+    {[ Pipe.window (Keyed.of_fun (fun e -> e.id)) spec stream ]}
+    Работает с любым оператором, принимающим [(module Keyed.S)]. *)
