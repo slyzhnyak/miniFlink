@@ -1,0 +1,23 @@
+# CI workflow для miniFlink — сборка + тесты на OCaml 4.14 и 5.2.
+# ЛЕЖИТ В docs/ci/, А НЕ в .github/workflows/, потому что токен
+# автоматизации не имеет workflow-scope и не может пушить туда.
+# Чтобы включить CI: скопируй этот файл в .github/workflows/ci.yml
+# вручную (через GitHub UI или пуш с токеном, имеющим workflow scope).
+name: CI
+on:
+  push: { branches: [main] }
+  pull_request: { branches: [main] }
+jobs:
+  build-test:
+    strategy:
+      matrix:
+        ocaml: ["4.14", "5.2"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ocaml/setup-ocaml@v3
+        with: { ocaml-compiler: "${{ matrix.ocaml }}" }
+      - run: sudo apt-get update && sudo apt-get install -y librocksdb-dev
+      - run: opam install -y dune yojson ppx_deriving ppx_deriving_yojson qcheck-core qcheck
+      - run: opam exec -- dune build
+      - run: opam exec -- dune test

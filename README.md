@@ -211,7 +211,7 @@ Channel overhead: ~106 нс/msg (Mutex+Condition).
 | Prometheus Metrics          | ✓ реализовано (HTTP :9090)    |
 | Изоляция исключений         | ✓ safe_map / safe_filter (битое событие → on_error, не падение) |
 | Unit + Property тесты       | ✓ 40 сюит, QCheck-инварианты  |
-| CI                          | ⚙ workflow готов (.github/workflows/ci.yml): сборка + тесты на OCaml 4.14 и 5.2 |
+| CI                          | ⚠ workflow написан (docs/ci/ci.yml: сборка + тесты на OCaml 4.14/5.2), но НЕ активен: токен автоматизации без workflow-scope не может пушить в .github/workflows/ — скопируйте файл туда вручную |
 | Exactly-once parallel       | ✓ реализовано (barrier + snapshot) |
 | Exactly-once end-to-end     | ✓ offset + 2PC sink + recovery + durable (E2E recovery harness: kill→recover→output совпадает) |
 | Структурированные логи (JSON) | ✓ Log (событие+sink, назначение — за приложением) |
@@ -380,6 +380,20 @@ Channel overhead: ~106 нс/msg (Mutex+Condition).
   после рестарта без ручной пере-регистрации). Средняя сложность:
   сериализация TimerSet + интеграция с checkpoint_parallel.
 
+- [ ] **Kafka EOS: транзакции в C-слое.** `kafka_rdkafka.ml` имеет
+  заглушки `begin_txn`/`commit_txn` (через flush); для полного
+  exactly-once через Kafka-sink нужны `rd_kafka_init_transactions` /
+  `begin` / `commit` в kafka_stubs.c и реализация `transactional_sink`
+  поверх. Требует среды с живым брокером для integration-теста.
+  Средняя сложность, чисто транспортный слой (семантика 2PC в ядре
+  готова и протестирована на in-memory sink).
+- [ ] **Композитные ключи: безопасная склейка.** Сейчас составной ключ
+  делается вручную (`a ^ "/" ^ b`) — тихая ловушка коллизии, если поля
+  содержат разделитель (`"a/b"+"c"` и `"a"+"b/c"` дают один ключ).
+  Нужен `Keyed.compose`/`key2` с экранированием или длина-префиксной
+  склейкой. Низкая сложность, закрывает потенциальный source of bugs
+  (обсуждалось; до сих пор не было в роадмапе — забытый долг).
+
 Надстройки над фундаментом (требуют таймеров сначала):
 
 - [ ] **CEP (complex event patterns).** Паттерны «A затем B в течение
@@ -458,9 +472,12 @@ global window по count-триггеру. (Hazelcast Jet использует q
   shared-memory каналы между потоками/доменами, не по сети.
 - **End-to-end exactly-once через внешние source/sink.** Реализован
   consistent snapshot операторного стейта в параллельном режиме
-  (barrier + recovery). Координация offset-ов источника и
-  транзакционный commit в sink (полный Kafka EOS) — отдельная
-  большая задача, не сделана.
+  (barrier + recovery), и входная сторона Kafka сделана
+  (connectors/kafka: seekable_source с offset-маппингом и recovery-seek,
+  на фейке протестировано). Не сделана выходная: транзакционный commit в
+  Kafka-sink — begin/commit_txn в kafka_rdkafka заглушки, для полного
+  EOS нужны init_transactions/begin/commit в C-слое (см. открытый пункт
+  в P6).
 - **Incremental checkpointing.** Снапшот целиком, не дельтами.
 
 Это сознательный выбор: проект демонстрирует *семантику* Flink
