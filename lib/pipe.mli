@@ -288,9 +288,16 @@ type timer_kind = Process_fn.timer_kind =
 (** Контекст обработчика (переэкспорт {!Process_fn.ctx}). *)
 type 'out ctx = 'out Process_fn.ctx = {
   clear_state             : unit -> unit;
+  (** удалить состояние текущего ключа (TTL-очистка из on_timer) *)
   emit                    : 'out -> unit;
+  (** эмиссия несёт время: из on_timer — время срабатывания таймера, из
+      on_event — время события; эмиссии выходят до вызвавшего watermark,
+      поэтому выход безопасно композируется с окнами *)
   set_event_timer         : Time.t -> unit;
   set_event_timer_for     : string -> Time.t -> unit;
+  (** таймер на УКАЗАННЫЙ ключ — для пере-регистрации из снапшота
+      состояния после рестарта (таймеры не переживают перезапуск;
+      см. {!Process_fn.process_keyed}) *)
   set_processing_timer    : Time.t -> unit;
   cancel_event_timer      : Time.t -> unit;
   cancel_event_timers     : unit -> unit;

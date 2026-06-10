@@ -250,6 +250,34 @@ continuation (a record with a universally-quantified field) so the
 existential accumulator type does not escape its scope — a small but
 genuine use of the GADT/rank-2 combination, not decoration.
 
+\subsection{Timers and ProcessFunction}
+
+Windows react to events that \emph{arrived}; timers react to events
+that \emph{did not}. \texttt{Pipe.process\_keyed} provides per-key
+state plus two timer kinds: \emph{event-time} timers fire when the
+watermark passes their time (deterministic, data-driven), and
+\emph{processing-time} timers fire by wall clock — required for
+``source went silent'' detection, where by definition no data drives
+the watermark. Handlers \texttt{on\_event} and \texttt{on\_timer}
+receive a context for emitting and for setting/cancelling timers.
+
+Two semantic guarantees matter for composition. Emissions carry real
+time (the timer's fire time from \texttt{on\_timer}, the event's
+timestamp from \texttt{on\_event}) and leave the operator \emph{before}
+the watermark that triggered them, so the output stream preserves
+watermark monotonicity and can be fed into downstream windows. Timers
+are checked as events and watermarks pass through the operator (pull
+model, no background thread); a fully silent stream therefore needs
+idle watermarks to keep time moving.
+
+Timers live in operator memory and do not survive a restart, while
+keyed state does (via checkpoints). The supported recovery pattern is
+re-registration: keep \texttt{last\_seen} in state and, on startup,
+re-register timers from the state snapshot;
+\texttt{set\_event\_timer\_for} registers a timer for an arbitrary key
+for exactly this purpose. NEXMark q3 (incremental person--auction join
+with state expiry) is implemented on this primitive in the test suite.
+
 %%% ── 3. Event Time and Watermarks ───────────────────────────────────────
 \section{Event Time and Watermarks}
 
