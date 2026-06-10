@@ -59,3 +59,11 @@ val make_stream_with_dlq :
   ts_of:('a -> Time.t) ->
   (unit -> (string * bytes) option) ->
   'a Mf_event.t Stream.t
+
+(** Мост из {!Config.t} (расширенная запись приложения: workers,
+    checkpoint, state_dir...) в runtime-конфиг исполнения:
+    [workers]→[parallelism], [capacity]→[capacity], метрики включаются
+    если [metrics_interval_s > 0]. [?mode] задаёт режим (по умолчанию
+    [Prod]) — {!Config.t} описывает {e ресурсы}, mode — {e режим}.
+    Два типа дополняют друг друга, не конкурируют. *)
+val of_config : ?mode:mode -> Config.t -> config

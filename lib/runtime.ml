@@ -176,3 +176,10 @@ let make_stream_with_dlq cfg ~topic ~codec ~ts_of raw_source =
                ~codec ~attempt:1 payload with
        | None   -> None
        | Some v -> Some (Mf_event.data v (ts_of v)))
+
+(* мост из Config.t (расширенная запись приложения) в runtime-конфиг:
+   workers→parallelism, capacity→capacity; mode задаётся параметром
+   (Config.t описывает РЕСУРСЫ, mode — РЕЖИМ исполнения). *)
+let of_config ?(mode = Prod) (c : Config.t) : config =
+  { mode; parallelism = c.Config.workers; capacity = c.Config.capacity;
+    metrics_port = (if c.Config.metrics_interval_s > 0 then 9090 else 0) }

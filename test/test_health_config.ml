@@ -88,3 +88,14 @@ let () =
   test_config_validation ();
   test_config_json ();
   Printf.printf "\nAll health+config tests passed.\n"
+
+(* мост Config.t -> Runtime.config *)
+let test_config_bridge () =
+  Printf.printf "\n-- Runtime.of_config bridges app Config to runtime\n";
+  let c = { Config.default with workers = 8; capacity = 2048 } in
+  let rc = Runtime.of_config c in
+  check "workers -> parallelism" (rc.Runtime.parallelism = 8);
+  check "capacity carried" (rc.Runtime.capacity = 2048);
+  check "default mode is Prod" (rc.Runtime.mode = Runtime.Prod)
+
+let () = test_config_bridge ()
