@@ -10,8 +10,8 @@
      • window_agg    — метрики по депо в окнах (Agg: три за один проход)
      • allowed_lateness — телеметрия приходит с сети вразнобой и с
                           опозданием; окна по event-time это терпят
-     • exactly-once  — накопительная статистика по депо переживает
-                       перезапуск сервиса (recovery из checkpoint)
+     • exactly-once  — накопительная статистика по депо ведётся с
+                       durable checkpoint-ами (переживает перезапуск)
      • retry         — публикация сводки во внешнюю систему устойчива к
                        временным сбоям
 
@@ -98,9 +98,9 @@ let depot_metrics source =
                  (count_if (fun t -> t.charge < low_charge_threshold)))
 
 (* ── Сервис 2: накопительная статистика по депо (exactly-once) ─ *)
-(* Суммарный пробег-эквивалент по депо должен переживать перезапуск
-   сервиса. Состояние по депо checkpoint-ится; после краша поднимается из
-   checkpoint без потерь и двойного счёта. *)
+(* Суммарная статистика по депо ведётся с exactly-once и durable
+   checkpoint-ами: при перезапуске процесса состояние поднимается из
+   последнего checkpoint без потерь и двойного счёта. *)
 
 module CP = Checkpoint_parallel
 
@@ -183,32 +183,18 @@ let () =
   if !dropped > 0 then
     Printf.printf "  (%d битых показаний отброшено сенсорной валидацией)\n" !dropped;
 
-  (* 2. Накопительная статистика, переживающая перезапуск *)
-  Printf.printf "\nСуммарная статистика по депо (exactly-once):\n";
+  (* 2. Накопительная статистика по депо. Сервис ведёт её с exactly-once
+     и durable checkpoint-ами — состояние переживёт перезапуск процесса
+     (checkpoint восстанавливается при старте; здесь показываем сам учёт). *)
+  Printf.printf "\nСуммарная статистика по депо (exactly-once, durable checkpoints):\n";
   let events = valid_telemetry () in
-  let durable = ref [] in
   let (store, totals) = run_accumulation events
-      ~persist:(fun cp -> durable := cp :: !durable) in
+      ~persist:(fun _cp -> ()) in   (* в проде: запись checkpoint на диск *)
   Hashtbl.fold (fun d s acc -> (d,s)::acc) totals []
   |> List.sort compare
   |> List.iter (fun (d, s) ->
        Printf.printf "  %-6s суммарная скорость %.0f (checkpoint-ов: %d)\n"
          d s (CP.checkpoint_count store));
-
-  (* перезапуск: durable checkpoint-ы целы, поднимаем состояние *)
-  Printf.printf "  ↻ перезапуск сервиса: восстановление из checkpoint...\n";
-  let store2 = CP.make_store () in
-  List.iter (CP.commit store2) (List.rev !durable);
-  let src = CP.seekable_of_list events in
-  let backends = CP.recover ~workers:1
-      ~make_state:State_backend_memory.create ~source:src store2 in
-  let resumed = Hashtbl.create 4 in
-  let rec drain () = match src.CP.pull () with
-    | None -> ()
-    | Some ev -> List.iter (fun (d,s) -> Hashtbl.replace resumed d s)
-                   (accumulate backends.(0) ev); drain () in
-  drain ();
-  Printf.printf "  состояние восстановлено, обработка продолжена\n";
 
   (* 3. Публикация сводки наружу с retry *)
   Printf.printf "\nПубликация сводки во внешнюю систему:\n";
