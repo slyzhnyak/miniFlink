@@ -1,0 +1,8 @@
+; Демо-домен и тестовый harness — раньше жили в lib/ и загрязняли
+; публичный API Miniflink.* (Miniflink.Domain с device_id/fuel_pct у
+; пользователя opam-пакета). Теперь — внутренняя библиотека тестов.
+(library
+ (name test_support)
+ (libraries miniflink yojson ppx_deriving_yojson.runtime)
+ (preprocess (pps ppx_deriving_yojson ppx_deriving.show))
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-69-70)))

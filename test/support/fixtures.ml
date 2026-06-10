@@ -1,3 +1,4 @@
+open Miniflink
 let ev id t_s speed fuel =
   Mf_event.data
     { Domain.device_id = id; speed_kmh = speed; fuel_pct = fuel;

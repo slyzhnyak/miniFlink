@@ -14,7 +14,7 @@ open Miniflink
    live_words рос бы монотонно. Тест ловит регрессии eviction.
    ============================================================ *)
 
-open Domain
+open Test_support.Domain
 open Time
 
 let devices = Table.of_list [
@@ -28,8 +28,8 @@ let pipeline src =
   |> Pipe.enrich (module Telemetry) ~from:devices
        ~merge:(fun t d -> { t with device = d })
   |> Pipe.window (module Telemetry) (Pipe.tumbling (seconds 30))
-  |> Pipe.aggregate Rules.compute
-  |> Pipe.flat_map (Rules.check Rules.fleet)
+  |> Pipe.aggregate Test_support.Rules.compute
+  |> Pipe.flat_map (Test_support.Rules.check Test_support.Rules.fleet)
   |> Pipe.dedup (module Alert) ~rule:(fun a -> a.rule) ~cooldown:(minutes 5)
 
 (* Бесконечный генератор: device cycle, монотонное время *)

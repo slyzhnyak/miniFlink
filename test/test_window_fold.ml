@@ -3,7 +3,7 @@ open Miniflink
    результат должен совпадать с материализованным window |> aggregate,
    но без хранения списка. Проверяем сумму, счёт, max и эквивалентность. *)
 
-open Domain
+open Test_support.Domain
 open Time
 
 let pass name = Printf.printf "  OK %s\n%!" name

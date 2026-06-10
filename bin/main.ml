@@ -8,7 +8,7 @@ open Miniflink
    ============================================================ *)
 
 open Time
-open Domain
+open Test_support.Domain
 
 (* ── Справочник устройств ─────────────────────────────────── *)
 
@@ -27,8 +27,8 @@ let pipeline source =
        ~from:devices
        ~merge:(fun t dev -> { t with device = dev })
   |> Pipe.window (module Telemetry) (Pipe.tumbling (seconds 30))
-  |> Pipe.aggregate              Rules.compute
-  |> Pipe.flat_map               (Rules.check Rules.fleet)
+  |> Pipe.aggregate              Test_support.Rules.compute
+  |> Pipe.flat_map               (Test_support.Rules.check Test_support.Rules.fleet)
   |> Pipe.dedup (module Alert)
        ~rule:(fun a -> a.rule)
        ~cooldown:(minutes 5)
@@ -49,7 +49,7 @@ let () = at_exit (fun () -> flush stdout)
 
 let run_test () =
   Printf.printf "=== Noop mode (no DLQ, no shutdown handler) ===\n";
-  let source = Stream.of_list Fixtures.scenario_alerts in
+  let source = Stream.of_list Test_support.Fixtures.scenario_alerts in
   Runtime.run Runtime.noop
     ~key_of:(fun (t:telemetry) -> t.device_id)
     ~source
@@ -62,7 +62,7 @@ let run_test () =
 let run_log () =
   Printf.printf "=== Log mode (metrics to stderr + shutdown handler) ===\n";
   Printf.printf "(Send SIGTERM or SIGINT to test graceful shutdown)\n";
-  let source = Stream.of_list Fixtures.scenario_alerts in
+  let source = Stream.of_list Test_support.Fixtures.scenario_alerts in
   Runtime.run Runtime.log_cfg
     ~key_of:(fun (t:telemetry) -> t.device_id)
     ~source

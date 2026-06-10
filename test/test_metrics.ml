@@ -1,5 +1,5 @@
 open Miniflink
-open Domain
+open Test_support.Domain
 open Time
 
 (* ============================================================
@@ -88,8 +88,8 @@ let test_runtime_metrics () =
     |> Pipe.enrich (module Telemetry) ~from:devices
          ~merge:(fun t d -> { t with device=d })
     |> Pipe.window (module Telemetry) (Pipe.tumbling (seconds 30))
-    |> Pipe.aggregate Rules.compute
-    |> Pipe.flat_map (Rules.check Rules.fleet)
+    |> Pipe.aggregate Test_support.Rules.compute
+    |> Pipe.flat_map (Test_support.Rules.check Test_support.Rules.fleet)
   in
   (* Источник с явными watermark-ами *)
   let mk t = { device_id="A"; speed_kmh=120.; fuel_pct=80.;

@@ -3,7 +3,7 @@ open Miniflink
    Watermarks не нужны. Проверяем tumbling (каждые N), sliding (N с шагом),
    группировку по ключу, прозрачность watermark, валидацию. *)
 
-open Domain
+open Test_support.Domain
 
 let pass name = Printf.printf "  OK %s\n%!" name
 let fail name = Printf.printf "  FAIL %s\n%!" name; exit 1

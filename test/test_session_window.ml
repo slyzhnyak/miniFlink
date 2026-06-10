@@ -3,7 +3,7 @@ open Miniflink
    Главное — проверить что событие, перекрывающее разрыв между двумя
    сессиями, сливает их в одну. *)
 
-open Domain
+open Test_support.Domain
 
 let pass name = Printf.printf "  OK %s\n%!" name
 let fail name = Printf.printf "  FAIL %s\n%!" name; exit 1

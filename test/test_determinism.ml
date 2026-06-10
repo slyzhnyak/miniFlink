@@ -23,7 +23,7 @@ open Miniflink
    ============================================================ *)
 
 open QCheck
-open Domain
+open Test_support.Domain
 open Time
 
 let pass name = Printf.printf "  OK %s\n%!" name
@@ -60,8 +60,8 @@ let pipeline src =
   |> Pipe.enrich (module Telemetry) ~from:devices
        ~merge:(fun t d -> { t with device = d })
   |> Pipe.window (module Telemetry) (Pipe.tumbling (seconds 30))
-  |> Pipe.aggregate Rules.compute
-  |> Pipe.flat_map (Rules.check Rules.fleet)
+  |> Pipe.aggregate Test_support.Rules.compute
+  |> Pipe.flat_map (Test_support.Rules.check Test_support.Rules.fleet)
 
 (* Прогнать pipeline, собрать алерты как сравнимый список ключей *)
 let run_alerts telemetries =
@@ -198,7 +198,7 @@ let test_permutation_invariance () =
           (List.sort (fun (a:telemetry) b -> compare a.ts b.ts) telemetries)
           @ [Mf_event.wm 35000])
         |> Pipe.window (module Telemetry) (Pipe.tumbling (seconds 30))
-        |> Pipe.aggregate Rules.compute
+        |> Pipe.aggregate Test_support.Rules.compute
         |> Stream.to_list
         |> List.filter_map (function
              | Mf_event.Data ((s:stats),_) -> Some (s.device_id, s.max_speed, s.min_fuel)

@@ -3,43 +3,43 @@
 
 (test
  (name test_core)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_core))
 
 (test
  (name test_props)
- (libraries miniflink qcheck-core qcheck-core.runner qcheck)
+ (libraries miniflink test_support qcheck-core qcheck-core.runner qcheck)
  (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_props))
 
 (test
  (name test_reliability)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_reliability))
 
 (test
  (name test_metrics)
- (libraries miniflink str)
+ (libraries miniflink test_support str)
  (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_metrics))
 
 (test
  (name test_retract)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_retract))
 
 (test
  (name test_sliding)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_sliding))
 
 (test
  (name test_dedup_evict)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_dedup_evict))
 
@@ -51,20 +51,20 @@
 
 (test
  (name test_determinism)
- (libraries miniflink qcheck-core qcheck-core.runner qcheck unix threads.posix)
+ (libraries miniflink test_support qcheck-core qcheck-core.runner qcheck unix threads.posix)
  (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_determinism))
 
 (test
  (name test_watermark)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_watermark))
 
 
 (test
  (name test_table_ttl)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_table_ttl))
 
@@ -82,205 +82,205 @@
 
 (test
  (name test_codec)
- (libraries miniflink qcheck-core qcheck-core.runner qcheck)
+ (libraries miniflink test_support qcheck-core qcheck-core.runner qcheck)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_codec))
 
 (test
  (name test_channel)
- (libraries miniflink threads.posix unix)
+ (libraries miniflink test_support threads.posix unix)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_channel))
 
 (test
  (name test_window_validation)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_window_validation))
 
 (test
  (name test_invariants)
- (libraries miniflink qcheck-core qcheck-core.runner qcheck)
+ (libraries miniflink test_support qcheck-core qcheck-core.runner qcheck)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_invariants))
 
 (test
  (name test_queue_depth)
- (libraries miniflink threads.posix unix)
+ (libraries miniflink test_support threads.posix unix)
  (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_queue_depth))
 
 (test
  (name test_log)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_log))
 
 (test
  (name test_health_config)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_health_config))
 
 (test
  (name test_retry)
- (libraries miniflink str)
+ (libraries miniflink test_support str)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_retry))
 
 (test
  (name test_idle_watermark)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_idle_watermark))
 
 (test
  (name test_schema)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_schema))
 
 (test
  (name test_backpressure)
- (libraries miniflink threads.posix unix)
+ (libraries miniflink test_support threads.posix unix)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_backpressure))
 
 (test
  (name test_count_window)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_count_window))
 
 (test
  (name test_session_window)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_session_window))
 
 (test
  (name test_global_window)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_global_window))
 
 (test
  (name test_union)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_union))
 
 
 (test
  (name test_window_fold)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_window_fold))
 
 (test
  (name test_agg)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_agg))
 
 (test
  (name test_safe)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_safe))
 
 (test
  (name test_recovery)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_recovery))
 
 (test
  (name test_differential)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_differential))
 
 (test
  (name test_cardinality)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_cardinality))
 
 (test
  (name test_crash_checkpoint)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_crash_checkpoint))
 
 (test
  (name test_temporal)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_temporal))
 
 (test
  (name test_parallel_retract)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_parallel_retract))
 
 (test
  (name test_side_output)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_side_output))
 
 (test
  (name test_ttl_state)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_ttl_state))
 
 (test
  (name test_nexmark)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_nexmark))
 
 (test
  (name test_fan_out)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_fan_out))
 
 (test
  (name test_supervisor)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_supervisor))
 
 (test
  (name test_merge)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_merge))
 
 (test
  (name test_materialize)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_materialize))
 
 (test
  (name test_keyed_sugar)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_keyed_sugar))
 
 (test
  (name test_watermark_fuzz)
- (libraries miniflink qcheck-core qcheck-core.runner)
+ (libraries miniflink test_support qcheck-core qcheck-core.runner)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_watermark_fuzz))
 
 (test
  (name test_timers)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_timers))

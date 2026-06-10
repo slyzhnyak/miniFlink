@@ -3,7 +3,7 @@ open Miniflink
    Test_reliability.ml — тесты DLQ и Shutdown
    ============================================================ *)
 
-open Domain
+open Test_support.Domain
 open Time
 
 let pass name = Printf.printf "  OK %s\n%!" name
@@ -47,7 +47,7 @@ let test_safe_decode () =
   let good_bytes = Bytes.of_string
     {|{"device_id":"A","speed_kmh":60.0,"fuel_pct":80.0,"position":{"lat":55.75,"lon":37.61},"ts":1000,"device":null}|} in
   let result1 = Runtime.safe_decode ~send_dlq ~topic:"test"
-    ~codec:(fun b -> Domain.telemetry_of_yojson
+    ~codec:(fun b -> Test_support.Domain.telemetry_of_yojson
       (Yojson.Safe.from_string (Bytes.to_string b)))
     ~attempt:1 good_bytes in
   check "valid payload → Some" (result1 <> None);
@@ -58,7 +58,7 @@ let test_safe_decode () =
   let result2 = Runtime.safe_decode ~send_dlq ~topic:"test"
     ~codec:(fun b ->
       match Yojson.Safe.from_string (Bytes.to_string b) with
-      | j -> Domain.telemetry_of_yojson j
+      | j -> Test_support.Domain.telemetry_of_yojson j
       | exception Yojson.Json_error e -> Error e)
     ~attempt:1 bad_bytes in
   check "invalid payload → None" (result2 = None);
@@ -91,7 +91,7 @@ let test_runtime_shutdown_guard () =
   Printf.printf "\n-- Runtime: source stops on shutdown\n";
 
   (* Создаём источник с 10 событиями *)
-  let events = Fixtures.scenario_alerts in
+  let events = Test_support.Fixtures.scenario_alerts in
   let count = ref 0 in
   let source =
     let s = Stream.of_list events in
@@ -104,7 +104,7 @@ let test_runtime_shutdown_guard () =
 
   let sink_count = ref 0 in
   Runtime.run Runtime.log_cfg
-    ~key_of:(fun (t:Domain.telemetry) -> t.Domain.device_id)
+    ~key_of:(fun (t:Test_support.Domain.telemetry) -> t.Test_support.Domain.device_id)
     ~source
     ~pipeline:(fun s ->
       s |> Mf_event.with_watermarks ~latency:(seconds 3))
@@ -134,7 +134,7 @@ let test_dlq_in_pipeline () =
     Runtime.safe_decode ~send_dlq ~topic:"test"
       ~codec:(fun b ->
         match Yojson.Safe.from_string (Bytes.to_string b) with
-        | j -> Domain.telemetry_of_yojson j
+        | j -> Test_support.Domain.telemetry_of_yojson j
         | exception Yojson.Json_error e -> Error e)
       ~attempt:1
       (Bytes.of_string s)

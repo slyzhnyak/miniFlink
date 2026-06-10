@@ -1,6 +1,6 @@
 ; miniFlink — исполняемое приложение (демо pipeline)
 (executable
  (name main)
- (libraries miniflink)
+ (libraries miniflink test_support)
  (flags (:standard -w +a-27-32-33-37-39-41-42-44-45-70))
  (modules main))

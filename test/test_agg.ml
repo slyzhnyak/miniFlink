@@ -2,7 +2,7 @@ open Miniflink
 (* Тесты комбинируемых агрегаторов: каждый готовый агрегат, комбинирование
    (both / let+ / and+), и интеграция с Pipe.window_agg. *)
 
-open Domain
+open Test_support.Domain
 open Time
 
 let pass name = Printf.printf "  OK %s\n%!" name

@@ -11,7 +11,7 @@ open Miniflink
    ============================================================ *)
 
 open QCheck
-open Domain
+open Test_support.Domain
 open Time
 
 (* ── Генераторы ─────────────────────────────────────────── *)
@@ -76,7 +76,7 @@ let prop_dedup_idempotent =
     ~count:200
     (make (Gen.list_size (Gen.int_range 1 20)
       (Gen.map2 (fun rule ts ->
-         { Domain.id=""; device_id="A"; rule; severity=Warning; message=""; ts })
+         { Test_support.Domain.id=""; device_id="A"; rule; severity=Warning; message=""; ts })
        (Gen.oneofl ["speed"; "fuel"; "signal"])
        (Gen.int_range 0 3600000))))
     (fun alerts ->
@@ -139,15 +139,15 @@ let prop_rules_severity =
     ~count:500
     (make (Gen.map3
       (fun speed limit fuel ->
-         ({ Domain.device_id="A"; max_speed=speed; avg_speed=speed*.0.8;
+         ({ Test_support.Domain.device_id="A"; max_speed=speed; avg_speed=speed*.0.8;
             min_fuel=fuel; count=5;
             device = Some { owner="O"; max_speed=limit; zone="z" } }
-          : Domain.stats))
+          : Test_support.Domain.stats))
       (Gen.float_range 0. 200.)
       (Gen.float_range 50. 150.)
       (Gen.float_range 0. 100.)))
     (fun stats ->
-       let alerts = Rules.check Rules.fleet stats in
+       let alerts = Test_support.Rules.check Test_support.Rules.fleet stats in
        let has_critical = List.exists (fun a -> a.severity = Critical && a.rule = "speed_critical") alerts in
        let device = Option.get stats.device in
        let expected_critical = stats.max_speed > device.max_speed *. 1.3 in

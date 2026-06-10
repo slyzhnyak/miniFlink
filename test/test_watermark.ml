@@ -34,15 +34,15 @@ let test_interval () =
 (* ── Финальный flush: последнее окно закрывается ──────────── *)
 let test_final_flush () =
   Printf.printf "\n-- Final watermark flushes trailing window\n";
-  let tlm t = { Domain.device_id="A"; speed_kmh=60.; fuel_pct=80.;
-    position={Domain.lat=55.;lon=37.}; ts=t; device=None } in
+  let tlm t = { Test_support.Domain.device_id="A"; speed_kmh=60.; fuel_pct=80.;
+    position={Test_support.Domain.lat=55.;lon=37.}; ts=t; device=None } in
   let events = [
     Mf_event.data (tlm 5000) 5000;
     Mf_event.data (tlm 27000) 27000;   (* max_seen=27000 *)
   ] in
   let out = Stream.of_list events
     |> Mf_event.with_watermarks_ext ~latency:(seconds 3) ~interval:0
-    |> Pipe.window (module Domain.Telemetry) (Pipe.tumbling (seconds 30))
+    |> Pipe.window (module Test_support.Domain.Telemetry) (Pipe.tumbling (seconds 30))
     |> Stream.to_list in
   let wms = List.filter_map (function Mf_event.Watermark t -> Some t | _ -> None) out in
   check "final watermark = max_seen (27000)" (List.mem 27000 wms)

@@ -3,7 +3,7 @@ open Miniflink
    фаерить» отделена в trigger. Проверяем count-триггер, value-триггер
    (ранняя эмиссия), Fire vs FireAndPurge, конец потока. *)
 
-open Domain
+open Test_support.Domain
 
 let pass name = Printf.printf "  OK %s\n%!" name
 let fail name = Printf.printf "  FAIL %s\n%!" name; exit 1

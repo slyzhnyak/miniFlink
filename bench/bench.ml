@@ -16,7 +16,7 @@ open Miniflink
    - words/event (GC pressure)
    ============================================================ *)
 
-open Domain
+open Test_support.Domain
 open Time
 
 (* ── Генератор событий ────────────────────────────────────── *)
@@ -94,7 +94,7 @@ let bench_window events window_size_s =
   measure ~label:(Printf.sprintf "window: tumbling %ds" window_size_s) ~n (fun () ->
     src ()
     |> Pipe.window (module Telemetry) (Pipe.tumbling (seconds window_size_s))
-    |> Pipe.aggregate Rules.compute
+    |> Pipe.aggregate Test_support.Rules.compute
     |> Stream.fold (fun acc _ -> acc + 1) 0)
 
 (* ── Bench 3: Full pipeline ───────────────────────────────── *)
@@ -110,8 +110,8 @@ let bench_full events n_devices =
          ~from:devices
          ~merge:(fun t dev -> { t with device = dev })
     |> Pipe.window (module Telemetry) (Pipe.tumbling (seconds 30))
-    |> Pipe.aggregate Rules.compute
-    |> Pipe.flat_map (Rules.check Rules.fleet)
+    |> Pipe.aggregate Test_support.Rules.compute
+    |> Pipe.flat_map (Test_support.Rules.check Test_support.Rules.fleet)
     |> Pipe.dedup (module Alert)
          ~rule:(fun a -> a.rule)
          ~cooldown:(minutes 5)
@@ -135,8 +135,8 @@ let bench_scale_devices n_events =
              ~from:devices
              ~merge:(fun t dev -> { t with device = dev })
         |> Pipe.window (module Telemetry) (Pipe.tumbling (seconds 30))
-        |> Pipe.aggregate Rules.compute
-        |> Pipe.flat_map (Rules.check Rules.fleet)
+        |> Pipe.aggregate Test_support.Rules.compute
+        |> Pipe.flat_map (Test_support.Rules.check Test_support.Rules.fleet)
         |> Stream.fold (fun acc _ -> acc + 1) 0)))
 
 (* ── Bench 5: Масштабирование по размеру окна ────────────── *)
@@ -189,7 +189,7 @@ let bench_latency events =
            ~from:devices
            ~merge:(fun t dev -> { t with device = dev })
       |> Pipe.window (module Telemetry) (Pipe.tumbling (seconds 30))
-      |> Pipe.aggregate Rules.compute
+      |> Pipe.aggregate Test_support.Rules.compute
       |> Stream.fold (fun acc _ -> acc + 1) 0
     );
     let t1 = now_ns () in
