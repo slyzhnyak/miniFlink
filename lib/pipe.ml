@@ -189,6 +189,18 @@ let safe_filter ~on_error p upstream =
     | Mf_event.Watermark _ | Mf_event.Retract _ as ev -> [ev])
     upstream
 
+(** [safe_flat_map ~on_error f] как [flat_map f], но исключение из [f]
+    (например в бизнес-правиле) перехватывается: [on_error exn], событие
+    даёт пустой результат, поток продолжается. *)
+let safe_flat_map ~on_error f upstream =
+  Stream.flat_map (function
+    | Mf_event.Data (v, t) ->
+      (try List.map (fun out -> Mf_event.data out t) (f v)
+       with e -> on_error e; [])
+    | Mf_event.Watermark wm -> [Mf_event.wm wm]
+    | Mf_event.Retract (_, _) -> [])
+    upstream
+
 (* ── Sink helpers ─────────────────────────────────────────── *)
 
 let sink f stream =

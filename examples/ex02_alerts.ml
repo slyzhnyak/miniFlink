@@ -46,11 +46,18 @@ let limits = Table.of_list [
 ]
 
 (* ── Правило: превышение порога → алерт ───────────────────── *)
+(* Правило может встретить «грязные» данные: например сенсор прислал
+   NaN. Тогда сравнение бессмысленно — правило бросает исключение,
+   которое в пайплайне поймает safe_flat_map (см. ниже). *)
 let check (r : reading) : alert list =
+  if Float.is_nan r.celsius then
+    failwith (Printf.sprintf "sensor %s: NaN reading" r.sensor_id);
   match r.limit with
   | Some lim when r.celsius > lim ->
     [{ a_sensor = r.sensor_id; a_kind = "overheat"; a_ts = r.ts }]
   | _ -> []
+
+let rule_failures = ref 0
 
 (* ── Пайплайн ─────────────────────────────────────────────── *)
 let pipeline source =
@@ -59,8 +66,13 @@ let pipeline source =
   |> Pipe.enrich (module Sensor)
        ~from:limits
        ~merge:(fun r lim -> { r with limit = lim })
-  (* превышение → алерт (flat_map: 0 или 1 алерт на показание) *)
-  |> Pipe.flat_map check
+  (* превышение → алерт. safe_flat_map: если правило упадёт на битом
+     событии — считаем и пропускаем его, поток не падает *)
+  |> Pipe.safe_flat_map
+       ~on_error:(fun e ->
+         incr rule_failures;
+         Log.warn ~fields:[("error", Printexc.to_string e)] "rule failed, event skipped")
+       check
   (* не спамить: один и тот же алерт по датчику не чаще раза в 5 минут *)
   |> Pipe.dedup (module Alert)
        ~rule:(fun a -> a.a_kind)
@@ -72,6 +84,7 @@ let sample = [
   { sensor_id = "A"; celsius = 27.; ts = seconds 3; limit = None };  (* дубль в cooldown → подавлен *)
   { sensor_id = "B"; celsius = 31.; ts = seconds 4; limit = None };  (* > 30 → алерт *)
   { sensor_id = "C"; celsius = 99.; ts = seconds 5; limit = None };  (* нет порога → нет алерта *)
+  { sensor_id = "B"; celsius = nan; ts = seconds 6; limit = None };  (* битое: правило упадёт, safe_flat_map поймает *)
   (* спустя 6 минут — cooldown истёк, снова алертим по A *)
   { sensor_id = "A"; celsius = 28.; ts = minutes 6 + seconds 3; limit = None };
 ]
@@ -87,4 +100,7 @@ let () =
            a.a_sensor a.a_kind (a.a_ts / 1000)
        | _ -> ());
   Printf.printf "\n(датчик A: 2 алерта вместо 3 — дубль в cooldown подавлен;\n";
-  Printf.printf " датчик C: без алерта — нет порога в справочнике)\n"
+  Printf.printf " датчик C: без алерта — нет порога в справочнике)\n";
+  if !rule_failures > 0 then
+    Printf.printf "(%d битое показание: правило упало, событие пропущено, поток жив)\n"
+      !rule_failures

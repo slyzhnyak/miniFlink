@@ -68,6 +68,19 @@ let test_all_bad () =
   check "empty output" (out = []);
   check "all errors reported" (!errors = 2)
 
+let test_safe_flat_map () =
+  Printf.printf "\n-- safe_flat_map isolates failures in rules (0..N output)\n";
+  let errors = ref 0 in
+  (* правило: чётное → [x; x], нечётное 3 → падает, иначе [x] *)
+  let rule x =
+    if x = 3 then failwith "bad rule input"
+    else if x mod 2 = 0 then [x; x] else [x] in
+  let out = Stream.of_list [Mf_event.data 2 0; Mf_event.data 3 1; Mf_event.data 5 2]
+            |> Pipe.safe_flat_map ~on_error:(fun _ -> incr errors) rule
+            |> data_out in
+  check "flat_map expansion + skip of failing event" (out = [2; 2; 5]);
+  check "failure reported once" (!errors = 1)
+
 let () =
   Printf.printf "==========================================\n";
   Printf.printf "  Exception isolation (safe_map / safe_filter)\n";
@@ -77,4 +90,5 @@ let () =
   test_safe_map_watermark ();
   test_safe_filter ();
   test_all_bad ();
+  test_safe_flat_map ();
   Printf.printf "\nAll exception isolation tests passed.\n"

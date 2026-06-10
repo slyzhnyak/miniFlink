@@ -71,4 +71,19 @@ let () =
   |> Pipe.global_window (module User)
        ~trigger:(Pipe.trigger_on_value (fun c -> c.page = "/cart"))
   |> Pipe.aggregate (fun u cs -> (u, List.map (fun c -> c.page) cs))
-  |> count_windows "Global + trigger (по событию) — эмиссия при заходе в /cart:"
+  |> count_windows "Global + trigger (по событию) — эмиссия при заходе в /cart:";
+
+  (* aggregate выше копит ВЕСЬ список кликов в окне (List.map по cs) —
+     удобно когда нужны сами события, но память растёт с числом событий.
+     Если нужна лишь МЕТРИКА (счётчик, среднее), window_agg считает её
+     инкрементально, O(1) памяти на окно — список не копится. *)
+  Printf.printf "Count кликов в окне инкрементально (window_agg, без списка):\n";
+  stream ()
+  |> Pipe.event_time ~lateness:0
+  |> Pipe.window_agg (module User) (Pipe.tumbling (seconds 30)) Agg.count
+  |> Stream.to_list
+  |> List.iter (function
+     | Mf_event.Data ((user, n), wend) ->
+       Printf.printf "  [%2ds] %s: %d кликов\n" (wend/1000) user n
+     | _ -> ());
+  Printf.printf "\n"

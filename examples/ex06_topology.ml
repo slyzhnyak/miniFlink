@@ -125,7 +125,10 @@ let () =
    | xs -> List.iter (fun (s, ch4, h) ->
        Printf.printf "  %s на горизонте %dм: %.1f%% CH4\n" s h ch4) xs);
 
-  Printf.printf "\nДашборд (средний метан по сенсору):\n";
+  Printf.printf "\nДашборд — средний метан по сенсору (▮ = 0.5%%, порог %.0f%%):\n" critical_ch4;
   List.sort compare !dashboard
   |> List.iter (fun (sensor, avg) ->
-       Printf.printf "  %s: %.1f%%\n" sensor avg)
+       let bars = int_of_float (avg /. 0.5 +. 0.5) in
+       let bar = String.concat "" (List.init bars (fun _ -> "▮")) in
+       let flag = if avg >= critical_ch4 then " ⚠" else "" in
+       Printf.printf "  %s │%-8s %.1f%%%s\n" sensor bar avg flag)

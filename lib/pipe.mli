@@ -48,6 +48,13 @@ val safe_filter :
   on_error:(exn -> unit) -> ('a -> bool) ->
   'a Mf_event.t Stream.t -> 'a Mf_event.t Stream.t
 
+val safe_flat_map :
+  on_error:(exn -> unit) -> ('a -> 'b list) ->
+  'a Mf_event.t Stream.t -> 'b Mf_event.t Stream.t
+(** Как [flat_map], но исключение из функции (например в бизнес-правиле)
+    перехватывается: [on_error exn], событие даёт пустой результат, поток
+    не падает. *)
+
 (** {2 Обогащение} *)
 
 (** [enrich (module K) ~from ~merge upstream] для каждого события ищет в
