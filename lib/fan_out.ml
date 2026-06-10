@@ -4,14 +4,16 @@
    создании). Один драйвер тянет источник и раздаёт копии события во все
    буферы; политика выхода решает что делать при переполнении ЕГО буфера.
 
-   Модель pull-driven без фоновых потоков: когда выход просит следующее
-   событие, а его буфер пуст, драйвер продвигает источник на шаг
-   (раздаёт всем буферам по их политике). Детерминированно, без гонок.
+   ПОТОКОБЕЗОПАСЕН: выходы можно читать конкурентно из разных потоков
+   (паттерн supervisor — каждый выход в своём пайплайне). Внутри один
+   мьютекс на структуру + condition variable: Block-выход, чей буфер
+   пуст, а источник упёрся в ДРУГОЙ полный Block-буфер, ждёт на condvar,
+   пока тот вычитают (broadcast при каждом pop/advance).
 
    Backpressure (Block): если Block-буфер полон, источник не
-   продвигается дальше этого события, пока буфер не освободят (его
-   должны вычитывать) — fan-out идёт со скоростью самого медленного
-   Block-выхода. Drop-политики никогда не блокируют источник. *)
+   продвигается дальше этого события, пока буфер не освободят — fan-out
+   идёт со скоростью самого медленного Block-выхода. Drop-политики
+   никогда не блокируют источник. *)
 
 type backpressure =
   | Block          (* буфер полон → источник не продвигается (no loss) *)
@@ -38,7 +40,11 @@ type 'a t = {
   mutable src_done    : bool;
   mutable pending     : 'a Mf_event.t option;
   pending_accepted    : bool array;
+  mu                  : Mutex.t;
+  cv                  : Condition.t;     (* будит ждущих при pop/advance *)
 }
+
+(* все операции ниже вызываются ПОД t.mu *)
 
 let offer (b : 'a buf) (ev : 'a Mf_event.t) : bool =
   if Queue.length b.q < b.cap then (Queue.push ev b.q; true)
@@ -49,6 +55,9 @@ let offer (b : 'a buf) (ev : 'a Mf_event.t) : bool =
       ignore (Queue.pop b.q); Queue.push ev b.q;
       b.dropped <- b.dropped + 1; true
 
+(* продвинуть источник на шаг (под мьютексом). true если был прогресс
+   (раздали событие/часть, или источник иссяк). false если упёрлись в
+   полный Block-буфер и НИЧЕГО не раздали (надо ждать). *)
 let advance (t : 'a t) : bool =
   if t.src_done && t.pending = None then false
   else begin
@@ -60,16 +69,17 @@ let advance (t : 'a t) : bool =
          | Some e -> Some e
          | None -> t.src_done <- true; None) in
     match ev with
-    | None -> false
+    | None -> true   (* источник иссяк — это прогресс (дошли до конца) *)
     | Some e ->
+      let any_new = ref false in
       let all_ok = ref true in
       Array.iteri (fun i b ->
         if not t.pending_accepted.(i) then begin
-          if offer b e then t.pending_accepted.(i) <- true
+          if offer b e then (t.pending_accepted.(i) <- true; any_new := true)
           else all_ok := false
         end) t.bufs;
       t.pending <- (if !all_ok then None else Some e);
-      true
+      !any_new || !all_ok
   end
 
 let fan_out (source : 'a Mf_event.t Stream.t) (outlets : 'a outlet list)
@@ -80,31 +90,32 @@ let fan_out (source : 'a Mf_event.t Stream.t) (outlets : 'a outlet list)
   let t = {
     source; bufs; src_done = false; pending = None;
     pending_accepted = Array.make (Array.length bufs) false;
+    mu = Mutex.create (); cv = Condition.create ();
   } in
   let make_stream i =
     let b = bufs.(i) in
     fun () ->
+      Mutex.lock t.mu;
       let rec loop () =
-        if not (Queue.is_empty b.q) then Some (Queue.pop b.q)
-        else if t.src_done && t.pending = None then None
+        if not (Queue.is_empty b.q) then begin
+          let ev = Queue.pop b.q in
+          (* буфер освободился — возможно, разблокировали advance *)
+          Condition.broadcast t.cv;
+          Mutex.unlock t.mu;
+          Some ev
+        end
+        else if t.src_done && t.pending = None then begin
+          Mutex.unlock t.mu; None
+        end
+        else if advance t then begin
+          Condition.broadcast t.cv;  (* раздали — будим другие выходы *)
+          loop ()
+        end
         else begin
-          (* запоминаем прогресс источника: если advance не двигает
-             источник (застрял на полном Block-буфере ДРУГОГО выхода) и
-             наш буфер не пополнился — мы в однопоточном дедлоке: этот
-             выход надо читать вперемешку с тем Block-выходом. Возвращаем
-             None как сигнал «сейчас пусто», а не зависаем. *)
-          let before_done = t.src_done in
-          let had_pending = t.pending <> None in
-          if advance t then begin
-            if not (Queue.is_empty b.q) then loop ()
-            else if had_pending && t.pending <> None
-                    && before_done = t.src_done then
-              (* pending как был застрявшим, наш буфер пуст → не крутимся *)
-              None
-            else loop ()
-          end
-          else if not (Queue.is_empty b.q) then Some (Queue.pop b.q)
-          else None
+          (* источник упёрся в чужой полный Block-буфер, наш пуст:
+             ждём пока его вычитают (broadcast при pop) *)
+          Condition.wait t.cv t.mu;
+          loop ()
         end
       in loop ()
   in

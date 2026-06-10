@@ -55,3 +55,36 @@ let () =
   test_block_no_loss ();
   test_drop_newest_bounded ();
   Printf.printf "\nFan-out tests passed.\n"
+
+(* Конкурентное чтение: два потока осушают Block-выходы ПАРАЛЛЕЛЬНО
+   (как под supervisor — ex06). До thread-safety фикса это гонка данных:
+   advance мутирует общие pending/буферы из двух потоков без мьютекса.
+   Тест с большим объёмом повышает шанс поймать гонку. *)
+let test_concurrent_block_drain () =
+  Printf.printf "\n-- concurrent threads drain Block outlets (supervisor pattern)\n";
+  let n = 20000 in
+  let events = List.init n (fun i -> Mf_event.data i i) in
+  let outlets = [
+    Fan_out.{ name="a"; buffer_cap=64; on_pressure=Block };
+    Fan_out.{ name="b"; buffer_cap=64; on_pressure=Block };
+  ] in
+  let streams = Fan_out.fan_out (Stream.of_list events) outlets in
+  let s0 = List.nth streams 0 and s1 = List.nth streams 1 in
+  let got0 = ref [] and got1 = ref [] in
+  let drain s acc () =
+    let rec loop () = match s () with
+      | Some (Mf_event.Data (v,_)) -> acc := v :: !acc; loop ()
+      | Some _ -> loop ()
+      | None -> () in
+    loop () in
+  let t0 = Thread.create (drain s0 got0) () in
+  let t1 = Thread.create (drain s1 got1) () in
+  Thread.join t0; Thread.join t1;
+  check "thread A got all events, no loss/dup"
+    (List.sort_uniq compare !got0 = List.init n (fun i -> i));
+  check "thread B got all events, no loss/dup"
+    (List.sort_uniq compare !got1 = List.init n (fun i -> i));
+  check "order preserved A" (List.rev !got0 = List.init n (fun i -> i));
+  check "order preserved B" (List.rev !got1 = List.init n (fun i -> i))
+
+let () = test_concurrent_block_drain ()
