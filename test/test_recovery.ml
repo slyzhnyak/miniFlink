@@ -56,31 +56,26 @@ let reference_run events =
   bag !out
 
 (* ── прогон со сбоем: durable store переживает «смерть» ─────── *)
-(* Один воркер — чтобы шардирование было тривиальным и harness проверял
-   именно RECOVERY (умер → восстановил стейт → продолжил без потерь),
-   а не воспроизводил внутреннюю hash-функцию шардирования. *)
-let recovery_run events =
+(* crash в точке [crash_point]: «процесс» обрабатывает первые
+   crash_point событий, оставляет durable checkpoint-ы и «умирает»;
+   новый процесс восстанавливается из checkpoint и продолжает ПОЛНЫЙ
+   источник. Один воркер — чтобы harness проверял именно RECOVERY, а не
+   воспроизводил hash-функцию шардирования. Параметр точки позволяет
+   проверять recovery при РАЗНЫХ моментах краха. *)
+let recovery_run_at events crash_point =
   let durable = ref [] in
   let store1 = CP.make_store ~persist:(fun cp -> durable := cp :: !durable) () in
   let out = ref [] in
   let mu = Mutex.create () in
   let collect v = Mutex.lock mu; out := v :: !out; Mutex.unlock mu in
-
-  (* ФАЗА 1: «процесс» обрабатывает первую половину и оставляет
-     durable checkpoint-ы, затем «умирает». *)
-  let half = List.length events / 2 in
-  let first_half = List.filteri (fun i _ -> i < half) events in
+  let first = List.filteri (fun i _ -> i < crash_point) events in
   CP.run_exactly_once
     ~workers:1 ~capacity:256 ~checkpoint_every:20
     ~key_of ~make_state:State_backend_memory.create
     ~process
-    ~source:(CP.seekable_of_list first_half)
+    ~source:(CP.seekable_of_list first)
     ~sink:(CP.idempotent_sink collect)
     ~store:store1 ();
-
-  (* ФАЗА 2: «новый процесс» — durable checkpoint-ы пережили смерть.
-     recover восстанавливает стейт воркера и перематывает ПОЛНЫЙ
-     источник на сохранённый offset; продолжаем единственным воркером. *)
   let store2 = CP.make_store () in
   List.iter (fun cp -> CP.commit store2 cp) (List.rev !durable);
   let full_source = CP.seekable_of_list events in
@@ -94,6 +89,17 @@ let recovery_run events =
   in drain ();
   bag !out
 
+let recovery_run events = recovery_run_at events (List.length events / 2)
+
+(* финальная сумма по каждому ключу (берём максимум как «итог») *)
+let final_sums xs =
+  let h = Hashtbl.create 8 in
+  List.iter (fun (k, s) ->
+    match Hashtbl.find_opt h k with
+    | Some prev when prev >= s -> ()
+    | _ -> Hashtbl.replace h k s) xs;
+  bag (Hashtbl.fold (fun k s acc -> (k, s) :: acc) h [])
+
 let test_recovery_matches_reference () =
   Printf.printf "\n-- recovery output == reference output (no dup, no loss)\n";
   let events = make_events 120 in
@@ -102,21 +108,28 @@ let test_recovery_matches_reference () =
   check "reference produced output" (List.length reference > 0);
   let recovered = recovery_run events in
   check "recovery produced output" (List.length recovered > 0);
-  (* ключевой инвариант: множество ВЫХОДНЫХ (key,sum) пар после recovery
-     покрывает финальные суммы — нет потерь данных по ключам *)
-  let final_sums xs =
-    let h = Hashtbl.create 8 in
-    List.iter (fun (k, s) ->
-      match Hashtbl.find_opt h k with
-      | Some prev when prev >= s -> ()
-      | _ -> Hashtbl.replace h k s) xs;
-    bag (Hashtbl.fold (fun k s acc -> (k, s) :: acc) h []) in
   check "final per-key sums match reference (no loss/dup in aggregate)"
     (final_sums recovered = final_sums reference)
+
+(* п.3 ревью: crash в РАЗНЫЕ моменты — recovery верен независимо от точки
+   сбоя. Прогоняем восстановление при нескольких точках краха и сверяем
+   с эталоном каждый раз. *)
+let test_recovery_at_various_crash_points () =
+  Printf.printf "\n-- recovery correct for many crash points (no dup/loss)\n";
+  let events = make_events 120 in
+  let reference = final_sums (reference_run events) in
+  let points = [1; 7; 23; 40; 59; 60; 61; 88; 100; 119] in
+  let all_match = List.for_all (fun cp ->
+    let r = final_sums (recovery_run_at events cp) in
+    if r <> reference then
+      (Printf.printf "    crash_point=%d MISMATCH\n%!" cp; false)
+    else true) points in
+  check "every crash point recovers to reference" all_match
 
 let () =
   Printf.printf "==========================================\n";
   Printf.printf "  Full recovery harness (exactly-once E2E)\n";
   Printf.printf "==========================================\n";
   test_recovery_matches_reference ();
+  test_recovery_at_various_crash_points ();
   Printf.printf "\nRecovery harness passed.\n"

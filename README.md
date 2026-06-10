@@ -102,7 +102,7 @@ bench/  bench.ml bench_parallel.ml
 test/   40 тест-сюит (core, props, invariants, reliability, metrics,
                      retract, sliding, count_window, session_window,
                      global_window, window_fold, agg, union, safe, parallel_retract,
-                     side_output, ttl_state, nexmark,
+                     side_output, ttl_state, nexmark, watermark_fuzz,
                      recovery, differential, cardinality, temporal,
                      dedup_evict, parallel_crash, crash_checkpoint,
                      determinism, watermark, idle_watermark, table_ttl,
