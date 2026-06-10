@@ -287,6 +287,7 @@ type timer_kind = Process_fn.timer_kind =
 
 (** Контекст обработчика (переэкспорт {!Process_fn.ctx}). *)
 type 'out ctx = 'out Process_fn.ctx = {
+  clear_state             : unit -> unit;
   emit                    : 'out -> unit;
   set_event_timer         : Time.t -> unit;
   set_processing_timer    : Time.t -> unit;

@@ -151,3 +151,29 @@ let test_emit_into_window () =
 let () =
   test_emit_time_composes_with_window ();
   test_emit_into_window ()
+
+(* clear_state: состояние ключа удаляется (борьба с ростом state).
+   После clear ключ начинает с init заново. *)
+let test_clear_state () =
+  Printf.printf "\n-- clear_state removes per-key state (next event re-inits)\n";
+  let inits = ref 0 in
+  let src = Stream.of_list [
+    Mf_event.data { miner="M1"; ts=0 } 0;
+    Mf_event.data { miner="M1"; ts=10 } 10;  (* то же состояние *)
+    Mf_event.wm 50;                           (* таймер на 30 -> clear_state *)
+    Mf_event.data { miner="M1"; ts=60 } 60;  (* после clear -> re-init *)
+    Mf_event.wm 200;
+  ] in
+  let _ =
+    src |> Pipe.process_keyed (module ByMiner)
+      ~init:(fun () -> incr inits; ref 0)
+      ~on_event:(fun ctx _k st p ->
+        incr st;
+        ctx.Pipe.cancel_event_timers ();
+        ctx.Pipe.set_event_timer (p.ts + 30); ())
+      ~on_timer:(fun ctx _k _st _t _kind ->
+        ctx.Pipe.clear_state (); ())
+    |> Stream.to_list in
+  check "state re-initialized after clear (2 inits, not 1)" (!inits = 2)
+
+let () = test_clear_state ()

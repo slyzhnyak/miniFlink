@@ -10,6 +10,10 @@ type timer_kind =
 
 (** Контекст обработчика: эмиссия и управление таймерами текущего ключа. *)
 type 'out ctx = {
+  clear_state             : unit -> unit;
+  (** удалить состояние текущего ключа (борьба с ростом state при
+      высокой кардинальности ключей; обычно вызывается из on_timer
+      по TTL-логике) *)
   emit                    : 'out -> unit;
   set_event_timer         : Time.t -> unit;
   set_processing_timer    : Time.t -> unit;
