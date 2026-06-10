@@ -277,3 +277,32 @@ val materialize :
     кладёт/заменяет, Retract убирает. Возвращает финальные
     [(идентичность, значение)] после применения всех retract.
     Декларативная замена ручного сбора результатов оконного потока. *)
+
+(** {2 ProcessFunction с таймерами} *)
+
+(** Тип таймера (переэкспорт {!Process_fn.timer_kind}). *)
+type timer_kind = Process_fn.timer_kind =
+  | Event_time
+  | Processing_time
+
+(** Контекст обработчика (переэкспорт {!Process_fn.ctx}). *)
+type 'out ctx = 'out Process_fn.ctx = {
+  emit                    : 'out -> unit;
+  set_event_timer         : Time.t -> unit;
+  set_processing_timer    : Time.t -> unit;
+  cancel_event_timer      : Time.t -> unit;
+  cancel_event_timers     : unit -> unit;
+  cancel_processing_timer : Time.t -> unit;
+  cancel_processing_timers: unit -> unit;
+}
+
+(** Оператор с keyed-состоянием и таймерами. См. {!Process_fn.process_keyed}.
+    Для «нет событий дольше порога» (event-time) и «дольше смены»
+    (processing-time). *)
+val process_keyed :
+  (module Keyed.S with type t = 'a) ->
+  ?now_ms:(unit -> int) ->
+  init:(unit -> 'st) ->
+  on_event:('out ctx -> string -> 'st -> 'a -> unit) ->
+  on_timer:('out ctx -> string -> 'st -> Time.t -> timer_kind -> unit) ->
+  'a Mf_event.t Stream.t -> 'out Mf_event.t Stream.t

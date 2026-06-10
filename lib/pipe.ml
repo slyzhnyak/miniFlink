@@ -248,3 +248,18 @@ let with_counter f upstream =
 
 (** window с histogram для latency закрытия окна (переэкспорт из Window) *)
 let window_instrumented = Window.window_instrumented
+
+(* ── ProcessFunction с таймерами (переэкспорт из Process_fn) ─── *)
+type timer_kind = Process_fn.timer_kind =
+  | Event_time
+  | Processing_time
+type 'out ctx = 'out Process_fn.ctx = {
+  emit                    : 'out -> unit;
+  set_event_timer         : Time.t -> unit;
+  set_processing_timer    : Time.t -> unit;
+  cancel_event_timer      : Time.t -> unit;
+  cancel_event_timers     : unit -> unit;
+  cancel_processing_timer : Time.t -> unit;
+  cancel_processing_timers: unit -> unit;
+}
+let process_keyed = Process_fn.process_keyed

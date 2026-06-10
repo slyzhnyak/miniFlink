@@ -278,3 +278,9 @@
  (libraries miniflink qcheck-core qcheck-core.runner)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_watermark_fuzz))
+
+(test
+ (name test_timers)
+ (libraries miniflink)
+ (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
+ (modules test_timers))

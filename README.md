@@ -102,7 +102,7 @@ bench/  bench.ml bench_parallel.ml
 test/   40 тест-сюит (core, props, invariants, reliability, metrics,
                      retract, sliding, count_window, session_window,
                      global_window, window_fold, agg, union, safe, parallel_retract,
-                     side_output, ttl_state, nexmark, watermark_fuzz,
+                     side_output, ttl_state, nexmark, watermark_fuzz, timers,
                      recovery, differential, cardinality, temporal,
                      dedup_evict, parallel_crash, crash_checkpoint,
                      determinism, watermark, idle_watermark, table_ttl,
@@ -335,13 +335,15 @@ Channel overhead: ~106 нс/msg (Mutex+Condition).
 
 Фундамент (открывает многое, но крупная работа):
 
-- [ ] **ProcessFunction с таймерами.** Низкоуровневый оператор: ручное
-  управление состоянием по ключу + регистрация event-time и
-  processing-time таймеров, срабатывающих позже. Самое «флинковое» из
-  недостающего — на таймерах строятся кастомные окна, таймауты сессий,
-  отложенные действия, CEP. Требует timer service в event-time
-  (срабатывание при продвижении watermark). Высокая сложность,
-  наибольшая отдача.
+- [x] **ProcessFunction с таймерами** (`Pipe.process_keyed`).
+  Низкоуровневый оператор: keyed-состояние + регистрация/отмена
+  **event-time** (по watermark) и **processing-time** (по wall-clock)
+  таймеров, обработчики `on_event`/`on_timer`. На таймерах строятся
+  таймауты («нет событий дольше порога», «дольше смены»), отложенные
+  действия, CEP-подобные переходы. Покрыто тестом (heartbeat event-time +
+  shift-overrun processing-time). Ограничение pull-модели: таймеры
+  проверяются при активности потока (при полной тишине — через
+  idle-watermark).
 
 Быстрые и ценные (чистая семантика, ложатся на существующее):
 
