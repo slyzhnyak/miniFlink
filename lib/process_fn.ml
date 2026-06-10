@@ -56,8 +56,8 @@ let process_keyed
     | None -> let s = init () in Hashtbl.replace states key s; s in
 
   (* контекст для конкретного ключа *)
-  let ctx_for key = {
-    emit = (fun o -> Queue.push (Mf_event.data o 0) out_q);
+  let ctx_for key ~emit_ts = {
+    emit = (fun o -> Queue.push (Mf_event.data o emit_ts) out_q);
     set_event_timer = (fun t -> ev_timers := TimerSet.add (key, t) !ev_timers);
     set_processing_timer = (fun t -> pt_timers := TimerSet.add (key, t) !pt_timers);
     cancel_event_timer = (fun t -> ev_timers := TimerSet.remove (key, t) !ev_timers);
@@ -77,7 +77,7 @@ let process_keyed
     TimerSet.elements due
     |> List.sort (fun (_,t1) (_,t2) -> compare t1 t2)
     |> List.iter (fun (key, t) ->
-         on_timer (ctx_for key) key (state_of key) t kind) in
+         on_timer (ctx_for key ~emit_ts:t) key (state_of key) t kind) in
 
   let upstream_done = ref false in
 
@@ -93,9 +93,9 @@ let process_keyed
              нужно «дренировать» таймеры на завершении, пошлите финальный
              watermark (max_int) перед концом. *)
           None
-        | Some (Mf_event.Data (v, _)) ->
+        | Some (Mf_event.Data (v, ts)) ->
           let key = K.key v in
-          on_event (ctx_for key) key (state_of key) v;
+          on_event (ctx_for key ~emit_ts:ts) key (state_of key) v;
           (* при активности проверяем processing-time таймеры по wall-clock *)
           fire_due pt_timers Processing_time (now_ms ());
           pull ()

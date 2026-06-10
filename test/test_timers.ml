@@ -93,3 +93,61 @@ let () =
   test_heartbeat_alive ();
   test_shift_processing_time ();
   Printf.printf "\nTimer tests passed.\n"
+
+(* Эмиссии должны нести осмысленное время и НЕ нарушать монотонность:
+   композиция process_keyed -> окно должна работать. До фикса emit клал
+   ts=0 и эмиссии выходили ПОСЛЕ вызвавшего их watermark — нижестоящее
+   окно молча теряло их как опоздавшие. *)
+let test_emit_time_composes_with_window () =
+  Printf.printf "\n-- timer emissions carry fire-time and precede the watermark\n";
+  let threshold = 30 in
+  let src = Stream.of_list [
+    Mf_event.data { miner="M1"; ts=0 } 0;
+    Mf_event.wm 100;
+  ] in
+  let raw =
+    src |> Pipe.process_keyed (module ByMiner)
+      ~init:(fun () -> ())
+      ~on_event:(fun ctx _k _st p ->
+        ctx.Pipe.set_event_timer (p.ts + threshold); ())
+      ~on_timer:(fun ctx key _st _t _kind -> ctx.Pipe.emit key; ())
+    |> Stream.to_list in
+  (* (1) эмиссия имеет время срабатывания таймера (30), не 0 *)
+  let emit_ts = List.filter_map (function
+    | Mf_event.Data (_, t) -> Some t | _ -> None) raw in
+  check "emission timestamped with fire time (30)" (emit_ts = [30]);
+  (* (2) эмиссия идёт ДО watermark 100 в выходном порядке *)
+  let order = List.map (function
+    | Mf_event.Data _ -> `D | Mf_event.Watermark _ -> `W | _ -> `R) raw in
+  check "emission precedes the triggering watermark"
+    (order = [`D; `W] || (List.mem `D order &&
+       (let di = ref (-1) and wi = ref (-1) in
+        List.iteri (fun i x -> if x = `D && !di < 0 then di := i;
+                               if x = `W && !wi < 0 then wi := i) order;
+        !di < !wi)))
+
+let test_emit_into_window () =
+  Printf.printf "\n-- composition: process_keyed -> window sees the emission\n";
+  let threshold = 30 in
+  let module KS = Keyed.Make (struct type t = string let key s = s end) in
+  let src = Stream.of_list [
+    Mf_event.data { miner="M1"; ts=0 } 0;
+    Mf_event.wm 100;
+  ] in
+  let windows =
+    src |> Pipe.process_keyed (module ByMiner)
+      ~init:(fun () -> ())
+      ~on_event:(fun ctx _k _st p ->
+        ctx.Pipe.set_event_timer (p.ts + threshold); ())
+      ~on_timer:(fun ctx key _st _t _kind -> ctx.Pipe.emit key; ())
+    |> Pipe.window (module KS) (Pipe.tumbling 50)
+    |> Stream.to_list
+    |> List.filter_map (function
+       | Mf_event.Data ((k, items), _) -> Some (k, List.length items)
+       | _ -> None) in
+  check "downstream window captured the timer emission"
+    (windows = [("M1", 1)])
+
+let () =
+  test_emit_time_composes_with_window ();
+  test_emit_into_window ()
