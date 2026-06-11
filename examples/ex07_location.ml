@@ -48,6 +48,9 @@ open Time
 type packet = {
   lamp     : string;                  (* ID фонаря шахтёра *)
   readings : (string * float) list;   (* до 5: (ID маяка, RSSI dBm) *)
+  voltage  : float;                   (* напряжение фонаря, вольты *)
+  moving   : bool;                    (* было ли движение с прошлого пакета *)
+  sos      : bool;                    (* нажата ли кнопка SOS *)
   ts       : Time.t;
 }
 
@@ -65,8 +68,18 @@ let beacons = [
 let beacon_horizon b =
   match Hashtbl.find_opt beacons b with Some (_,_,h) -> Some h | None -> None
 
+(* ── Пороги диагностики фонаря ────────────────────────────── *)
 let no_readings_threshold = minutes 2   (* нет пакетов вообще *)
 let silence_threshold     = minutes 5   (* пакеты есть, маяков не слышит *)
+let no_motion_threshold   = minutes 10  (* фонарь не двигался *)
+
+(* Гистерезис напряжения: вход в Suspect при V<low; алерт Low_voltage
+   только если состояние «низкое» подтверждено временем debounce;
+   выход в Voltage_ok только при V>ok (выше входа — нет дребезга на
+   границе, и точно ловит факт замены/зарядки батареи). *)
+let low_voltage_threshold = 3.5         (* вход в подозрение *)
+let voltage_ok_threshold  = 3.7         (* выход в норму (гистерезис) *)
+let voltage_debounce      = minutes 2   (* сколько держать подозрение *)
 
 (* ── Входные пакеты (~6 минут, шаг 15с) ────────────────────── *)
 (* M1 (горизонт -160м): слышит свой уровень B1/B2.
@@ -74,32 +87,55 @@ let silence_threshold     = minutes 5   (* пакеты есть, маяков �
    M3 (-160м): слышит B1 до t=20с, дальше пустые пакеты (фонарь жив,
                эфир пуст — алерт B сработает).
    M4 (-240м): всегда слышит только B5 (один маяк).
-   M5 (-160м): шлёт пакеты до t=100с, потом замолкает (алерт A). *)
+   M5 (-160м): шлёт пакеты до t=100с, потом замолкает (алерт A).
+
+   Сценарии диагностики:
+   - M1: батарея садится — V плавно падает с 4.0 до 3.3В к концу;
+         двигается всегда; SOS нет → ожидается Low_voltage с debounce.
+   - M2: двигается до t=120с, потом стоит на месте → No_motion ~t=720с.
+         НО симуляция кончается раньше (360с), специально занижу до 2 мин.
+   - M3: всё хорошо по бортовым датчикам (V=4.0, двигается), но
+         маяки не слышит после t=20с.
+   - M4: нажимает SOS на t=120с (один импульс) → Sos.
+   - M5: исчезает на t=100с → No_packets (по бортовым датчикам ничего
+         не успеваем сказать). *)
 let noise i k = float_of_int ((i * 7 + k * 13) mod 9) -. 4.0   (* −4..+4 dB *)
 
 let steps = 25                              (* t = 0, 15, ..., 360с *)
 let dt    = seconds 15
 
+(* Снизим пороги движения, чтобы успеть сработать в 6-минутной симуляции *)
+let _ = no_motion_threshold   (* объявлен выше как 10 мин для прода *)
+let demo_no_motion_threshold = minutes 2   (* в примере: 2 мин не двигается → алерт *)
+
+(* напряжение M1 падает быстро (батарея садится): 4.0 → 3.2 В за симуляцию.
+   К i=15 (t=225с) V≈3.5В — войдёт в Suspect; debounce 2 мин → алерт ≈t=345с *)
+let m1_voltage i = 4.0 -. 0.8 *. float_of_int i /. float_of_int (steps - 1)
+
 let packets_for lamp i =
   let t = i * dt in
+  let default = { lamp; ts = t; readings = [];
+                  voltage = 4.0; moving = true; sos = false } in
   match lamp with
-  | "M1" -> Some { lamp; ts = t; readings = [
-      "B1", -45. +. noise i 1;
-      "B2", -52. +. noise i 2 ] }
-  | "M2" -> Some { lamp; ts = t; readings = [
-      "B3", -48. +. noise i 6;
-      "B4", -50. +. noise i 7;
-      "B5", -72. +. noise i 9 ] }
+  | "M1" -> Some { default with
+      readings = [ "B1", -45. +. noise i 1; "B2", -52. +. noise i 2 ];
+      voltage  = m1_voltage i }
+  | "M2" -> Some { default with
+      readings = [ "B3", -48. +. noise i 6; "B4", -50. +. noise i 7;
+                   "B5", -72. +. noise i 9 ];
+      moving   = (t < seconds 120) }              (* стоит после t=120 *)
   | "M3" ->
-    if i * 15 <= 20
-    then Some { lamp; ts = t; readings = [ "B1", -60. +. noise i 11 ] }
-    else Some { lamp; ts = t; readings = [] }            (* пустые пакеты *)
-  | "M4" -> Some { lamp; ts = t; readings = [
-      "B5", -55. +. noise i 12 ] }
+    Some { default with
+      readings = if i * 15 <= 20
+                 then [ "B1", -60. +. noise i 11 ]
+                 else [] }                         (* пустые пакеты *)
+  | "M4" -> Some { default with
+      readings = [ "B5", -55. +. noise i 12 ];
+      sos      = (t = seconds 120) }              (* SOS один раз *)
   | "M5" ->
     if i * 15 <= 100
-    then Some { lamp; ts = t; readings = [ "B2", -50. +. noise i 13 ] }
-    else None                                            (* фонарь замолк *)
+    then Some { default with readings = [ "B2", -50. +. noise i 13 ] }
+    else None                                     (* фонарь замолк *)
   | _ -> None
 
 let packets =
@@ -108,9 +144,9 @@ let packets =
       List.filter_map (fun l -> packets_for l i) ["M1"; "M2"; "M3"; "M4"; "M5"])
     |> List.concat in
   (* опоздавший пакет M1 c ts=180с, вставленный после ts≈225с *)
-  let late = { lamp = "M1"; ts = seconds 180; readings = [
-      "B1", -44.;
-      "B2", -53. ] } in
+  let late = { lamp = "M1"; ts = seconds 180;
+               readings = [ "B1", -44.; "B2", -53. ];
+               voltage = m1_voltage 12; moving = true; sos = false } in
   let before, after = List.partition (fun p -> p.ts <= seconds 225) base in
   before @ [late] @ after
 
@@ -143,66 +179,105 @@ let median_rssi source =
               |> Agg.run (top_k_by 2 ~by:snd)))
 
 (* ════════════════════════════════════════════════════════════════
-   КОНТРОЛЬ СВЯЗИ — три явных слоя
+   КОНТРОЛЬ СОСТОЯНИЯ ШАХТЁРА — три явных слоя, четыре сигнала
 
-   Простой автомат «всё в порядке → нет показаний → нет пакетов»
-   на одного шахтёра. В одной куче `ref`-ов он читается тяжело,
-   потому что смешаны три разные заботы. Здесь они разделены:
+   У шахтёра несколько НЕЗАВИСИМЫХ подсистем — связь, движение,
+   батарея, SOS-кнопка. Они могут падать одновременно и каждая
+   требует своей реакции, поэтому это НЕ один автомат с пятью
+   состояниями (где одно подавит другое), а ТРИ независимых FSM
+   плюс импульсное событие SOS.
 
-     Слой 1. last_seen — ЧТО ИЗВЕСТНО (хранилище фактов о шахтёре)
-     Слой 2. Self_timer — КОГДА ПРОВЕРИТЬ (управление одним
-              event-таймером с переменной целью)
-     Слой 3. Fsm        — ЧТО ДЕЛАТЬ (чистая функция перехода,
-              без таймеров и побочных эффектов)
+   Структура остаётся той же:
 
-   process_keyed снизу — только клей: «событие → обновили факты,
-   переcчитали таймер; таймер → спросили автомат, эмитнули при
-   изменении состояния, перепланировали».
+     Слой 1. Last_seen — ЧТО ИЗВЕСТНО (хранилище фактов о шахтёре)
+     Слой 2. Self_timer — КОГДА ПРОВЕРИТЬ (один таймер с переменной
+              целью на минимум из всех возможных смен состояния)
+     Слой 3. Fsm        — ЧТО ДЕЛАТЬ (ТРИ чистые функции перехода —
+              по одной на подсистему)
 
-   Слои не специфичны для нашей задачи — last_seen и Self_timer
-   полезны в любой heartbeat-логике. Если в репо появятся другие
-   подобные автоматы, они могут вытащиться в библиотеку; пока
-   такого случая нет, абстракции живут локально в примере.
+   ЗАВИСИМОСТЬ ПОДАВЛЕНИЯ. motion_state и voltage_state смотрят на
+   Last_seen.any: если пакетов нет давно, эти функции возвращают
+   соответствующий «Ok» — про motion/voltage мы просто ничего не знаем,
+   и сигналить нельзя. Это не подавление эмиссии — это корректная
+   семантика самого автомата (правильное «не знаю»).
+
+   ГИСТЕРЕЗИС И DEBOUNCE НАПРЯЖЕНИЯ. У voltage три состояния —
+   Voltage_ok, Suspect (внутреннее, наружу не эмитим), Low_voltage.
+   Вход в Suspect при V<low; через debounce, если V всё ещё низко,
+   переход в Low_voltage и эмиссия алерта. Выход обратно в Voltage_ok
+   ТОЛЬКО при V>ok (гистерезис) — это и устраняет дребезг на границе,
+   и явно ловит факт замены/зарядки батареи.
+
+   suspect_low_since фиксируется при ПЕРВОМ падении и не сбрасывается
+   промежуточными пакетами с V<low: 2 минуты отсчитываются от первого
+   момента, когда стало плохо.
+
+   SOS — это НЕ FSM-состояние, а импульс. Эмитится при переходе
+   last_sos: false→true. Зажатая кнопка — один алерт; отпустил и
+   нажал снова — два события.
    ════════════════════════════════════════════════════════════════ *)
 
 module ByLamp = Keyed.Make (struct type t = packet let key p = p.lamp end)
 
-type alert = No_packets of string * Time.t option   (* нет пакетов >2 мин *)
-           | No_readings of string * Time.t option  (* пакеты есть, маяков нет *)
+type alert =
+  | No_packets   of string * Time.t option   (* пакетов нет >2 мин *)
+  | No_readings  of string * Time.t option   (* пакеты идут, маяков нет >5 мин *)
+  | No_motion    of string * Time.t option   (* фонарь не двигался *)
+  | Low_voltage  of string * float           (* напряжение подтверждённо ниже порога *)
+  | Voltage_ok   of string                   (* напряжение вернулось в норму *)
+  | Sos          of string * Time.t          (* нажата кнопка SOS *)
 
-(* ─── Слой 1: last_seen ───────────────────────────────────────────
-   ХРАНИЛИЩЕ ФАКТОВ. Когда последний раз приходил пакет от шахтёра
-   и когда последний раз пакет содержал показания маяков. Это
-   единственная мутабельная структура, владеющая «временной памятью»
-   о шахтёре. Любая heartbeat-логика начинается с такой записи. *)
+(* ─── Слой 1: Last_seen ───────────────────────────────────────────
+   ХРАНИЛИЩЕ ФАКТОВ. Времена последних событий каждого типа и
+   последнее наблюдаемое напряжение. Единственная мутабельная
+   структура, владеющая «временной памятью» о шахтёре. *)
 module Last_seen = struct
-  type t = { mutable any : Time.t option;       (* любой пакет *)
-             mutable with_readings : Time.t option }  (* пакет с показаниями *)
+  type t = {
+    mutable any           : Time.t option;   (* любой пакет *)
+    mutable with_readings : Time.t option;   (* пакет с показаниями маяков *)
+    mutable moving        : Time.t option;   (* пакет с moving=true *)
+    mutable voltage       : float option;    (* последнее наблюдаемое напряжение *)
+    mutable suspect_low_since : Time.t option;
+      (* когда V ВПЕРВЫЕ упало ниже low_voltage_threshold (и пока не
+         поднималось выше voltage_ok_threshold). None — нет подозрения. *)
+    mutable sos           : bool;            (* для детекции импульса false→true *)
+  }
 
-  let make () = { any = None; with_readings = None }
+  let make () = {
+    any = None; with_readings = None; moving = None;
+    voltage = None; suspect_low_since = None; sos = false;
+  }
 
-  (** Зарегистрировать пришедший пакет: обновить «последний любой»,
-      а если он содержит показания — и «последний с показаниями». *)
-  let record t ~ts ~has_readings =
-    t.any <- Some ts;
-    if has_readings then t.with_readings <- Some ts
+  (** Зарегистрировать пришедший пакет. Возвращает [`Sos_pressed] если
+      это переход кнопки false→true (импульс) — клей сразу эмитит SOS. *)
+  let record t ~p : [ `Sos_pressed | `Quiet ] =
+    t.any <- Some p.ts;
+    if p.readings <> [] then t.with_readings <- Some p.ts;
+    if p.moving        then t.moving        <- Some p.ts;
+    t.voltage <- Some p.voltage;
+    (* Гистерезис: V<low входит в подозрение (если ещё не было);
+       V>ok выходит из подозрения. Между low и ok не меняем. *)
+    if p.voltage < low_voltage_threshold && t.suspect_low_since = None then
+      t.suspect_low_since <- Some p.ts
+    else if p.voltage > voltage_ok_threshold then
+      t.suspect_low_since <- None;
+    let sos_pressed = p.sos && not t.sos in
+    t.sos <- p.sos;
+    if sos_pressed then `Sos_pressed else `Quiet
 end
 
 (* ─── Слой 2: Self_timer ──────────────────────────────────────────
-   ТАЙМЕР С ПЕРЕМЕННОЙ ЦЕЛЬЮ. process_keyed даёт сырой API
-   set_event_timer / cancel_event_timer, и идентичность таймера —
-   пара (key, time). Когда нужен «один логический таймер, который
-   двигается вперёд», легко прислать два set с одинаковым временем
-   (Set сольёт их) или забыть отменить старый. Этот слой инкапсулирует
-   правильный паттерн: храним актуальную цель, при reschedule сначала
-   отменяем старую если она другая, потом ставим новую. *)
+   ТАЙМЕР С ПЕРЕМЕННОЙ ЦЕЛЬЮ. Один логический таймер на шахтёра.
+   Цель — минимум из всех возможных моментов смены состояния (см.
+   Fsm.next_check). Без этой обёртки сырой API set/cancel +
+   идентичность таймера (key, time) — источник тонких ошибок. *)
 module Self_timer = struct
   type t = { mutable target : Time.t option }
 
   let make () = { target = None }
 
-  (** Поставить event-таймер на [target], сняв предыдущий если он был
-      и указывал на другое время. Идемпотентно по [target]. *)
+  (** Поставить event-таймер на [target], сняв предыдущий если был и
+      указывал на другое время. Идемпотентно по [target]. *)
   let reschedule t (ctx : alert Pipe.ctx) ~target =
     (match t.target with
      | Some old when old <> target -> ctx.cancel_event_timer old
@@ -210,87 +285,139 @@ module Self_timer = struct
     t.target <- Some target;
     ctx.set_event_timer target
 
-  (** Отметить, что таймер сработал и больше не активен. Вызывается
-      в начале on_timer, чтобы reschedule знал, что отменять нечего. *)
+  (** Отметить, что таймер сработал и больше не активен. *)
   let consumed t = t.target <- None
 end
 
 (* ─── Слой 3: Fsm ────────────────────────────────────────────────
-   ЧИСТЫЙ АВТОМАТ. Принимает факты о шахтёре и текущее время,
-   возвращает желаемое состояние алерта. Никаких ref, никаких
-   таймеров, никаких эмиссий — только функция. Тестируется
-   изолированно, переходы видны как `if/else`. *)
+   ТРИ ЧИСТЫХ АВТОМАТА — по одному на подсистему. Каждый — функция
+   фактов и времени; никаких ref, никаких эмиссий. Тестируются
+   изолированно, переходы видны явно. *)
 module Fsm = struct
-  type state = Ok | No_readings | No_packets
+  type contact_state = Contact_ok | C_no_readings | C_no_packets
+  type motion_state  = Motion_ok  | M_no_motion
+  type voltage_state = V_ok       | V_suspect | V_low
 
-  (** Чистая функция перехода. По времени [now] и последним фактам
-      решить, в каком состоянии находится шахтёр.
-      Порядок проверок отражает приоритет: «нет пакетов» строже
-      «нет показаний» (если нет ни одного пакета — нет и показаний). *)
-  let state_at ~now (s : Last_seen.t) : state =
+  (** Связь. Приоритет «нет пакетов» > «нет показаний» — оправдан:
+      если пакетов нет, про показания мы знать не можем. *)
+  let contact_state ~now (s : Last_seen.t) : contact_state =
     let exhausted ~since ~threshold = match since with
-      | None -> true
-      | Some t -> now - t >= threshold in
-    if exhausted ~since:s.any ~threshold:no_readings_threshold then No_packets
-    else if exhausted ~since:s.with_readings ~threshold:silence_threshold then No_readings
-    else Ok
+      | None -> true | Some t -> now - t >= threshold in
+    if exhausted ~since:s.any ~threshold:no_readings_threshold then C_no_packets
+    else if exhausted ~since:s.with_readings ~threshold:silence_threshold then C_no_readings
+    else Contact_ok
 
-  (** Когда автомат сможет в СЛЕДУЮЩИЙ раз поменять состояние —
-      то есть когда стоит запланировать таймер. Минимум из двух
-      порогов от соответствующих last-времён; если факта нет, порог
-      «уже истёк», берём 0 в худшем случае. *)
+  (** Движение. ЗАВИСИТ от наличия пакетов: если связь потеряна
+      (No_packets), про движение не знаем — возвращаем Motion_ok как
+      «не сигналим». *)
+  let motion_state ~now (s : Last_seen.t) : motion_state =
+    match contact_state ~now s with
+    | C_no_packets -> Motion_ok
+    | _ ->
+      match s.moving with
+      | None -> M_no_motion         (* не двигался ни разу *)
+      | Some t when now - t >= demo_no_motion_threshold -> M_no_motion
+      | Some _ -> Motion_ok
+
+  (** Напряжение. Та же зависимость: при потере связи — V_ok как
+      «не знаем». Гистерезис + debounce уже в Last_seen.suspect_low_since,
+      здесь только проверяем условия. *)
+  let voltage_state ~now (s : Last_seen.t) : voltage_state =
+    match contact_state ~now s with
+    | C_no_packets -> V_ok
+    | _ ->
+      match s.voltage, s.suspect_low_since with
+      | None, _ -> V_ok                                (* напряжение ещё не наблюдалось *)
+      | Some v, _ when v > voltage_ok_threshold -> V_ok
+      | Some _, Some since when now - since >= voltage_debounce -> V_low
+      | Some _, Some _ -> V_suspect
+      | Some _, None -> V_ok                           (* между порогами без истории *)
+
+  (** Когда автомат сможет в следующий раз поменять состояние — для
+      планирования таймера. Минимум из всех возможных моментов: четыре
+      порога для contact (2), motion (1), voltage debounce (1). *)
   let next_check (s : Last_seen.t) : Time.t =
     let after since threshold = (Option.value since ~default:0) + threshold in
-    min (after s.any no_readings_threshold)
-        (after s.with_readings silence_threshold)
+    let contact_check =
+      min (after s.any no_readings_threshold)
+          (after s.with_readings silence_threshold) in
+    let motion_check = after s.moving demo_no_motion_threshold in
+    let voltage_check = match s.suspect_low_since with
+      | Some since -> since + voltage_debounce
+      | None -> max_int in              (* нет подозрения — таймер не нужен *)
+    min contact_check (min motion_check voltage_check)
 end
 
 (* ─── Клей: process_keyed связывает три слоя ─────────────────────
-   on_event: обновили факты, пересчитали таймер до ближайшего порога.
-   on_timer: спросили автомат о новом состоянии; если изменилось —
-             эмитнули алерт. Перепланировали таймер, иначе вторая
-             эскалация «нет показаний → нет пакетов» не сработает. *)
+   on_event: обновили факты, эмитим SOS если был переход false→true,
+             перепланировали таймер.
+   on_timer: спросили КАЖДЫЙ из трёх автоматов; если состояние
+             конкретной подсистемы изменилось — эмитим её алерт.
+             Перепланировали таймер на следующую возможную смену. *)
 
 type per_lamp = {
-  seen        : Last_seen.t;
-  timer       : Self_timer.t;
-  mutable last_alert : Fsm.state;
+  seen          : Last_seen.t;
+  timer         : Self_timer.t;
+  mutable last_contact : Fsm.contact_state;
+  mutable last_motion  : Fsm.motion_state;
+  mutable last_voltage : Fsm.voltage_state;
 }
 
 let make_state () = {
-  seen = Last_seen.make ();
-  timer = Self_timer.make ();
-  last_alert = Fsm.Ok;
+  seen         = Last_seen.make ();
+  timer        = Self_timer.make ();
+  last_contact = Fsm.Contact_ok;
+  last_motion  = Fsm.Motion_ok;
+  last_voltage = Fsm.V_ok;
 }
 
-let emit_for_state ctx key seen = function
-  | Fsm.No_packets  -> ctx.Pipe.emit (No_packets  (key, seen.Last_seen.any))
-  | Fsm.No_readings -> ctx.Pipe.emit (No_readings (key, seen.Last_seen.with_readings))
-  | Fsm.Ok          -> ()
+(** Сравнить три FSM с прошлыми состояниями, эмитнуть алерты на
+    переходах. Voltage_ok эмитим как явное «вернулось в норму».
+    V_suspect — внутренний, не эмитим. *)
+let check_and_emit ctx key st ~now =
+  let c = Fsm.contact_state ~now st.seen in
+  if c <> st.last_contact then begin
+    st.last_contact <- c;
+    match c with
+    | Fsm.C_no_packets  -> ctx.Pipe.emit (No_packets  (key, st.seen.any))
+    | Fsm.C_no_readings -> ctx.Pipe.emit (No_readings (key, st.seen.with_readings))
+    | Fsm.Contact_ok    -> ()
+  end;
+  let m = Fsm.motion_state ~now st.seen in
+  if m <> st.last_motion then begin
+    st.last_motion <- m;
+    match m with
+    | Fsm.M_no_motion -> ctx.Pipe.emit (No_motion (key, st.seen.moving))
+    | Fsm.Motion_ok   -> ()
+  end;
+  let v = Fsm.voltage_state ~now st.seen in
+  if v <> st.last_voltage then begin
+    st.last_voltage <- v;
+    match v, st.seen.voltage with
+    | Fsm.V_low, Some volts -> ctx.Pipe.emit (Low_voltage (key, volts))
+    | Fsm.V_ok, _           -> ctx.Pipe.emit (Voltage_ok key)
+    | Fsm.V_suspect, _ | Fsm.V_low, None -> ()
+  end
 
 let connectivity_alerts source =
   source
   |> Pipe.event_time ~lateness:(seconds 1)
   |> Pipe.process_keyed (module ByLamp)
        ~init:make_state
-       ~on_event:(fun ctx _key st p ->
-         Last_seen.record st.seen ~ts:p.ts ~has_readings:(p.readings <> []);
-         (* Возврат показаний сбрасывает состояние алерта: если шахтёр
-            снова слышит маяки, прошлое «no_readings» больше не актуально *)
-         if p.readings <> [] then st.last_alert <- Fsm.Ok;
+       ~on_event:(fun ctx key st p ->
+         (match Last_seen.record st.seen ~p with
+          | `Sos_pressed -> ctx.Pipe.emit (Sos (key, p.ts))
+          | `Quiet -> ());
+         (* Любой подходящий пакет может вернуть подсистему в норму —
+            проверяем все три FSM на «возврат», эмитим если изменилось *)
+         check_and_emit ctx key st ~now:p.ts;
          Self_timer.reschedule st.timer ctx ~target:(Fsm.next_check st.seen))
-       ~on_timer:(fun ctx key st _t _kind ->
+       ~on_timer:(fun ctx key st t _kind ->
          Self_timer.consumed st.timer;
-         let now_state = Fsm.state_at ~now:_t st.seen in
-         if now_state <> st.last_alert then begin
-           st.last_alert <- now_state;
-           emit_for_state ctx key st.seen now_state
-         end;
-         (* Перепланировать на следующую возможную смену состояния —
-            без этого эскалация «нет показаний → нет пакетов» не
-            сработает: один таймер сгорел, новый никто не поставил *)
+         check_and_emit ctx key st ~now:t;
+         (* Перепланировать на следующую возможную смену состояния *)
          let next = Fsm.next_check st.seen in
-         if next > _t then
+         if next > t && next < max_int then
            Self_timer.reschedule st.timer ctx ~target:next)
 
 (* ── Сборка сервиса ───────────────────────────────────────── *)
@@ -299,13 +426,13 @@ let () =
   Printf.printf "=== Локация шахтёров по маякам ===\n\n";
 
   (* алерты связи *)
-  Printf.printf "Контроль связи:\n";
+  Printf.printf "Контроль состояния шахтёра:\n";
   let alerts =
     Mf_event.of_list ~ts:(fun p -> p.ts) packets
     |> connectivity_alerts
     |> Pipe.collect in
   (match alerts with
-   | [] -> Printf.printf "  все фонари в эфире\n"
+   | [] -> Printf.printf "  все фонари в норме\n"
    | _ -> List.iter (function
        | No_packets (lamp, Some t) ->
          Printf.printf "  ⚠ %s: НЕТ ПАКЕТОВ >%d мин (последний t=%dс)\n"
@@ -316,7 +443,19 @@ let () =
          Printf.printf "  ⚠ %s: пакеты идут, но не слышит маяки >%d мин (последние показания t=%dс)\n"
            lamp (silence_threshold/60000) (t/1000)
        | No_readings (lamp, None) ->
-         Printf.printf "  ⚠ %s: не слышал маяки ни разу\n" lamp) alerts);
+         Printf.printf "  ⚠ %s: не слышал маяки ни разу\n" lamp
+       | No_motion (lamp, Some t) ->
+         Printf.printf "  ⚠ %s: НЕ ДВИЖЕТСЯ >%d мин (последнее движение t=%dс)\n"
+           lamp (demo_no_motion_threshold/60000) (t/1000)
+       | No_motion (lamp, None) ->
+         Printf.printf "  ⚠ %s: не двигался ни разу\n" lamp
+       | Low_voltage (lamp, v) ->
+         Printf.printf "  ⚠ %s: НИЗКОЕ НАПРЯЖЕНИЕ %.2fВ (порог %.2fВ, подтверждено %d мин)\n"
+           lamp v low_voltage_threshold (voltage_debounce/60000)
+       | Voltage_ok lamp ->
+         Printf.printf "  ✓ %s: напряжение восстановилось\n" lamp
+       | Sos (lamp, t) ->
+         Printf.printf "  🆘 %s: НАЖАТА КНОПКА SOS (t=%dс)\n" lamp (t/1000)) alerts);
 
   (* окна median + подсчёт ретракций *)
   let win_events =
