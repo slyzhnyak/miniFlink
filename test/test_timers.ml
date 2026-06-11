@@ -218,3 +218,105 @@ let test_reregistration_pattern () =
     (List.mem ("M1", 40) !fired)
 
 let () = test_reregistration_pattern ()
+
+(* ── Самодиагностика: забытый event_time ловится в рантайме ──── *)
+let capture_warns f =
+  let warns = ref [] in
+  Log.set_sink (fun e -> warns := e :: !warns);
+  f ();
+  Log.set_sink (fun e -> print_string (Log.to_json e ^ "\n"));  (* вернуть дефолт *)
+  List.filter_map (fun e -> Some (Log.to_json e)) !warns
+
+let test_diag_missing_event_time () =
+  Printf.printf "\n-- diag: event timers without any watermark -> loud warn\n";
+  let warns = capture_warns (fun () ->
+    let _ = Stream.of_list [ Mf_event.data { miner="M1"; ts=0 } 0 ]
+      (* НЕТ event_time — та самая грабля *)
+      |> Pipe.process_keyed (module ByMiner)
+           ~init:(fun () -> ())
+           ~on_event:(fun ctx _k _st p -> ctx.Pipe.set_event_timer (p.ts + 30))
+           ~on_timer:(fun _ _ _ _ _ -> ())
+      |> Stream.to_list in ()) in
+  let contains hay needle =
+    let nl = String.length needle and hl = String.length hay in
+    let rec go i = i + nl <= hl && (String.sub hay i nl = needle || go (i+1)) in
+    go 0 in
+  check "warn emitted about missing watermarks"
+    (List.exists (fun w -> contains w "watermark") warns)
+
+let test_diag_correct_pipe_silent () =
+  Printf.printf "\n-- diag: correct pipe (with event_time) -> NO warn\n";
+  let warns = capture_warns (fun () ->
+    let _ = Mf_event.of_list ~ts:(fun p -> p.ts)
+              [ { miner="M1"; ts=0 } ]
+      |> Pipe.event_time ~lateness:0
+      |> Pipe.process_keyed (module ByMiner)
+           ~init:(fun () -> ())
+           ~on_event:(fun ctx _k _st p -> ctx.Pipe.set_event_timer (p.ts + 30))
+           ~on_timer:(fun _ _ _ _ _ -> ())
+      |> Stream.to_list in ()) in
+  check "no warns on a correct pipe" (warns = [])
+
+let test_diag_on_stat () =
+  Printf.printf "\n-- diag: ?on_stat reports set/fired/watermarks\n";
+  let stats = Hashtbl.create 8 in
+  let bump k = Hashtbl.replace stats k (1 + try Hashtbl.find stats k with Not_found -> 0) in
+  let _ = Mf_event.of_list ~ts:(fun p -> p.ts) [ { miner="M1"; ts=0 } ]
+    |> Pipe.event_time ~lateness:0
+    |> Pipe.process_keyed (module ByMiner)
+         ~on_stat:(function
+           | `Event_timer_set -> bump "set" | `Event_timer_fired -> bump "fired"
+           | `Watermark_seen -> bump "wm" | _ -> ())
+         ~init:(fun () -> ())
+         ~on_event:(fun ctx _k _st p -> ctx.Pipe.set_event_timer (p.ts + 0))
+         ~on_timer:(fun _ _ _ _ _ -> ())
+    |> Stream.to_list in
+  let g k = try Hashtbl.find stats k with Not_found -> 0 in
+  check "on_stat: 1 set, 1 fired, watermarks seen"
+    (g "set" = 1 && g "fired" = 1 && g "wm" >= 1)
+
+let () =
+  test_diag_missing_event_time ();
+  test_diag_correct_pipe_silent ();
+  test_diag_on_stat ()
+
+(* ── Диагностика window ──────────────────────────────────────── *)
+module BM = ByMiner
+
+let test_diag_window_no_wm () =
+  Printf.printf "\n-- diag: window fed data but zero watermarks -> warn\n";
+  let warns = capture_warns (fun () ->
+    let _ = Stream.of_list [ Mf_event.data { miner="M1"; ts=5 } 5 ]
+      |> Pipe.window (module BM) (Pipe.tumbling 10)
+      |> Stream.to_list in ()) in
+  check "window no-watermark warn" (warns <> [])
+
+let test_diag_window_all_late () =
+  Printf.printf "\n-- diag: ALL events late (0 windows emitted) -> warn\n";
+  let warns = capture_warns (fun () ->
+    let _ = Stream.of_list [
+        Mf_event.wm 1000;                          (* wm уже далеко впереди *)
+        Mf_event.data { miner="M1"; ts=1 } 1;      (* безнадёжно опоздали *)
+        Mf_event.data { miner="M1"; ts=2 } 2;
+      ]
+      |> Pipe.window (module BM) ~allowed_lateness:0 (Pipe.tumbling 10)
+      |> Stream.to_list in ()) in
+  let contains hay needle =
+    let nl = String.length needle and hl = String.length hay in
+    let rec go i = i + nl <= hl && (String.sub hay i nl = needle || go (i+1)) in
+    go 0 in
+  check "all-late warn mentions late" (List.exists (fun w -> contains w "late") warns)
+
+let () =
+  test_diag_window_no_wm ();
+  test_diag_window_all_late ()
+
+let test_diag_merge_silent_partition () =
+  Printf.printf "\n-- diag: partition with zero watermarks under idle:Never -> warn\n";
+  let warns = capture_warns (fun () ->
+    let p1 = Stream.of_list [ Mf_event.data { miner="M1"; ts=1 } 1; Mf_event.wm 10 ] in
+    let p2 = Stream.of_list [ Mf_event.data { miner="M2"; ts=2 } 2 ] in  (* без wm! *)
+    let _ = Merge.merge_partitioned ~idle:Merge.Never [p1; p2] |> Stream.to_list in ()) in
+  check "silent-partition warn" (warns <> [])
+
+let () = test_diag_merge_silent_partition ()

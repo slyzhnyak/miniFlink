@@ -33,6 +33,12 @@ type 'out ctx = {
 }
 
 (* таймер: (ключ, время, тип) *)
+(* событие телеметрии оператора — для подключения внешних метрик *)
+type stat =
+  [ `Event_timer_set | `Event_timer_fired
+  | `Processing_timer_set | `Processing_timer_fired
+  | `Watermark_seen ]
+
 module TimerSet = Set.Make (struct
   type t = string * Time.t
   let compare = compare
@@ -42,6 +48,7 @@ let process_keyed
     (type a) (type st) (type out)
     (module K : Keyed.S with type t = a)
     ?(now_ms = fun () -> int_of_float (Unix.gettimeofday () *. 1000.))
+    ?(on_stat : stat -> unit = fun _ -> ())
     ~(init : unit -> st)
     ~(on_event : out ctx -> string -> st -> a -> unit)
     ~(on_timer : out ctx -> string -> st -> Time.t -> timer_kind -> unit)
@@ -51,6 +58,12 @@ let process_keyed
   let ev_timers = ref TimerSet.empty in   (* (key, time) event-time *)
   let pt_timers = ref TimerSet.empty in   (* (key, time) processing-time *)
   let out_q : out Mf_event.t Queue.t = Queue.create () in
+  (* диагностика: главный сборочный промах — event-таймеры без единого
+     watermark в потоке (забыт Pipe.event_time) молчали бы вечно.
+     Счётчики локальные; ?on_stat отдаёт события наружу для метрик. *)
+  let wm_seen = ref false in
+  let ev_set = ref 0 and ev_fired = ref 0 in
+  let stat e = on_stat e in
 
   let state_of key =
     match Hashtbl.find_opt states key with
@@ -61,9 +74,15 @@ let process_keyed
   let ctx_for key ~emit_ts = {
     clear_state = (fun () -> Hashtbl.remove states key);
     emit = (fun o -> Queue.push (Mf_event.data o emit_ts) out_q);
-    set_event_timer = (fun t -> ev_timers := TimerSet.add (key, t) !ev_timers);
-    set_event_timer_for = (fun k t -> ev_timers := TimerSet.add (k, t) !ev_timers);
-    set_processing_timer = (fun t -> pt_timers := TimerSet.add (key, t) !pt_timers);
+    set_event_timer = (fun t ->
+      incr ev_set; stat `Event_timer_set;
+      ev_timers := TimerSet.add (key, t) !ev_timers);
+    set_event_timer_for = (fun k t ->
+      incr ev_set; stat `Event_timer_set;
+      ev_timers := TimerSet.add (k, t) !ev_timers);
+    set_processing_timer = (fun t ->
+      stat `Processing_timer_set;
+      pt_timers := TimerSet.add (key, t) !pt_timers);
     cancel_event_timer = (fun t -> ev_timers := TimerSet.remove (key, t) !ev_timers);
     cancel_event_timers = (fun () ->
       ev_timers := TimerSet.filter (fun (k,_) -> k <> key) !ev_timers);
@@ -81,6 +100,9 @@ let process_keyed
     TimerSet.elements due
     |> List.sort (fun (_,t1) (_,t2) -> compare t1 t2)
     |> List.iter (fun (key, t) ->
+         (match kind with
+          | Event_time -> incr ev_fired; stat `Event_timer_fired
+          | Processing_time -> stat `Processing_timer_fired);
          on_timer (ctx_for key ~emit_ts:t) key (state_of key) t kind) in
 
   let upstream_done = ref false in
@@ -92,6 +114,12 @@ let process_keyed
       else match upstream () with
         | None ->
           upstream_done := true;
+          if not !wm_seen && not (TimerSet.is_empty !ev_timers) then
+            Log.warn ~fields:[
+              ("event_timers_set", string_of_int !ev_set);
+              ("event_timers_fired", string_of_int !ev_fired);
+              ("pending_event_timers", string_of_int (TimerSet.cardinal !ev_timers))]
+              "process_keyed: event-таймеры установлены, но в потоке не было ни                одного watermark — они никогда не сработают. Добавьте                Pipe.event_time перед process_keyed (или idle-watermark для                молчаливых источников)";
           (* Конец потока НЕ срабатывает таймеры автоматически: event-time
              таймер ждёт watermark, processing-time — wall-clock. Если
              нужно «дренировать» таймеры на завершении, пошлите финальный
@@ -104,6 +132,7 @@ let process_keyed
           fire_due pt_timers Processing_time (now_ms ());
           pull ()
         | Some (Mf_event.Watermark wm) ->
+          wm_seen := true; stat `Watermark_seen;
           (* watermark двигает event-time таймеры *)
           fire_due ev_timers Event_time wm;
           (* и заодно проверяем processing-time *)

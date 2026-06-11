@@ -3,6 +3,15 @@
     dedup: «нет событий дольше порога», «дольше смены», CEP-подобные
     переходы. *)
 
+(** Событие телеметрии оператора: подключите [?on_stat] к своим метрикам
+    (например счётчики Metrics) — паттерн как [~observe_window_ms] у
+    {!Window.window_instrumented}. Соотношение set/fired + Watermark_seen
+    сразу показывает «таймеры ставятся, но не срабатывают». *)
+type stat =
+  [ `Event_timer_set | `Event_timer_fired
+  | `Processing_timer_set | `Processing_timer_fired
+  | `Watermark_seen ]
+
 (** Тип таймера. *)
 type timer_kind =
   | Event_time       (** срабатывает когда watermark >= времени таймера *)
@@ -41,6 +50,10 @@ type 'out ctx = {
     после истечения. При полностью молчащем потоке используйте
     idle-watermark, чтобы проверки двигались.
 
+    {b Самодиагностика}: если к концу потока остались event-таймеры, а в
+    потоке не было {e ни одного} watermark — оператор пишет [Log.warn]
+    (почти наверняка забыт [Pipe.event_time]; таймеры молчали бы вечно).
+
     {b Таймеры НЕ переживают перезапуск процесса.} Они живут в памяти
     оператора; после краха/restart (supervisor, EO-recovery) все таймеры
     пусты — пайплайн поднимется, но «кто молчит» забудется, пока ключ не
@@ -54,6 +67,7 @@ type 'out ctx = {
 val process_keyed :
   (module Keyed.S with type t = 'a) ->
   ?now_ms:(unit -> int) ->
+  ?on_stat:(stat -> unit) ->
   init:(unit -> 'st) ->
   on_event:('out ctx -> string -> 'st -> 'a -> unit) ->
   on_timer:('out ctx -> string -> 'st -> Time.t -> timer_kind -> unit) ->

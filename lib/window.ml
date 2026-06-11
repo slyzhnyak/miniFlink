@@ -94,8 +94,13 @@ let window
     : (string * a list) Mf_event.t Stream.t =
   let tbl : a win_state WMap.t ref = ref WMap.empty in
   let cur_wm = ref min_int in   (* последний виденный watermark *)
+  (* самодиагностика сборки пайпа *)
+  let saw_data = ref false and saw_wm = ref false in
+  let n_late = ref 0 and n_emitted = ref 0 in
+  let on_late x = incr n_late; on_late x in
   let out : (string * a list) Mf_event.t Queue.t = Queue.create () in
   let emit_data k stop vs =
+    incr n_emitted;
     Queue.push (Mf_event.data (k, List.rev vs) stop) out in
   let emit_retract k stop vs =
     Queue.push (Mf_event.retract (k, List.rev vs) stop) out in
@@ -104,6 +109,16 @@ let window
       if not (Queue.is_empty out) then Some (Queue.pop out) else
       match upstream () with
       | None ->
+        if !saw_data && not !saw_wm then
+          Log.warn ~fields:[("windows_emitted_incrementally", "0")]
+            "window: события были, но ни одного watermark — окна эмитированы \
+             только при завершении потока (на бесконечном потоке — никогда), \
+             late-семантика не работала. Добавьте Pipe.event_time перед окном";
+        if !saw_data && !saw_wm && !n_emitted = 0 && !n_late > 0 then
+          Log.warn ~fields:[("late", string_of_int !n_late)]
+            "window: ВСЕ события ушли в late (0 окон эмитировано) — \
+             watermark обгоняет данные; увеличьте lateness у Pipe.event_time \
+             или allowed_lateness у окна";
         (* Закрываем все Open окна; Fired уже эмитили *)
         WMap.iter (fun (k,_,stop) st ->
           match st with Open vs when vs <> [] -> emit_data k stop vs | _ -> ()
@@ -111,6 +126,7 @@ let window
         tbl := WMap.empty;
         if Queue.is_empty out then None else Some (Queue.pop out)
       | Some (Mf_event.Watermark wm) ->
+        saw_wm := true;
         cur_wm := wm;
         (* Open окна со stop+latency <= wm → закрываем (Fire) *)
         WMap.iter (fun (k,s,stop) st ->
@@ -130,6 +146,7 @@ let window
         pull ()
       | Some (Mf_event.Retract _) -> pull ()
       | Some (Mf_event.Data (v,t)) ->
+        saw_data := true;
         List.iter (fun (s, stop) ->
           let mk = (K.key v, s, stop) in
           match WMap.find_opt mk !tbl with

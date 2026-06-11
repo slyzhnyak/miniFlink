@@ -66,7 +66,15 @@ let merge_partitioned
         Array.iter (fun p ->
           if not p.done_ then
             match p.pull () with
-            | None -> p.done_ <- true; progressed := true; maybe_emit_wm ()
+            | None ->
+              p.done_ <- true; progressed := true;
+              if p.wm = min_int && idle = Never then
+                Log.warn
+                  "merge_partitioned: партиция завершилась, не дав ни одного \
+                   watermark — при idle:Never она всё это время держала общий \
+                   watermark на минимуме (окна ниже не закрывались). Источник \
+                   без watermark? Рассмотрите Wall_clock_timeout";
+              maybe_emit_wm ()
             | Some (Mf_event.Watermark w) ->
               if w > p.wm then p.wm <- w;
               p.last_activity <- now_ms ();

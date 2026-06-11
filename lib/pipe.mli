@@ -311,6 +311,7 @@ type 'out ctx = 'out Process_fn.ctx = {
 val process_keyed :
   (module Keyed.S with type t = 'a) ->
   ?now_ms:(unit -> int) ->
+  ?on_stat:(Process_fn.stat -> unit) ->
   init:(unit -> 'st) ->
   on_event:('out ctx -> string -> 'st -> 'a -> unit) ->
   on_timer:('out ctx -> string -> 'st -> Time.t -> timer_kind -> unit) ->
