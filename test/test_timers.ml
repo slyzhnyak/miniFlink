@@ -320,3 +320,130 @@ let test_diag_merge_silent_partition () =
   check "silent-partition warn" (warns <> [])
 
 let () = test_diag_merge_silent_partition ()
+
+(* ── Идемпотентность таймера (key, t) — Flink-семантика ─────────
+   Это семантический контракт process_keyed, задокументированный в
+   process_fn.mli и в pipe.mli. До добавления этих тестов контракт
+   жил только в документации — на этом я наступил в ex07, когда
+   попытался поставить два независимых таймера на одного шахтёра.
+   Закрепляем тестами, чтобы любая будущая «оптимизация» Set→list
+   не сломала идемпотентность тихо. *)
+
+let test_timer_idempotent_set () =
+  Printf.printf "\n-- timer (key, t) is idempotent: 2 sets -> 1 fire\n";
+  let fires = ref 0 in
+  let src = Stream.of_list [
+    Mf_event.data { miner="K"; ts=0 } 0;
+    Mf_event.wm 200;
+  ] in
+  let _ =
+    src |> Pipe.process_keyed (module ByMiner)
+      ~init:(fun () -> ())
+      ~on_event:(fun ctx _k _st _p ->
+        (* два логических set на одно и то же (key, 100) — должны слиться *)
+        ctx.Pipe.set_event_timer 100;
+        ctx.Pipe.set_event_timer 100)
+      ~on_timer:(fun _ctx _k _st _t _kind -> incr fires; ())
+    |> Stream.to_list in
+  check "two set_event_timer 100 → exactly one fire" (!fires = 1)
+
+let test_timer_cancel_removes_both_logical () =
+  Printf.printf "\n-- cancel_event_timer removes the WHOLE (key, t) entry\n";
+  let fires = ref 0 in
+  let src = Stream.of_list [
+    Mf_event.data { miner="K"; ts=0 } 0;
+    Mf_event.wm 200;
+  ] in
+  let _ =
+    src |> Pipe.process_keyed (module ByMiner)
+      ~init:(fun () -> ())
+      ~on_event:(fun ctx _k _st _p ->
+        (* Два «независимых» set с одинаковым временем — Set сольёт.
+           cancel снимает целиком: ОБА логических таймера потеряны.
+           Это поведение, на которое я наступил в ex07. *)
+        ctx.Pipe.set_event_timer 100;   (* «логика A» *)
+        ctx.Pipe.set_event_timer 100;   (* «логика B» *)
+        ctx.Pipe.cancel_event_timer 100)
+      ~on_timer:(fun _ctx _k _st _t _kind -> incr fires; ())
+    |> Stream.to_list in
+  check "after cancel, no timer fires (both logical entries gone)" (!fires = 0)
+
+let test_timer_different_times_independent () =
+  Printf.printf "\n-- different times => independent timers, both fire\n";
+  let fires = ref [] in
+  let src = Stream.of_list [
+    Mf_event.data { miner="K"; ts=0 } 0;
+    Mf_event.wm 200;
+  ] in
+  let _ =
+    src |> Pipe.process_keyed (module ByMiner)
+      ~init:(fun () -> ())
+      ~on_event:(fun ctx _k _st _p ->
+        ctx.Pipe.set_event_timer 100;
+        ctx.Pipe.set_event_timer 150)
+      ~on_timer:(fun _ctx _k _st t _kind -> fires := t :: !fires; ())
+    |> Stream.to_list in
+  let sorted = List.sort compare !fires in
+  check "both timers (100, 150) fired in order" (sorted = [100; 150])
+
+let () =
+  test_timer_idempotent_set ();
+  test_timer_cancel_removes_both_logical ();
+  test_timer_different_times_independent ()
+
+(* ── Out-of-order data vs timer fires ──────────────────────────
+   Таймер ставится на t1, потом приходит data с ts > t1, потом
+   watermark двигает время и таймер срабатывает с t=t1. В on_timer
+   `now=t1` может быть МЕНЬШЕ чем ts уже виденных событий — это
+   корректное поведение process_keyed, на которое я наступил в ex07
+   (M6: voltage timer на t=120с срабатывал после прихода пакета с
+   ts=225с, и FSM пересчиталась «в прошлое»).
+   Закрепляет: библиотека МОЖЕТ дать `now` в прошлом; user code
+   обязан с этим считаться. *)
+
+let test_timer_fires_at_scheduled_time_not_wm () =
+  Printf.printf "\n-- on_timer 'now' is the SCHEDULED time, not current wm\n";
+  let observed = ref [] in
+  let src = Stream.of_list [
+    Mf_event.data { miner="K"; ts=10 } 10;     (* поставит таймер на 50 *)
+    Mf_event.data { miner="K"; ts=100 } 100;   (* ts=100 уже после таймера *)
+    Mf_event.wm 200;                            (* wm двигает; таймер на 50 < 200 → fire *)
+  ] in
+  let timer_set = ref false in
+  let _ =
+    src |> Pipe.process_keyed (module ByMiner)
+      ~init:(fun () -> ())
+      ~on_event:(fun ctx _k _st _p ->
+        if not !timer_set then begin
+          ctx.Pipe.set_event_timer 50;
+          timer_set := true
+        end)
+      ~on_timer:(fun _ctx _k _st t _kind -> observed := t :: !observed; ())
+    |> Stream.to_list in
+  check "timer fires with scheduled time 50 (not the wm value 200)"
+    (!observed = [50]);
+  (* Главный поинт: 50 < 100 (ts последнего обработанного data до этого) *)
+  check "scheduled fire-time CAN be less than already-seen data ts"
+    (List.for_all (fun t -> t < 100) !observed)
+
+let test_multiple_timers_fire_in_time_order () =
+  Printf.printf "\n-- multiple due timers fire in ascending time order\n";
+  let fires = ref [] in
+  let src = Stream.of_list [
+    Mf_event.data { miner="K"; ts=0 } 0;
+    Mf_event.wm 200;       (* три таймера сработают в один проход *)
+  ] in
+  let _ =
+    src |> Pipe.process_keyed (module ByMiner)
+      ~init:(fun () -> ())
+      ~on_event:(fun ctx _k _st _p ->
+        ctx.Pipe.set_event_timer 150;
+        ctx.Pipe.set_event_timer 50;
+        ctx.Pipe.set_event_timer 100)
+      ~on_timer:(fun _ctx _k _st t _kind -> fires := t :: !fires; ())
+    |> Stream.to_list in
+  check "ordered: 50, 100, 150" (List.rev !fires = [50; 100; 150])
+
+let () =
+  test_timer_fires_at_scheduled_time_not_wm ();
+  test_multiple_timers_fire_in_time_order ()

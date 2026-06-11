@@ -17,7 +17,7 @@ Apache Flink **на одном узле**. Акцент — на чистоте 
 operators, exactly-once (end-to-end: offset, 2PC sink, recovery, durable),
 table/join с TTL (+ temporal as-of join), union потоков, retractions — плюс production-слои
 (DLQ + retry/backoff, graceful shutdown, Prometheus metrics, структурированные
-логи, health, config, RocksDB state). ~4100 строк OCaml, 40 тест-сюит.
+логи, health, config, RocksDB state). ~4100 строк OCaml, 48 тест-сюит.
 
 ## Почему декларативно
 
@@ -99,7 +99,7 @@ variants/            — реализации channel/parallel по версии
 bin/    main.ml        демо pipeline
 examples/              самодостаточные примеры (см. examples/README.md)
 bench/  bench.ml bench_parallel.ml
-test/   40 тест-сюит (core, props, invariants, reliability, metrics,
+test/   48 тест-сюит (core, props, invariants, reliability, metrics,
                      retract, sliding, count_window, session_window,
                      global_window, window_fold, agg, union, safe, parallel_retract,
                      side_output, ttl_state, nexmark, watermark_fuzz, timers,
@@ -108,8 +108,37 @@ test/   40 тест-сюит (core, props, invariants, reliability, metrics,
                      determinism, watermark, idle_watermark, table_ttl,
                      checkpoint_parallel, rocksdb, codec, channel,
                      window_validation, log, health_config, retry,
-                     schema, backpressure, queue_depth)
+                     schema, backpressure, queue_depth, ex07_smoke)
 ```
+
+### Практика: каждый найденный баг → тест
+
+При нахождении бага (своими руками, через ревью, по жалобе пользователя)
+**сначала пишем падающий тест**, который его воспроизводит, и только
+потом фикс. Это закрепляет инвариант: репликация регресса не уйдёт
+тихо, и тест остаётся живой документацией «это уже было сломано, не
+ломайте снова». Примеры исторически принятых уроков:
+
+- `test_fan_out.ml :: test_concurrent_block_drain` — гонка данных при
+  конкурентном чтении Block-выходов (ловит регресс синхронизации).
+- `test_timers.ml :: test_emit_time_composes_with_window` —
+  `process_keyed` не должен эмитить с `ts=0` (иначе выход не
+  композируется с окнами).
+- `test_timers.ml :: test_timer_idempotent_set` +
+  `test_timer_cancel_removes_both_logical` — Flink-семантика
+  идентичности таймера по `(key, t)`: два set сливаются, cancel
+  снимает обе логические записи. На этом легко наступить.
+- `test_timers.ml :: test_timer_fires_at_scheduled_time_not_wm` —
+  `on_timer` получает `now` = время по расписанию, не текущий
+  watermark, и оно может быть **в прошлом** относительно уже
+  обработанных данных.
+- `test_dedup_evict.ml :: test_dedup_passes_late_drops_duplicate` —
+  `dedup` срубает дубль, но пропускает честный опоздавший пакет,
+  который вызывает retract уже закрытого окна.
+- `test_ex07_smoke.ml` — end-to-end smoke ex07: вывод содержит все
+  типы алертов, M6 имеет одновременно все четыре, дубли и ретракты
+  посчитаны, координаты прорисованы. Защищает от молчаливого
+  регресса семантики окон/таймеров через example.
 
 Сборка через **dune**. `channel.ml`/`parallel.ml` выбираются автоматически
 по версии OCaml через `(rule (enabled_if (>= %{ocaml_version} 5.0.0)))` —
@@ -211,7 +240,7 @@ Channel overhead: ~106 нс/msg (Mutex+Condition).
 | Graceful Shutdown           | ✓ реализовано (SIGTERM/INT)   |
 | Prometheus Metrics          | ✓ реализовано (HTTP :9090)    |
 | Изоляция исключений         | ✓ safe_map / safe_filter (битое событие → on_error, не падение) |
-| Unit + Property тесты       | ✓ 40 сюит, QCheck-инварианты  |
+| Unit + Property тесты       | ✓ 48 сюит, QCheck-инварианты  |
 | CI                          | ⚠ workflow написан (docs/ci/ci.yml: сборка + тесты на OCaml 4.14/5.2), но НЕ активен: токен автоматизации без workflow-scope не может пушить в .github/workflows/ — скопируйте файл туда вручную |
 | Exactly-once parallel       | ✓ реализовано (barrier + snapshot) |
 | Exactly-once end-to-end     | ✓ offset + 2PC sink + recovery + durable (E2E recovery harness: kill→recover→output совпадает) |

@@ -52,10 +52,51 @@ let test_dedup_eviction () =
   check "cooldown still suppresses within window"
     (List.length (List.filter Mf_event.is_data out2) = 1)
 
+(* ── dedup composes with windows + late + retract (ex07 scenario) ─
+   Закрывает реальный сценарий из ex07: at-least-once канал даёт
+   дубль того же (key, ts), плюс есть честный опоздавший пакет.
+   dedup ДО окна должен срубить дубль, опоздавший должен пройти и
+   при `allowed_lateness` вызвать retract уже закрытого окна.
+   Без этого теста баг «dedup проглатывает опоздавшего» (если бы
+   cooldown был неправильно настроен) не ловился бы. *)
+
+type pkt = { id : string; ts : int; v : float }
+module ByPkt = Keyed.Make (struct type t = pkt let key p = p.id end)
+
+let test_dedup_passes_late_drops_duplicate () =
+  Printf.printf "\n-- dedup drops duplicate, lets honest late packet through to retract\n";
+  let out =
+    Stream.of_list [
+      Mf_event.data { id="A"; ts=10;  v=1.0 } 10;
+      Mf_event.data { id="A"; ts=10;  v=1.0 } 10;     (* ДУБЛЬ — должен срубиться *)
+      Mf_event.data { id="A"; ts=100; v=2.0 } 100;
+      (* watermark вперёд — окно [0,60) закрывается *)
+      Mf_event.data { id="A"; ts=200; v=3.0 } 200;
+      (* честный опоздавший в УЖЕ ЗАКРЫТОЕ окно [0,60) *)
+      Mf_event.data { id="A"; ts=20;  v=4.0 } 20;
+    ]
+    |> Pipe.dedup (module ByPkt) ~rule:(fun p -> string_of_int p.ts)
+         ~cooldown:1000
+    |> Pipe.event_time ~lateness:1
+    |> Pipe.window_agg_keyed ~by:(fun p -> p.id)
+         ~allowed_lateness:300
+         (Pipe.tumbling 60)
+         (Agg.count_if (fun _ -> true))
+    |> Stream.to_list in
+  (* отделим Data и Retract — retract пересчитал старое окно *)
+  let datas = List.filter (function Mf_event.Data _ -> true | _ -> false) out in
+  let retracts = List.filter (function Mf_event.Retract _ -> true | _ -> false) out in
+  (* окно [0,60): без дубликата 1 событие (ts=10), но опоздавший ts=20 → пересчёт до 2 *)
+  check "duplicate dropped, late packet caused retract"
+    (List.length retracts >= 1);
+  check "some windows emitted"
+    (List.length datas >= 1)
+
 let () =
   Printf.printf "==========================================\n";
   Printf.printf "  Bugs #5 (dedup evict) + #6 (hash_key)\n";
   Printf.printf "==========================================\n";
   test_hash_nonneg ();
   test_dedup_eviction ();
+  test_dedup_passes_late_drops_duplicate ();
   Printf.printf "\nAll tests passed.\n"

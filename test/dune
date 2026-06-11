@@ -284,3 +284,10 @@
  (libraries miniflink test_support)
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_timers))
+
+(test
+ (name test_ex07_smoke)
+ (libraries unix)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
+ (modules test_ex07_smoke)
+ (deps ../examples/ex07_location.exe))
