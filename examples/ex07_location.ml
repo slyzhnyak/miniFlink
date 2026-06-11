@@ -116,6 +116,10 @@ let packets =
 
 (* ── median RSSI по шахтёр×маяк, скользящее окно 60s/5s ───── *)
 
+(* Пайплайн локации (декларативный):
+   окно по ШАХТЁРУ → внутри окна group_by бикон → median RSSI на бикон
+   → top_k_by 2 по медиане. Результат на окно: (шахтёр, top-2 биконов
+   с их медианами). Замена ручному Hashtbl-Hashtbl-сорт-filteri. *)
 let median_rssi source =
   source
   |> Pipe.flat_map (fun p ->
@@ -123,10 +127,20 @@ let median_rssi source =
          { r_lamp = p.lamp; r_beacon = b; r_rssi = rssi; r_ts = p.ts })
          p.readings)
   |> Pipe.event_time ~lateness:(seconds 1)
-  |> Pipe.window_agg_keyed ~by:(fun r -> r.r_lamp ^ "|" ^ r.r_beacon)
+  |> Pipe.window_agg_keyed ~by:(fun r -> r.r_lamp)
        ~allowed_lateness:(seconds 30)
        (Pipe.sliding (seconds 60) (seconds 5))
-       (Agg.median (fun r -> r.r_rssi))
+       Agg.(
+         group_by
+           ~key:(fun r -> r.r_beacon)
+           ~inner:(median (fun r -> r.r_rssi))
+         |> map (fun per_beacon ->
+              (* отфильтровать биконы где медиана None (пусто) и взять top-2.
+                 top_k_by — простой пост-фильтр над списком из group_by *)
+              per_beacon
+              |> List.filter_map (fun (b, med) ->
+                   match med with Some m -> Some (b, m) | None -> None)
+              |> Agg.run (top_k_by 2 ~by:snd)))
 
 (* ── Два алерта на process_keyed ──────────────────────────── *)
 
@@ -218,47 +232,29 @@ let () =
   if retracts > 0 then
     Printf.printf "\nОпоздавшие пакеты: ретракций (пересчётов окон): %d\n" retracts;
 
-  (* финальные значения окон (после применения ретрактов) *)
+  (* финальные значения окон (после ретрактов) — теперь окно сразу
+     даёт top-2 биконов с их медианами для каждого шахтёра. *)
   let medians =
-    Pipe.materialize ~by:(fun (k, _) wend -> (k, wend))
+    Pipe.materialize ~by:(fun (lamp, _) wend -> (lamp, wend))
       (Stream.of_list win_events) in
 
-  (* группировка: (шахтёр, конец_окна) → [(маяк, median)] *)
-  let by_lamp_window : (string * Time.t, (string * float) list) Hashtbl.t =
-    Hashtbl.create 64 in
-  List.iter (fun ((key, wend), (_, med)) ->
-    match med, String.split_on_char '|' key with
-    | Some m, [lamp; beacon] ->
-      let cur = try Hashtbl.find by_lamp_window (lamp, wend) with Not_found -> [] in
-      Hashtbl.replace by_lamp_window (lamp, wend) ((beacon, m) :: cur)
-    | _ -> ()) medians;
-
-  (* top-2 по median В КАЖДОМ окне *)
-  let top2_per_window =
-    Hashtbl.fold (fun (lamp, wend) bs acc ->
-      let top2 =
-        List.sort (fun (_, a) (_, b) -> compare b a) bs
-        |> List.filteri (fun i _ -> i < 2) in
-      (lamp, wend, top2, List.length bs) :: acc) by_lamp_window []
-    |> List.sort compare in
-
-  (* показ: для краткости — последние 3 окна каждого шахтёра *)
-  Printf.printf "\nЛокация (top-2 маяков с сильнейшим median RSSI, последние 3 окна каждого фонаря):\n\n";
+  (* группировка по шахтёру — для удобства вывода (последние 3 окна) *)
   let by_lamp = Hashtbl.create 8 in
-  List.iter (fun (lamp, wend, top2, n) ->
+  List.iter (fun ((lamp, wend), (_, top2)) ->
     let xs = try Hashtbl.find by_lamp lamp with Not_found -> [] in
-    Hashtbl.replace by_lamp lamp ((wend, top2, n) :: xs)) top2_per_window;
+    Hashtbl.replace by_lamp lamp ((wend, top2) :: xs)) medians;
 
+  Printf.printf "\nЛокация (top-2 маяков по median RSSI, последние 3 окна каждого фонаря):\n\n";
   ["M1"; "M2"; "M3"; "M4"; "M5"] |> List.iter (fun lamp ->
     match Hashtbl.find_opt by_lamp lamp with
     | None | Some [] ->
       Printf.printf "%s: нет окон с показаниями\n\n" lamp
     | Some wins ->
-      let last3 = List.sort (fun (a,_,_) (b,_,_) -> compare b a) wins
+      let last3 = List.sort (fun (a,_) (b,_) -> compare b a) wins
                   |> List.filteri (fun i _ -> i < 3)
                   |> List.rev in
       Printf.printf "%s:\n" lamp;
-      List.iter (fun (wend, top2, n_heard) ->
+      List.iter (fun (wend, top2) ->
         Printf.printf "  окно→%3dс: " (wend / 1000);
         (match top2 with
          | [] -> Printf.printf "—\n"
@@ -270,7 +266,7 @@ let () =
                  (if i > 0 then "; " else "") beacon med x y h
              | None -> Printf.printf "%s%s %.1f dBm"
                  (if i > 0 then "; " else "") beacon med) xs;
-           if n_heard < 2 then
+           if List.length xs < 2 then
              Printf.printf "  ⚠ слышен 1 маяк — для трилатерации мало";
            print_newline ())) last3;
       print_newline ())

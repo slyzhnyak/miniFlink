@@ -81,6 +81,68 @@ let median f =
             if n mod 2 = 1 then Some (List.nth sorted (n / 2))
             else Some ((List.nth sorted (n/2 - 1) +. List.nth sorted (n/2)) /. 2.)) }
 
+(* group_by: двухуровневая агрегация. Внутри одного окна группируем
+   значения по подключу [key] и применяем [inner] к каждой группе;
+   результат — список (подключ, inner_result). Память O(числа подключей)
+   на окно, потому что нужно держать аккумулятор inner для каждой группы. *)
+let group_by (type a) (type r)
+    ~(key : a -> string)
+    ~(inner : (a, r) t) : (a, (string * r) list) t =
+  let Agg { init = inner_init; add = inner_add; finish = inner_finish } = inner in
+  Agg {
+    init = (fun () -> Hashtbl.create 8);
+    add = (fun tbl x ->
+      let k = key x in
+      let acc = match Hashtbl.find_opt tbl k with
+        | Some a -> a | None -> inner_init () in
+      Hashtbl.replace tbl k (inner_add acc x);
+      tbl);
+    finish = (fun tbl ->
+      Hashtbl.fold (fun k acc rest -> (k, inner_finish acc) :: rest) tbl []);
+  }
+
+(* top_k_by: K элементов с наибольшим [by]; сортировка по убыванию.
+   Аккумулятор — отсортированный список пар (x, by_x) длины ≤ K;
+   вставка O(K). Память O(K) на окно. *)
+let top_k_by k ~by =
+  if k <= 0 then invalid_arg "top_k_by: k должен быть > 0";
+  let insert x bx acc =
+    let rec go = function
+      | [] -> [(x, bx)]
+      | (_, by_y) :: _ as rest when bx > by_y -> (x, bx) :: rest
+      | hd :: tl -> hd :: go tl in
+    go acc in
+  let take_k lst =
+    let rec go n = function
+      | [] -> [] | _ when n = 0 -> []
+      | hd :: tl -> hd :: go (n-1) tl in
+    go k lst in
+  Agg {
+    init = (fun () -> []);
+    add = (fun acc x -> take_k (insert x (by x) acc));
+    finish = (fun acc -> List.map fst acc);
+  }
+
+(* bottom_k_by: K элементов с НАИМЕНЬШИМ [by]; сортировка по возрастанию. *)
+let bottom_k_by k ~by =
+  if k <= 0 then invalid_arg "bottom_k_by: k должен быть > 0";
+  let insert x bx acc =
+    let rec go = function
+      | [] -> [(x, bx)]
+      | (_, by_y) :: _ as rest when bx < by_y -> (x, bx) :: rest
+      | hd :: tl -> hd :: go tl in
+    go acc in
+  let take_k lst =
+    let rec go n = function
+      | [] -> [] | _ when n = 0 -> []
+      | hd :: tl -> hd :: go (n-1) tl in
+    go k lst in
+  Agg {
+    init = (fun () -> []);
+    add = (fun acc x -> take_k (insert x (by x) acc));
+    finish = (fun acc -> List.map fst acc);
+  }
+
 let to_list =
   Agg { init = (fun () -> []);
         add = (fun acc x -> x :: acc);

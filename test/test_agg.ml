@@ -108,3 +108,61 @@ let test_median () =
   check "unsorted robust" (run [10.; -5.; 0.] = Some 0.)
 
 let () = test_median ()
+
+(* ── group_by + top_k_by / bottom_k_by ──────────────────────── *)
+
+let test_group_by_basic () =
+  Printf.printf "\n-- group_by: per-subkey inner aggregate\n";
+  let xs = [("a", 1.); ("b", 5.); ("a", 3.); ("b", 10.); ("a", 2.)] in
+  let agg = Agg.group_by ~key:fst ~inner:(Agg.mean snd) in
+  let result = Agg.run agg xs in
+  let sorted = List.sort compare result in
+  check "groups: a-mean=2, b-mean=7.5"
+    (sorted = [ ("a", Some 2.0); ("b", Some 7.5) ])
+
+let test_top_k_by () =
+  Printf.printf "\n-- top_k_by: K elements by numeric projection, descending\n";
+  let xs = [("a", 3.); ("b", 7.); ("c", 1.); ("d", 9.); ("e", 5.)] in
+  let agg = Agg.top_k_by 2 ~by:snd in
+  check "top-2 by value: d=9, b=7" (Agg.run agg xs = [("d", 9.); ("b", 7.)]);
+  let agg5 = Agg.top_k_by 5 ~by:snd in
+  check "top-5 of 5: all five descending"
+    (List.map fst (Agg.run agg5 xs) = ["d"; "b"; "e"; "a"; "c"]);
+  let agg_big = Agg.top_k_by 10 ~by:snd in
+  check "k > n: returns all n" (List.length (Agg.run agg_big xs) = 5);
+  check "empty: returns []" (Agg.run agg5 [] = [])
+
+let test_bottom_k_by () =
+  Printf.printf "\n-- bottom_k_by: K elements by numeric projection, ascending\n";
+  let xs = [("a", 3.); ("b", 7.); ("c", 1.); ("d", 9.); ("e", 5.)] in
+  check "bottom-2 by value: c=1, a=3"
+    (Agg.run (Agg.bottom_k_by 2 ~by:snd) xs = [("c", 1.); ("a", 3.)]);
+  check "bottom of empty: []"
+    (Agg.run (Agg.bottom_k_by 3 ~by:snd) [] = [])
+
+let test_group_by_compose_top () =
+  Printf.printf "\n-- composition: window_agg ... group_by then post-process top_k_by\n";
+  (* реальный сценарий ex07: median per (lamp,beacon), затем top-2 *)
+  let readings = [
+    ("M1", "B1", -45.); ("M1", "B2", -52.); ("M1", "B1", -47.);
+    ("M2", "B3", -48.); ("M2", "B4", -50.); ("M2", "B3", -46.);
+  ] in
+  (* всё внутри одного агрегата: group_by по биконам, потом top_k_by *)
+  let per_miner = Agg.group_by
+    ~key:(fun (_, b, _) -> b)
+    ~inner:(Agg.median (fun (_, _, r) -> r)) in
+  (* группируем сначала по шахтёру через прогон вручную *)
+  let m1 = List.filter (fun (l, _, _) -> l = "M1") readings in
+  let m1_medians = Agg.run per_miner m1 in
+  let m1_top2 = List.sort compare (
+    Agg.run (Agg.top_k_by 2
+               ~by:(fun (_, m) -> Option.value m ~default:neg_infinity))
+            m1_medians) in
+  check "M1 top-2 medians: B1=-46 (best), B2=-52"
+    (m1_top2 = [("B1", Some (-46.)); ("B2", Some (-52.))])
+
+let () =
+  test_group_by_basic ();
+  test_top_k_by ();
+  test_bottom_k_by ();
+  test_group_by_compose_top ()
