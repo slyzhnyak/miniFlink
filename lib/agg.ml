@@ -67,6 +67,20 @@ let last =
         add = (fun _ x -> Some x);
         finish = (fun acc -> acc) }
 
+(* median: середина отсортированных значений (чётное n — среднее двух
+   средних). Аккумулятор — список всех значений: median принципиально
+   не считается инкрементально, O(n) памяти на окно неизбежен. *)
+let median f =
+  Agg { init = (fun () -> []);
+        add = (fun acc x -> f x :: acc);
+        finish = (fun acc ->
+          match List.sort compare acc with
+          | [] -> None
+          | sorted ->
+            let n = List.length sorted in
+            if n mod 2 = 1 then Some (List.nth sorted (n / 2))
+            else Some ((List.nth sorted (n/2 - 1) +. List.nth sorted (n/2)) /. 2.)) }
+
 let to_list =
   Agg { init = (fun () -> []);
         add = (fun acc x -> x :: acc);

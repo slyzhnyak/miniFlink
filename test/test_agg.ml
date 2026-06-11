@@ -97,3 +97,14 @@ let () =
   test_map_contramap ();
   test_window_agg ();
   Printf.printf "\nAll aggregator tests passed.\n"
+
+let test_median () =
+  Printf.printf "\n-- median\n";
+  let run vals = Agg.run (Agg.median (fun x -> x)) vals in
+  check "odd count: middle" (run [3.; 1.; 2.] = Some 2.);
+  check "even count: mean of middles" (run [4.; 1.; 3.; 2.] = Some 2.5);
+  check "single" (run [7.] = Some 7.);
+  check "empty -> None" (run [] = None);
+  check "unsorted robust" (run [10.; -5.; 0.] = Some 0.)
+
+let () = test_median ()
