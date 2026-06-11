@@ -290,4 +290,10 @@
  (libraries unix)
  (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_ex07_smoke)
- (deps ../examples/ex07_location.exe))
+ (deps ../examples/ex07_location/ex07_location.exe))
+
+(test
+ (name test_ex07_lib)
+ (libraries miniflink ex07_location_lib)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
+ (modules test_ex07_lib))

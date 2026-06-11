@@ -1,0 +1,19 @@
+; Пример 7 — структурирован как реальный сервис:
+;   - library `ex07_location_lib` содержит ядро (Domain, Pipelines,
+;     Mock_source, Mock_sink, типы Source/Sink) — переиспользуется
+;     бенчмарками и regression-тестами;
+;   - executable `ex07_location` — тонкая топология «source → пайплайны → sink».
+;
+; Дав имя library, мы можем `open Ex07_location_lib` в bench/ и test/.
+
+(library
+ (name ex07_location_lib)
+ (libraries miniflink)
+ (modules domain mock_source mock_sink pipelines)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70)))
+
+(executable
+ (name ex07_location)
+ (libraries miniflink ex07_location_lib)
+ (modules ex07_location)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70)))

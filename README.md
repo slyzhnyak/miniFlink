@@ -17,7 +17,7 @@ Apache Flink **на одном узле**. Акцент — на чистоте 
 operators, exactly-once (end-to-end: offset, 2PC sink, recovery, durable),
 table/join с TTL (+ temporal as-of join), union потоков, retractions — плюс production-слои
 (DLQ + retry/backoff, graceful shutdown, Prometheus metrics, структурированные
-логи, health, config, RocksDB state). ~4100 строк OCaml, 48 тест-сюит.
+логи, health, config, RocksDB state). ~4100 строк OCaml, 49 тест-сюит.
 
 ## Почему декларативно
 
@@ -99,7 +99,7 @@ variants/            — реализации channel/parallel по версии
 bin/    main.ml        демо pipeline
 examples/              самодостаточные примеры (см. examples/README.md)
 bench/  bench.ml bench_parallel.ml
-test/   48 тест-сюит (core, props, invariants, reliability, metrics,
+test/   49 тест-сюит (core, props, invariants, reliability, metrics,
                      retract, sliding, count_window, session_window,
                      global_window, window_fold, agg, union, safe, parallel_retract,
                      side_output, ttl_state, nexmark, watermark_fuzz, timers,
@@ -108,7 +108,7 @@ test/   48 тест-сюит (core, props, invariants, reliability, metrics,
                      determinism, watermark, idle_watermark, table_ttl,
                      checkpoint_parallel, rocksdb, codec, channel,
                      window_validation, log, health_config, retry,
-                     schema, backpressure, queue_depth, ex07_smoke)
+                     schema, backpressure, queue_depth, ex07_smoke, ex07_lib)
 ```
 
 ### Практика: каждый найденный баг → тест
@@ -184,7 +184,7 @@ dune exec examples/ex03_windows.exe   # четыре типа окон
 dune exec examples/ex04_mine.exe      # комплексная топология (шахта)
 dune exec examples/ex05_fleet.exe     # production-путь: EO+recovery, Agg, safe_map, schema
 dune exec examples/ex06_topology.exe  # модель исполнения B+C: merge+fan_out+supervisor
-dune exec examples/ex07_location.exe  # локация шахтёра: median RSSI, sliding, top-2 + координаты
+dune exec examples/ex07_location/ex07_location.exe  # локация шахтёра: median RSSI, sliding, top-2 + координаты
 
 # Бенчмарки
 dune exec bench/bench.exe
@@ -240,7 +240,7 @@ Channel overhead: ~106 нс/msg (Mutex+Condition).
 | Graceful Shutdown           | ✓ реализовано (SIGTERM/INT)   |
 | Prometheus Metrics          | ✓ реализовано (HTTP :9090)    |
 | Изоляция исключений         | ✓ safe_map / safe_filter (битое событие → on_error, не падение) |
-| Unit + Property тесты       | ✓ 48 сюит, QCheck-инварианты  |
+| Unit + Property тесты       | ✓ 49 сюит, QCheck-инварианты  |
 | CI                          | ⚠ workflow написан (docs/ci/ci.yml: сборка + тесты на OCaml 4.14/5.2), но НЕ активен: токен автоматизации без workflow-scope не может пушить в .github/workflows/ — скопируйте файл туда вручную |
 | Exactly-once parallel       | ✓ реализовано (barrier + snapshot) |
 | Exactly-once end-to-end     | ✓ offset + 2PC sink + recovery + durable (E2E recovery harness: kill→recover→output совпадает) |

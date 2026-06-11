@@ -31,10 +31,10 @@ let () =
   Printf.printf "==========================================\n";
   (* dune test устанавливает CWD в _build/default — example рядом *)
   let candidates = [
-    "./examples/ex07_location.exe";
-    "../examples/ex07_location.exe";
-    "../../examples/ex07_location.exe";
-    "_build/default/examples/ex07_location.exe";
+    "./examples/ex07_location/ex07_location.exe";
+    "../examples/ex07_location/ex07_location.exe";
+    "../../examples/ex07_location/ex07_location.exe";
+    "_build/default/examples/ex07_location/ex07_location.exe";
   ] in
   let exe = match List.find_opt Sys.file_exists candidates with
     | Some p -> p
@@ -66,7 +66,7 @@ let () =
   check "duplicate counter shown" (contains out "дублей (тот же lamp+ts)");
 
   (* Ретрактов > 0 (опоздавшие пакеты сработали) *)
-  check "retract counter shown" (contains out "ретракций (пересчётов окон)");
+  check "retract counter shown" (contains out "ретракций окон");
 
   (* Регресс-тест: late пакет с moving=true НЕ должен сдвигать
      last_moving назад во времени. Для M2: последний реальный
