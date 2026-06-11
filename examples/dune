@@ -1,4 +1,4 @@
 (executables
- (names ex01_minimal ex02_alerts ex03_windows ex04_mine ex05_fleet ex06_topology)
+ (names ex01_minimal ex02_alerts ex03_windows ex04_mine ex05_fleet ex06_topology ex07_location)
  (libraries miniflink)
  (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70)))
