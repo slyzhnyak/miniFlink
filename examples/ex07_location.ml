@@ -56,6 +56,10 @@ type packet = {
 
 type reading = { r_lamp : string; r_beacon : string; r_rssi : float; r_ts : Time.t }
 
+(* Ключ-модуль по фонарю — нужен И для dedup в пайплайне локации,
+   И для process_keyed в пайплайне алертов (объявлен один раз). *)
+module ByLamp = Keyed.Make (struct type t = packet let key p = p.lamp end)
+
 (* справочник маяков: ID → (x, y, горизонт) *)
 let beacons = [
   "B1", (120.0,  40.0, -160);
@@ -155,28 +159,79 @@ let packets =
     List.init steps (fun i ->
       List.filter_map (fun l -> packets_for l i) ["M1"; "M2"; "M3"; "M4"; "M5"; "M6"])
     |> List.concat in
-  (* опоздавший пакет M1 c ts=180с, вставленный после ts≈225с *)
-  let late = { lamp = "M1"; ts = seconds 180;
-               readings = [ "B1", -44.; "B2", -53. ];
-               voltage = m1_voltage 12; moving = true; sos = false } in
-  let before, after = List.partition (fun p -> p.ts <= seconds 225) base in
-  before @ [late] @ after
+
+  (* ── ОПОЗДАВШИЕ ПАКЕТЫ ─────────────────────────────────────────
+     Реальный канал отдаёт пакеты с задержкой (UDP не гарантирует
+     порядок, шахта — слабый эфир). Вставляем 4 пакета от разных
+     шахтёров; чтобы получить РЕТРАКТЫ (а не просто попасть в ещё
+     открытое окно), опоздание должно быть >= размера окна (60с).
+     allowed_lateness=60с даёт коридор «закрылось, но ещё можно
+     пересчитать». Одно событие в окне попадает в 12 sliding-окон
+     (60/5), поэтому каждый опоздавший => ~12 ретрактов. *)
+  let late_packets = [
+    (* M1: ts=118с приходит после ts=210с (опоздание 92с) *)
+    seconds 210, { lamp = "M1"; ts = seconds 118;
+                   readings = [ "B1", -44.; "B2", -53. ];
+                   voltage = m1_voltage 8; moving = true; sos = false };
+    (* M2: ts=88с приходит после ts=180с (опоздание 92с) *)
+    seconds 180, { lamp = "M2"; ts = seconds 88;
+                   readings = [ "B3", -49.; "B4", -51.; "B5", -73. ];
+                   voltage = 4.0; moving = true; sos = false };
+    (* M3: опоздавший пакет С ПОКАЗАНИЯМИ (восстанавливающий) *)
+    seconds 165, { lamp = "M3"; ts = seconds 73;
+                   readings = [ "B1", -62. ]; voltage = 4.0;
+                   moving = true; sos = false };
+    (* M6: ts=33с после ts=120с (опоздание 87с) *)
+    seconds 120, { lamp = "M6"; ts = seconds 33;
+                   readings = [ "B3", -64. ];
+                   voltage = 3.3; moving = true; sos = false };
+  ] in
+
+  (* ── ДУБЛИ ─────────────────────────────────────────────────────
+     Kafka at-least-once гарантирует «не потеряем», но НЕ
+     гарантирует «не доставим дважды» (retry, ребалансировка). Тот
+     же (lamp, ts) приходит повторно. Pipe.dedup в пайплайне локации
+     это отфильтрует ДО окна — иначе дубль исказил бы median.
+     Алерты к дублям устойчивы естественно (Last_seen обновится на
+     то же значение, SOS-флаг уже выставлен). *)
+  let dup_of lamp i = match packets_for lamp i with
+    | Some p -> [p; p]    (* пакет и его дубль *)
+    | None -> [] in
+  let duplicates =
+    dup_of "M1" 5 @     (* M1 на ts=75с *)
+    dup_of "M2" 10 @    (* M2 на ts=150с *)
+    dup_of "M4" 12 @    (* M4 на ts=180с *)
+    dup_of "M6" 6       (* M6 на ts=90с — дубль уже опоздавшего! *)
+  in
+
+  (* Сборка: вставить опоздавшие в правильные точки потока,
+     добавить дубли (они в основной части — дубль "сразу за оригиналом") *)
+  let with_late =
+    List.fold_left (fun acc (insert_after, late) ->
+      let before, after = List.partition (fun p -> p.ts <= insert_after) acc in
+      before @ [late] @ after) base late_packets in
+  with_late @ duplicates
 
 (* ── median RSSI по шахтёр×маяк, скользящее окно 60s/5s ───── *)
 
 (* Пайплайн локации (декларативный):
+   dedup по (шахтёр, ts) ДО окна — at-least-once канал может отдать
+   тот же пакет дважды, без dedup дубль исказил бы median →
    окно по ШАХТЁРУ → внутри окна group_by бикон → median RSSI на бикон
    → top_k_by 2 по медиане. Результат на окно: (шахтёр, top-2 биконов
-   с их медианами). Замена ручному Hashtbl-Hashtbl-сорт-filteri. *)
+   с их медианами). *)
 let median_rssi source =
   source
+  |> Pipe.dedup (module ByLamp)
+       ~rule:(fun p -> string_of_int p.ts)
+       ~cooldown:(seconds 120)
   |> Pipe.flat_map (fun p ->
        List.map (fun (b, rssi) ->
          { r_lamp = p.lamp; r_beacon = b; r_rssi = rssi; r_ts = p.ts })
          p.readings)
   |> Pipe.event_time ~lateness:(seconds 1)
   |> Pipe.window_agg_keyed ~by:(fun r -> r.r_lamp)
-       ~allowed_lateness:(seconds 30)
+       ~allowed_lateness:(seconds 60)
        (Pipe.sliding (seconds 60) (seconds 5))
        Agg.(
          group_by
@@ -228,8 +283,6 @@ let median_rssi source =
    last_sos: false→true. Зажатая кнопка — один алерт; отпустил и
    нажал снова — два события.
    ════════════════════════════════════════════════════════════════ *)
-
-module ByLamp = Keyed.Make (struct type t = packet let key p = p.lamp end)
 
 type alert =
   | No_packets   of string * Time.t option   (* пакетов нет >2 мин *)
@@ -485,6 +538,14 @@ let () =
        | Sos (lamp, t) ->
          Printf.printf "  🆘 %s: НАЖАТА КНОПКА SOS (t=%dс)\n" lamp (t/1000)) alerts);
 
+  (* Краткая статистика входного потока — для прозрачности теста *)
+  let n_total = List.length packets in
+  let n_unique = List.length (List.sort_uniq
+    (fun a b -> compare (a.lamp, a.ts) (b.lamp, b.ts)) packets) in
+  let n_dups = n_total - n_unique in
+  Printf.printf "\nВход: %d пакетов всего, из них %d дублей (тот же lamp+ts)\n"
+    n_total n_dups;
+
   (* окна median + подсчёт ретракций *)
   let win_events =
     Mf_event.of_list ~ts:(fun p -> p.ts) packets
@@ -493,7 +554,7 @@ let () =
   let retracts = List.length (List.filter
     (function Mf_event.Retract _ -> true | _ -> false) win_events) in
   if retracts > 0 then
-    Printf.printf "\nОпоздавшие пакеты: ретракций (пересчётов окон): %d\n" retracts;
+    Printf.printf "Опоздавшие пакеты: ретракций (пересчётов окон): %d\n" retracts;
 
   (* финальные значения окон (после ретрактов) — теперь окно сразу
      даёт top-2 биконов с их медианами для каждого шахтёра. *)
