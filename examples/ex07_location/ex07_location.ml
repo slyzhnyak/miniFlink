@@ -3,7 +3,7 @@
     Тонкий файл. Вся работа — в модулях:
     {ul
     {- {!Domain}        — типы [packet], [alert], [location], пороги, справочник маяков}
-    {- {!Mock_source}   — мок-источник «как Kafka»: {!Mock_source.With_channel_jitter}}
+    {- {!Mock_source}   — мок-источник «как Kafka»: {!Mock_source.Default}}
     {- {!Pipelines}     — ядро: [median_rssi] (локация) и [connectivity_alerts] (FSM)}
     {- {!Mock_sink}     — мок-sink: рендеринг алертов и локаций в stdout}}
 
@@ -19,7 +19,7 @@ let () =
   Printf.printf "=== Локация шахтёров по маякам ===\n";
 
   (* ── Источник: «kafka topic» с лёгким дрожанием канала ─────── *)
-  let module Src = Mock_source.With_channel_jitter in
+  let module Src = Mock_source.Default in
 
   section "Контроль состояния шахтёра:";
   Src.read ()

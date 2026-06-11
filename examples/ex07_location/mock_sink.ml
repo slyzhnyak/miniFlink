@@ -46,8 +46,12 @@ let publish_alerts (alerts : alert Mf_event.t Stream.t) : unit =
 
 (** {2 Локации — компактный вывод последних 3 окон каждого шахтёра} *)
 
-(** Отрендерить одну локацию в одну строку. *)
-let publish_location (loc : location) : unit =
+(** Отрендерить одну локацию в одну строку.
+
+    [~beacon_coords] — функция поиска координат маяка. По умолчанию
+    {!Domain.beacon_coords} (справочник из 5 биконов для базового
+    сценария). Большая шахта (1024 биконов) подаёт свою функцию. *)
+let publish_location ?(beacon_coords = beacon_coords) (loc : location) : unit =
   Printf.printf "  окно→%3dс: " (loc.loc_wend / 1000);
   match loc.loc_top2 with
   | [] -> Printf.printf "—\n"
@@ -71,8 +75,16 @@ let publish_location (loc : location) : unit =
 
     Семантически это «снимок состояния пульта в момент завершения
     смены». В проде Kafka_sink публикует {e каждое} обновление окна
-    (включая ретракты), а консьюмер слева их применяет. *)
-let publish_locations (locations : location Mf_event.t Stream.t) : unit =
+    (включая ретракты), а консьюмер слева их применяет.
+
+    [~miners] — список шахтёров, для которых печатать вывод. По
+    умолчанию M1..M6 (для базового сценария ex07). Большая шахта
+    подаёт свой список (но обычно бенчмарк всё равно использует
+    {!publish_alerts_summary}, а не покадровый вывод). *)
+let publish_locations
+    ?(beacon_coords = beacon_coords)
+    ?(miners = ["M1"; "M2"; "M3"; "M4"; "M5"; "M6"])
+    (locations : location Mf_event.t Stream.t) : unit =
   let materialized =
     locations
     |> Pipe.materialize ~by:(fun loc _wend -> (loc.loc_lamp, loc.loc_wend)) in
@@ -81,7 +93,7 @@ let publish_locations (locations : location Mf_event.t Stream.t) : unit =
     let prev = try Hashtbl.find by_lamp lamp with Not_found -> [] in
     Hashtbl.replace by_lamp lamp ((wend, loc.loc_top2) :: prev)
   ) materialized;
-  ["M1"; "M2"; "M3"; "M4"; "M5"; "M6"] |> List.iter (fun lamp ->
+  miners |> List.iter (fun lamp ->
     match Hashtbl.find_opt by_lamp lamp with
     | None | Some [] ->
       Printf.printf "%s: нет окон с показаниями\n\n" lamp
@@ -91,7 +103,8 @@ let publish_locations (locations : location Mf_event.t Stream.t) : unit =
                   |> List.rev in
       Printf.printf "%s:\n" lamp;
       List.iter (fun (wend, top2) ->
-        publish_location { loc_lamp = lamp; loc_wend = wend; loc_top2 = top2 }
+        publish_location ~beacon_coords
+          { loc_lamp = lamp; loc_wend = wend; loc_top2 = top2 }
       ) last3;
       print_newline ())
 

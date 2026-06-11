@@ -24,16 +24,19 @@ let () =
   } in
   check "Domain.packet constructible" (p.lamp = "TestMiner");
 
-  (* Источник Clean — для бенчмарков (стабильная нагрузка) *)
-  let clean_pkts = Mock_source.base_packets () in
-  check "Clean source produces packets" (List.length clean_pkts > 100);
-  check "Clean source has 6 miners" (
+  (* base_packets — низкоуровневый слой без аномалий канала.
+     Не предназначен для бенчмарков! (бенчмарк должен включать late+dups
+     чтобы отражать прод-нагрузку). Здесь используется только для
+     проверки, что низкоуровневый API экспортируется. *)
+  let base_pkts = Mock_source.base_packets () in
+  check "base_packets produces packets" (List.length base_pkts > 100);
+  check "base_packets has 6 miners" (
     let miners = List.sort_uniq compare
-      (List.map (fun (p : Domain.packet) -> p.lamp) clean_pkts) in
+      (List.map (fun (p : Domain.packet) -> p.lamp) base_pkts) in
     List.length miners = 6);
 
-  (* Источник With_channel_jitter — для regression *)
-  let module Src = Mock_source.With_channel_jitter in
+  (* Источник Default — реалистичный, для regression *)
+  let module Src = Mock_source.Default in
   let stats = Src.stats () in
   check "Jittered source has stats" (List.length stats >= 2);
 
