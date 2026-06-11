@@ -68,6 +68,14 @@ let () =
   (* Ретрактов > 0 (опоздавшие пакеты сработали) *)
   check "retract counter shown" (contains out "ретракций (пересчётов окон)");
 
+  (* Регресс-тест: late пакет с moving=true НЕ должен сдвигать
+     last_moving назад во времени. Для M2: последний реальный
+     moving=true был на t=105с (i=7, t < 120с). Late пакет M2@88
+     с moving=true приходит после — БЕЗ фикса last_moving стало 88с,
+     и алерт показывал t=88с вместо t=105с. *)
+  check "late moving=true does NOT regress last_moving (M2)"
+    (contains out "M2: НЕ ДВИЖЕТСЯ >2 мин (последнее движение t=105с)");
+
   (* Локация показывает координаты *)
   check "coordinates rendered" (contains out "x=120 y=40 h=-160м");
 
