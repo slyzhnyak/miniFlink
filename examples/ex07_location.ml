@@ -142,60 +142,156 @@ let median_rssi source =
                    match med with Some m -> Some (b, m) | None -> None)
               |> Agg.run (top_k_by 2 ~by:snd)))
 
-(* ── Два алерта на process_keyed ──────────────────────────── *)
+(* ════════════════════════════════════════════════════════════════
+   КОНТРОЛЬ СВЯЗИ — три явных слоя
+
+   Простой автомат «всё в порядке → нет показаний → нет пакетов»
+   на одного шахтёра. В одной куче `ref`-ов он читается тяжело,
+   потому что смешаны три разные заботы. Здесь они разделены:
+
+     Слой 1. last_seen — ЧТО ИЗВЕСТНО (хранилище фактов о шахтёре)
+     Слой 2. Self_timer — КОГДА ПРОВЕРИТЬ (управление одним
+              event-таймером с переменной целью)
+     Слой 3. Fsm        — ЧТО ДЕЛАТЬ (чистая функция перехода,
+              без таймеров и побочных эффектов)
+
+   process_keyed снизу — только клей: «событие → обновили факты,
+   переcчитали таймер; таймер → спросили автомат, эмитнули при
+   изменении состояния, перепланировали».
+
+   Слои не специфичны для нашей задачи — last_seen и Self_timer
+   полезны в любой heartbeat-логике. Если в репо появятся другие
+   подобные автоматы, они могут вытащиться в библиотеку; пока
+   такого случая нет, абстракции живут локально в примере.
+   ════════════════════════════════════════════════════════════════ *)
 
 module ByLamp = Keyed.Make (struct type t = packet let key p = p.lamp end)
 
 type alert = No_packets of string * Time.t option   (* нет пакетов >2 мин *)
            | No_readings of string * Time.t option  (* пакеты есть, маяков нет *)
 
+(* ─── Слой 1: last_seen ───────────────────────────────────────────
+   ХРАНИЛИЩЕ ФАКТОВ. Когда последний раз приходил пакет от шахтёра
+   и когда последний раз пакет содержал показания маяков. Это
+   единственная мутабельная структура, владеющая «временной памятью»
+   о шахтёре. Любая heartbeat-логика начинается с такой записи. *)
+module Last_seen = struct
+  type t = { mutable any : Time.t option;       (* любой пакет *)
+             mutable with_readings : Time.t option }  (* пакет с показаниями *)
+
+  let make () = { any = None; with_readings = None }
+
+  (** Зарегистрировать пришедший пакет: обновить «последний любой»,
+      а если он содержит показания — и «последний с показаниями». *)
+  let record t ~ts ~has_readings =
+    t.any <- Some ts;
+    if has_readings then t.with_readings <- Some ts
+end
+
+(* ─── Слой 2: Self_timer ──────────────────────────────────────────
+   ТАЙМЕР С ПЕРЕМЕННОЙ ЦЕЛЬЮ. process_keyed даёт сырой API
+   set_event_timer / cancel_event_timer, и идентичность таймера —
+   пара (key, time). Когда нужен «один логический таймер, который
+   двигается вперёд», легко прислать два set с одинаковым временем
+   (Set сольёт их) или забыть отменить старый. Этот слой инкапсулирует
+   правильный паттерн: храним актуальную цель, при reschedule сначала
+   отменяем старую если она другая, потом ставим новую. *)
+module Self_timer = struct
+  type t = { mutable target : Time.t option }
+
+  let make () = { target = None }
+
+  (** Поставить event-таймер на [target], сняв предыдущий если он был
+      и указывал на другое время. Идемпотентно по [target]. *)
+  let reschedule t (ctx : alert Pipe.ctx) ~target =
+    (match t.target with
+     | Some old when old <> target -> ctx.cancel_event_timer old
+     | _ -> ());
+    t.target <- Some target;
+    ctx.set_event_timer target
+
+  (** Отметить, что таймер сработал и больше не активен. Вызывается
+      в начале on_timer, чтобы reschedule знал, что отменять нечего. *)
+  let consumed t = t.target <- None
+end
+
+(* ─── Слой 3: Fsm ────────────────────────────────────────────────
+   ЧИСТЫЙ АВТОМАТ. Принимает факты о шахтёре и текущее время,
+   возвращает желаемое состояние алерта. Никаких ref, никаких
+   таймеров, никаких эмиссий — только функция. Тестируется
+   изолированно, переходы видны как `if/else`. *)
+module Fsm = struct
+  type state = Ok | No_readings | No_packets
+
+  (** Чистая функция перехода. По времени [now] и последним фактам
+      решить, в каком состоянии находится шахтёр.
+      Порядок проверок отражает приоритет: «нет пакетов» строже
+      «нет показаний» (если нет ни одного пакета — нет и показаний). *)
+  let state_at ~now (s : Last_seen.t) : state =
+    let exhausted ~since ~threshold = match since with
+      | None -> true
+      | Some t -> now - t >= threshold in
+    if exhausted ~since:s.any ~threshold:no_readings_threshold then No_packets
+    else if exhausted ~since:s.with_readings ~threshold:silence_threshold then No_readings
+    else Ok
+
+  (** Когда автомат сможет в СЛЕДУЮЩИЙ раз поменять состояние —
+      то есть когда стоит запланировать таймер. Минимум из двух
+      порогов от соответствующих last-времён; если факта нет, порог
+      «уже истёк», берём 0 в худшем случае. *)
+  let next_check (s : Last_seen.t) : Time.t =
+    let after since threshold = (Option.value since ~default:0) + threshold in
+    min (after s.any no_readings_threshold)
+        (after s.with_readings silence_threshold)
+end
+
+(* ─── Клей: process_keyed связывает три слоя ─────────────────────
+   on_event: обновили факты, пересчитали таймер до ближайшего порога.
+   on_timer: спросили автомат о новом состоянии; если изменилось —
+             эмитнули алерт. Перепланировали таймер, иначе вторая
+             эскалация «нет показаний → нет пакетов» не сработает. *)
+
+type per_lamp = {
+  seen        : Last_seen.t;
+  timer       : Self_timer.t;
+  mutable last_alert : Fsm.state;
+}
+
+let make_state () = {
+  seen = Last_seen.make ();
+  timer = Self_timer.make ();
+  last_alert = Fsm.Ok;
+}
+
+let emit_for_state ctx key seen = function
+  | Fsm.No_packets  -> ctx.Pipe.emit (No_packets  (key, seen.Last_seen.any))
+  | Fsm.No_readings -> ctx.Pipe.emit (No_readings (key, seen.Last_seen.with_readings))
+  | Fsm.Ok          -> ()
+
 let connectivity_alerts source =
   source
   |> Pipe.event_time ~lateness:(seconds 1)
   |> Pipe.process_keyed (module ByLamp)
-       ~init:(fun () -> (ref None, ref None, ref None, ref `Ok))
-         (* (last_packet_ts, last_reading_ts, current_timer_ts, last_alert) *)
-       ~on_event:(fun ctx _key (last_pkt, last_rd, cur_timer, last_alert) p ->
-         last_pkt := Some p.ts;
-         if p.readings <> [] then begin
-           last_rd := Some p.ts;
-           last_alert := `Ok       (* показания вернулись — сбросить алерт *)
+       ~init:make_state
+       ~on_event:(fun ctx _key st p ->
+         Last_seen.record st.seen ~ts:p.ts ~has_readings:(p.readings <> []);
+         (* Возврат показаний сбрасывает состояние алерта: если шахтёр
+            снова слышит маяки, прошлое «no_readings» больше не актуально *)
+         if p.readings <> [] then st.last_alert <- Fsm.Ok;
+         Self_timer.reschedule st.timer ctx ~target:(Fsm.next_check st.seen))
+       ~on_timer:(fun ctx key st _t _kind ->
+         Self_timer.consumed st.timer;
+         let now_state = Fsm.state_at ~now:_t st.seen in
+         if now_state <> st.last_alert then begin
+           st.last_alert <- now_state;
+           emit_for_state ctx key st.seen now_state
          end;
-         let t_pkt = p.ts + no_readings_threshold in
-         let t_rd  = (match !last_rd with Some t -> t | None -> p.ts) + silence_threshold in
-         let next  = min t_pkt t_rd in
-         (match !cur_timer with
-          | Some t when t <> next -> ctx.Pipe.cancel_event_timer t
-          | _ -> ());
-         cur_timer := Some next;
-         ctx.Pipe.set_event_timer next)
-       ~on_timer:(fun ctx key (last_pkt, last_rd, cur_timer, last_alert) t _kind ->
-         cur_timer := None;
-         let exhausted_pkt = match !last_pkt with
-           | Some lp -> t >= lp + no_readings_threshold | None -> true in
-         let exhausted_rd = match !last_rd with
-           | Some lr -> t >= lr + silence_threshold | None -> true in
-         let new_alert : [ `Ok | `No_packets | `No_readings ] =
-           if exhausted_pkt then `No_packets
-           else if exhausted_rd then `No_readings
-           else `Ok in
-         if new_alert <> !last_alert then begin
-           last_alert := new_alert;
-           (match new_alert with
-            | `No_packets -> ctx.Pipe.emit (No_packets (key, !last_pkt))
-            | `No_readings -> ctx.Pipe.emit (No_readings (key, !last_rd))
-            | `Ok -> ())
-         end;
-         (* перепланировать следующий горизонт, иначе таймер больше не
-            проверится — мы потеряем эскалацию «нет показаний → нет пакетов» *)
-         let next_rd  = (match !last_rd with Some t -> t | None -> 0) + silence_threshold in
-         let next_pkt = (match !last_pkt with Some t -> t | None -> 0) + no_readings_threshold in
-         let next = if t < next_rd then min next_rd next_pkt
-                    else next_pkt in
-         if next > t then begin
-           cur_timer := Some next;
-           ctx.Pipe.set_event_timer next
-         end)
+         (* Перепланировать на следующую возможную смену состояния —
+            без этого эскалация «нет показаний → нет пакетов» не
+            сработает: один таймер сгорел, новый никто не поставил *)
+         let next = Fsm.next_check st.seen in
+         if next > _t then
+           Self_timer.reschedule st.timer ctx ~target:next)
 
 (* ── Сборка сервиса ───────────────────────────────────────── *)
 
