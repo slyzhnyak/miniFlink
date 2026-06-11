@@ -314,12 +314,34 @@ module Last_seen = struct
   }
 
   (** Зарегистрировать пришедший пакет. Возвращает [`Sos_pressed] если
-      это переход кнопки false→true (импульс) — клей сразу эмитит SOS. *)
+      это переход кнопки false→true (импульс) — клей сразу эмитит SOS.
+
+      {b Монотонность}: поля [any], [with_readings], [moving] — это
+      «время ПОСЛЕДНЕГО события данного типа». Late пакет (доставлен
+      после более свежего) не должен сдвигать их назад во времени —
+      иначе теряем уже зафиксированный «свежий» факт. Проверяем
+      [p.ts > current] перед каждым обновлением.
+
+      [voltage] — текущее значение АКТУАЛЬНОЕ для самого свежего пакета.
+      Late с более старым ts не перетирает: если у нас есть данные с
+      ts=200с, late с ts=88с не «новее» и его voltage не «текущее».
+
+      [suspect_low_since] — anchor «когда впервые упало». Без late он и
+      так не сбрасывается без возврата выше [voltage_ok_threshold];
+      late с V<low который пришёл, когда anchor уже зафиксирован, —
+      игнорируется (anchor остаётся ранее установленным; это вариант
+      (a) — отсчёт debounce от первого виденного падения). *)
   let record t ~p : [ `Sos_pressed | `Quiet ] =
-    t.any <- Some p.ts;
-    if p.readings <> [] then t.with_readings <- Some p.ts;
-    if p.moving        then t.moving        <- Some p.ts;
-    t.voltage <- Some p.voltage;
+    let bumps_max old_v = match old_v with
+      | None -> true
+      | Some t' -> p.ts > t' in
+    let was_freshest = bumps_max t.any in   (* СОХРАНЯЕМ до мутации *)
+    if was_freshest then t.any <- Some p.ts;
+    if p.readings <> [] && bumps_max t.with_readings then
+      t.with_readings <- Some p.ts;
+    if p.moving && bumps_max t.moving then t.moving <- Some p.ts;
+    if was_freshest || t.voltage = None then
+      t.voltage <- Some p.voltage;
     (* Гистерезис: V<low входит в подозрение (если ещё не было);
        V>ok выходит из подозрения. Между low и ok не меняем. *)
     if p.voltage < low_voltage_threshold && t.suspect_low_since = None then
