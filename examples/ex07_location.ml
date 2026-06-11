@@ -90,15 +90,17 @@ let voltage_debounce      = minutes 2   (* сколько держать под�
    M5 (-160м): шлёт пакеты до t=100с, потом замолкает (алерт A).
 
    Сценарии диагностики:
-   - M1: батарея садится — V плавно падает с 4.0 до 3.3В к концу;
+   - M1: батарея садится — V плавно падает с 4.0 до 3.2 В к концу;
          двигается всегда; SOS нет → ожидается Low_voltage с debounce.
-   - M2: двигается до t=120с, потом стоит на месте → No_motion ~t=720с.
-         НО симуляция кончается раньше (360с), специально занижу до 2 мин.
+   - M2: двигается до t=120с, потом стоит на месте → No_motion.
    - M3: всё хорошо по бортовым датчикам (V=4.0, двигается), но
          маяки не слышит после t=20с.
    - M4: нажимает SOS на t=120с (один импульс) → Sos.
-   - M5: исчезает на t=100с → No_packets (по бортовым датчикам ничего
-         не успеваем сказать). *)
+   - M5: исчезает на t=100с → No_packets.
+   - M6: ВСЁ СРАЗУ — пакеты идут (чтобы не подавило motion/voltage),
+         НО маяков не слышит после t=30с, не двигается после t=120с,
+         напряжение низкое с самого начала (V=3.3), SOS на t=45с.
+         Демонстрирует независимость четырёх FSM-сигналов. *)
 let noise i k = float_of_int ((i * 7 + k * 13) mod 9) -. 4.0   (* −4..+4 dB *)
 
 let steps = 25                              (* t = 0, 15, ..., 360с *)
@@ -136,12 +138,22 @@ let packets_for lamp i =
     if i * 15 <= 100
     then Some { default with readings = [ "B2", -50. +. noise i 13 ] }
     else None                                     (* фонарь замолк *)
+  | "M6" ->
+    (* Все четыре проблемы одновременно. Пакеты идут до конца, чтобы
+       contact-FSM не подавил motion/voltage. *)
+    Some { lamp; ts = t;
+           readings = if t <= seconds 30
+                      then [ "B3", -65. +. noise i 14 ]   (* слышит до 30с *)
+                      else [];                            (* потом пусто *)
+           voltage  = 3.3;                          (* всегда ниже порога *)
+           moving   = (t < seconds 120);            (* стоит после 120с *)
+           sos      = (t = seconds 45) }            (* SOS один раз *)
   | _ -> None
 
 let packets =
   let base =
     List.init steps (fun i ->
-      List.filter_map (fun l -> packets_for l i) ["M1"; "M2"; "M3"; "M4"; "M5"])
+      List.filter_map (fun l -> packets_for l i) ["M1"; "M2"; "M3"; "M4"; "M5"; "M6"])
     |> List.concat in
   (* опоздавший пакет M1 c ts=180с, вставленный после ts≈225с *)
   let late = { lamp = "M1"; ts = seconds 180;
@@ -361,6 +373,13 @@ type per_lamp = {
   mutable last_contact : Fsm.contact_state;
   mutable last_motion  : Fsm.motion_state;
   mutable last_voltage : Fsm.voltage_state;
+  mutable max_now      : Time.t;
+    (* Высшее значение now (event-time), при котором уже проверяли FSM.
+       Защищает от регресса: таймер может сработать с временем меньше
+       уже виденного ts события (например, voltage_debounce=120000
+       сработал на wm=224000 после пакета ts=225000). На «прошедшие»
+       времена FSM пересчитывать бессмысленно — состояние, посчитанное
+       на now=225000, уже учло факты на момент 120000. *)
 }
 
 let make_state () = {
@@ -369,12 +388,20 @@ let make_state () = {
   last_contact = Fsm.Contact_ok;
   last_motion  = Fsm.Motion_ok;
   last_voltage = Fsm.V_ok;
+  max_now      = min_int;
 }
 
 (** Сравнить три FSM с прошлыми состояниями, эмитнуть алерты на
     переходах. Voltage_ok эмитим как явное «вернулось в норму».
-    V_suspect — внутренний, не эмитим. *)
+    V_suspect — внутренний, не эмитим.
+    Если [now] меньше уже виденного max_now — не делаем ничего: это
+    запоздалая проверка таймера на момент в прошлом, состояние на этот
+    момент уже учтено в предыдущем check (FSM монотонна по фактам,
+    которые на тот момент уже знали). *)
 let check_and_emit ctx key st ~now =
+  if now <= st.max_now then ()
+  else begin
+  st.max_now <- now;
   let c = Fsm.contact_state ~now st.seen in
   if c <> st.last_contact then begin
     st.last_contact <- c;
@@ -397,6 +424,7 @@ let check_and_emit ctx key st ~now =
     | Fsm.V_low, Some volts -> ctx.Pipe.emit (Low_voltage (key, volts))
     | Fsm.V_ok, _           -> ctx.Pipe.emit (Voltage_ok key)
     | Fsm.V_suspect, _ | Fsm.V_low, None -> ()
+  end
   end
 
 let connectivity_alerts source =
@@ -480,7 +508,7 @@ let () =
     Hashtbl.replace by_lamp lamp ((wend, top2) :: xs)) medians;
 
   Printf.printf "\nЛокация (top-2 маяков по median RSSI, последние 3 окна каждого фонаря):\n\n";
-  ["M1"; "M2"; "M3"; "M4"; "M5"] |> List.iter (fun lamp ->
+  ["M1"; "M2"; "M3"; "M4"; "M5"; "M6"] |> List.iter (fun lamp ->
     match Hashtbl.find_opt by_lamp lamp with
     | None | Some [] ->
       Printf.printf "%s: нет окон с показаниями\n\n" lamp
