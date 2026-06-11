@@ -94,7 +94,9 @@ let with_watermarks ~latency src = with_watermarks_ext ~latency ~interval:0 src
     каждого берётся из [ts]. Убирает повторяющееся
     [Stream.of_list (List.map (fun v -> data v (ts v)) xs)]. *)
 let of_list ~ts xs =
-  Stream.of_list (List.map (fun v -> Data (v, ts v)) xs)
+  (* List.map не tail-rec, ломается на больших списках (>~100K) с
+     stack overflow. List.rev_map + List.rev — tail-rec эквивалент. *)
+  Stream.of_list (List.rev (List.rev_map (fun v -> Data (v, ts v)) xs))
 
 (** Idle watermark: продвигает watermark по {e wall-clock} когда источник
     замолчал, чтобы окна не висели открытыми в тишине.

@@ -145,3 +145,207 @@ module Default : S = struct
         (List.length all - List.length unique);
     ]
 end
+
+(** {1 Large_mine — конфигурируемый источник для бенчмарков}
+
+    Полноразмерная симуляция шахты: N горизонтов с M биконами и K
+    шахтёрами на каждом. Шахтёр слышит 5 ближайших биконов на СВОЁМ
+    горизонте (биконы других горизонтов не слышны). Сценарии алертов
+    распределяются по шахтёрам процентами. Late+dup аномалии
+    сохраняются (3% дублей, ~3% опоздавших) — бенчмарк должен видеть
+    цену ретракций и dedup. *)
+module Large_mine = struct
+
+  type config = {
+    horizons             : int;    (** число горизонтов шахты *)
+    beacons_per_horizon  : int;
+    miners_per_horizon   : int;
+    simulation_minutes   : int;    (** длительность симуляции (event-time) *)
+    step_seconds         : int;    (** период пакета фонаря (~15с) *)
+    (* проценты шахтёров с разными алертами; пересечения возможны *)
+    pct_no_packets       : float;
+    pct_no_readings      : float;
+    pct_no_motion        : float;
+    pct_low_voltage      : float;
+    pct_sos              : float;
+    (* частота аномалий канала *)
+    pct_duplicates       : float;
+    pct_late             : float;
+  }
+
+  let default_config = {
+    horizons             = 16;
+    beacons_per_horizon  = 64;
+    miners_per_horizon   = 256;
+    simulation_minutes   = 60;
+    step_seconds         = 15;
+    pct_no_packets       = 0.10;
+    pct_no_readings      = 0.05;
+    pct_no_motion        = 0.20;
+    pct_low_voltage      = 0.30;
+    pct_sos              = 0.01;
+    pct_duplicates       = 0.03;
+    pct_late             = 0.03;
+  }
+
+  let beacon_id ~horizon ~idx = Printf.sprintf "B%d-%d" horizon idx
+  let miner_id  ~horizon ~idx = Printf.sprintf "M%d-%d" horizon idx
+  let horizon_depth_m h = -160 - h * 20
+
+  let beacon_position ~beacons_per_horizon ~idx =
+    let side = int_of_float (ceil (sqrt (float beacons_per_horizon))) in
+    let x = (idx mod side) * 50 in
+    let y = (idx / side) * 50 in
+    float_of_int x, float_of_int y
+
+  let miner_position ~miners_per_horizon ~idx =
+    let side = int_of_float (ceil (sqrt (float miners_per_horizon))) in
+    let x = (idx mod side) * 25 in
+    let y = (idx / side) * 25 in
+    float_of_int x, float_of_int y
+
+  let beacons_table (cfg : config) : (string, float * float * int) Hashtbl.t =
+    let tbl = Hashtbl.create (cfg.horizons * cfg.beacons_per_horizon) in
+    for h = 0 to cfg.horizons - 1 do
+      for b = 0 to cfg.beacons_per_horizon - 1 do
+        let x, y = beacon_position ~beacons_per_horizon:cfg.beacons_per_horizon ~idx:b in
+        Hashtbl.add tbl (beacon_id ~horizon:h ~idx:b)
+          (x, y, horizon_depth_m h)
+      done
+    done;
+    tbl
+
+  let all_miners (cfg : config) : string list =
+    let acc = ref [] in
+    for h = 0 to cfg.horizons - 1 do
+      for m = 0 to cfg.miners_per_horizon - 1 do
+        acc := miner_id ~horizon:h ~idx:m :: !acc
+      done
+    done;
+    List.rev !acc
+
+  let neighbors_5 ~cfg ~horizon ~miner_idx : (string * float) list =
+    let mx, my = miner_position ~miners_per_horizon:cfg.miners_per_horizon
+                   ~idx:miner_idx in
+    let dists =
+      List.init cfg.beacons_per_horizon (fun b ->
+        let bx, by = beacon_position ~beacons_per_horizon:cfg.beacons_per_horizon ~idx:b in
+        let dx = mx -. bx and dy = my -. by in
+        let d  = sqrt (dx *. dx +. dy *. dy) in
+        (beacon_id ~horizon ~idx:b, d)) in
+    List.sort (fun (_, a) (_, b) -> compare a b) dists
+    |> List.filteri (fun i _ -> i < 5)
+
+  let rssi_at_distance d =
+    -. 40.0 -. 20.0 *. log10 (max 1.0 d)
+
+  type scenario = {
+    drops_packets  : bool;
+    drops_readings : bool;
+    stops_moving   : bool;
+    low_battery    : bool;
+    presses_sos    : bool;
+  }
+
+  let scenario_for ~cfg ~horizon ~miner_idx : scenario =
+    let h = Hashtbl.hash (horizon, miner_idx) in
+    let bucket n = float_of_int (n mod 10000) /. 10000.0 in
+    {
+      drops_packets  = bucket h                < cfg.pct_no_packets;
+      drops_readings = bucket (h / 11)         < cfg.pct_no_readings;
+      stops_moving   = bucket (h / 131)        < cfg.pct_no_motion;
+      low_battery    = bucket (h / 1009)       < cfg.pct_low_voltage;
+      presses_sos    = bucket (h / 10007)      < cfg.pct_sos;
+    }
+
+  let packets_for_miner ~cfg ~horizon ~miner_idx =
+    let nbrs = neighbors_5 ~cfg ~horizon ~miner_idx in
+    let sc = scenario_for ~cfg ~horizon ~miner_idx in
+    let lamp = miner_id ~horizon ~idx:miner_idx in
+    let n_steps = cfg.simulation_minutes * 60 / cfg.step_seconds in
+    let drop_after = n_steps / 3 in
+    let stop_after = n_steps / 2 in
+    let sos_at     = n_steps / 4 in
+    let acc = ref [] in
+    for i = 0 to n_steps - 1 do
+      if sc.drops_packets && i > drop_after then ()
+      else begin
+        let t = i * cfg.step_seconds * 1000 in
+        let readings =
+          if sc.drops_readings && i > drop_after / 2 then []
+          else List.map (fun (b, d) -> (b, rssi_at_distance d)) nbrs in
+        let voltage =
+          if sc.low_battery then 3.3 -. 0.05 *. float_of_int (i mod 3)
+          else 4.0 in
+        let moving = not (sc.stops_moving && i > stop_after) in
+        let sos = sc.presses_sos && i = sos_at in
+        acc := { lamp; readings; voltage; moving; sos; ts = t } :: !acc
+      end
+    done;
+    List.rev !acc
+
+  let base_packets (cfg : config) : packet list =
+    (* Накапливаем хвост-рекурсивно через List.rev_append; обычный
+       List.concat на 4096 списках × ~240 элементов взрывает stack. *)
+    let all = ref [] in
+    for h = 0 to cfg.horizons - 1 do
+      for m = 0 to cfg.miners_per_horizon - 1 do
+        let pkts = packets_for_miner ~cfg ~horizon:h ~miner_idx:m in
+        all := List.rev_append pkts !all
+      done
+    done;
+    (* стандартный List.sort работает на 1М (мерж-сорт, дёргает стек
+       логарифмически) — оставляем *)
+    List.sort (fun a b -> compare a.ts b.ts) !all
+
+  let with_channel_jitter (cfg : config) (base : packet list) : packet list =
+    let n_total = List.length base in
+    let n_dups = int_of_float (float_of_int n_total *. cfg.pct_duplicates) in
+    let n_late = int_of_float (float_of_int n_total *. cfg.pct_late) in
+    let arr = Array.of_list base in
+    let len = Array.length arr in
+    let dup_step = max 1 (n_total / max 1 n_dups) in
+    let dup_list = ref [] in
+    Array.iteri (fun i p ->
+      if i mod dup_step = 0 && List.length !dup_list < n_dups then
+        dup_list := p :: !dup_list) arr;
+    let late_step = max 1 (n_total / max 1 n_late) in
+    let late_swaps = ref 0 in
+    let i = ref 0 in
+    while !i < len - 100 && !late_swaps < n_late do
+      if !i mod late_step = 0 then begin
+        let j = !i + 90 + (!i mod 20) in
+        if j < len then begin
+          let tmp = arr.(!i) in
+          arr.(!i) <- arr.(j);
+          arr.(j) <- tmp;
+          incr late_swaps
+        end
+      end;
+      incr i
+    done;
+    (* List.rev_append вместо @ — последний tail-rec, безопасен на 1М *)
+    List.rev_append (List.rev (Array.to_list arr)) !dup_list
+
+  module Make (Cfg : sig val config : config end) : S = struct
+    let cached_packets = lazy (with_channel_jitter Cfg.config
+                                 (base_packets Cfg.config))
+    let read () =
+      Mf_event.of_list ~ts:(fun (p : packet) -> p.ts)
+        (Lazy.force cached_packets)
+    let stats () =
+      let all = Lazy.force cached_packets in
+      let unique = List.sort_uniq
+        (fun a b -> compare (a.lamp, a.ts) (b.lamp, b.ts)) all in
+      [
+        Printf.sprintf "горизонтов: %d, биконов/гор: %d, шахтёров/гор: %d"
+          Cfg.config.horizons Cfg.config.beacons_per_horizon
+          Cfg.config.miners_per_horizon;
+        Printf.sprintf "симуляция: %d минут, шаг %dс"
+          Cfg.config.simulation_minutes Cfg.config.step_seconds;
+        Printf.sprintf "пакетов всего: %d" (List.length all);
+        Printf.sprintf "из них дублей (тот же lamp+ts): %d"
+          (List.length all - List.length unique);
+      ]
+  end
+end
