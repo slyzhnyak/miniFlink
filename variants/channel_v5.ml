@@ -100,9 +100,25 @@ let try_push ch v =
   | Bounded b ->
     let tail = Atomic.get b.tail in
     let next = (tail + 1) mod b.cap in
-    (* Backpressure: spin пока не освободится место *)
+    (* Backpressure: spin пока не освободится место.
+
+       NB про yield: cpu_relax даёт hint процессору, но НЕ освобождает
+       runtime-lock OCaml. На OCaml 5 несколько Thread'ов (через
+       threads.posix) делят один Domain и переключаются кооперативно,
+       в основном на allocations/I/O. Если producer и consumer — это
+       разные Thread'ы (типичный паттерн с Thread.create), busy-spin
+       без yield заблокирует consumer навсегда: producer крутит CPU,
+       не отпуская runtime-lock, consumer никогда не получает шанс
+       сделать pop. Thread.yield освобождает lock сразу — overhead
+       ~1мкс на итерацию, незаметно когда мы РЕАЛЬНО ждём.
+
+       Для multi-domain (Domain.spawn) producer'а это не нужно — там
+       настоящая параллельность, и yield был бы лишним. Но он не
+       вредит: на разных Domain'ах yield ≈ no-op (runtime-lock не
+       шарится между Domain'ами). *)
     while Atomic.get b.head = next && not b.closed do
-      Domain.cpu_relax ()
+      Domain.cpu_relax ();
+      Thread.yield ()
     done;
     if b.closed then false
     else begin

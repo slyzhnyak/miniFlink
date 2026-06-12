@@ -228,10 +228,17 @@ dpkg -L librocksdb-dev | grep '\.so'
 
 ### Тест зависает или падает с deadlock
 
-На OCaml 5 некоторые код-пути в `lib/parallel.ml`, использующие
-`Mutex.lock` без `Domain.spawn`, могут вести себя иначе. Если попали в
-такой — это **баг библиотеки**, нужен issue на GitHub с воспроизведением.
-В качестве temporary workaround — пересобрать на switch 4.14:
+**Известный фиксированный кейс**: `test_channel: try_push blocks
+(backpressure)` зависал на OCaml 5 из-за busy-spin без yield в
+`Channel.try_push` (variants/channel_v5.ml). Producer-поток крутился
+на `Atomic.get + Domain.cpu_relax` не отдавая runtime-lock, consumer
+никогда не получал шанс сделать `pop`, чтобы освободить место.
+Фикс: добавлен `Thread.yield ()` в спин-loop. Сделай `git pull` —
+должно работать.
+
+Если найдёте новый deadlock — это баг библиотеки. Воспроизведение и
+issue на GitHub: важно знать на какой команде зависло, в каком тесте.
+В качестве временного workaround — пересобрать на switch 4.14:
 
 ```bash
 opam switch create miniflink-4 ocaml-base-compiler.4.14.1
