@@ -1,7 +1,8 @@
-# Артефакты сборки LaTeX
+# Артефакты сборки LaTeX (промежуточные)
+# main.pdf коммитим — это удобно для читателей без TeX toolchain,
+# плюс GitHub рендерит PDF прямо в UI.
 *.aux
 *.log
 *.toc
 *.out
-*.pdf
 *.synctex.gz
