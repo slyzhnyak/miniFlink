@@ -2,9 +2,9 @@
 
     Тонкий файл. Вся работа — в модулях:
     {ul
-    {- {!Domain}        — типы [packet], [alert], [location], пороги, справочник маяков}
+    {- {!Domain}        — типы [packet], [alert], [location], [gas_packet], [gas_alert], пороги, справочник маяков}
     {- {!Mock_source}   — мок-источник «как Kafka»: {!Mock_source.Default}}
-    {- {!Pipelines}     — ядро: [median_rssi] (локация) и [connectivity_alerts] (FSM)}
+    {- {!Pipelines}     — ядро: [median_rssi] (локация), [connectivity_alerts] (FSM), [gas_alerts] (retract-enrichment)}
     {- {!Mock_sink}     — мок-sink: рендеринг алертов и локаций в stdout}}
 
     В прода-сценарии заменяется только {!Mock_source} (на [Kafka_source])
@@ -40,4 +40,22 @@ let () =
 
   section "Локация (top-2 маяков по median RSSI, последние 3 окна каждого фонаря):";
   print_newline ();
-  Mock_sink.publish_locations (Miniflink.Stream.of_list location_events)
+  Mock_sink.publish_locations (Miniflink.Stream.of_list location_events);
+
+  (* ── Газовые алерты с обогащением координатами ─────────────── *)
+  section "Газовые алерты:";
+  let gas_events =
+    Pipelines.gas_alerts
+      ~rssi:(Src.read ())
+      ~locations:(Miniflink.Stream.of_list location_events)
+      ~gas:(Src.read_gas ())
+      ()
+    |> Miniflink.Stream.to_list in
+  Printf.printf "  всего событий газовых алертов: %d (включая retract'ы)\n"
+    (List.length (List.filter (function
+       | Miniflink.Mf_event.Data _ | Miniflink.Mf_event.Retract _ -> true
+       | _ -> false) gas_events));
+  Printf.printf "  ретракций (обновлений уровня/позиции): %d\n"
+    (Mock_sink.count_retracts gas_events);
+  print_newline ();
+  Mock_sink.publish_gas_alerts (Miniflink.Stream.of_list gas_events)

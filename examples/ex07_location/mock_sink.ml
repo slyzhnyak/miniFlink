@@ -115,3 +115,54 @@ let publish_locations
 let count_retracts (events : 'a Mf_event.t list) : int =
   List.length (List.filter
     (function Mf_event.Retract _ -> true | _ -> false) events)
+
+(** {1 Газовые алерты} *)
+
+(** Отрендерить один газовый алерт в строку. Включает позицию если она
+    известна — это и есть смысл всей retract-семантики: диспетчер видит
+    обновление позиции автоматически. *)
+let publish_gas_alert (ev : gas_alert Mf_event.t) : unit =
+  match ev with
+  | Mf_event.Data (Gas_alert a, _) ->
+    let pos_str = match a.ga_position with
+      | None -> "позиция неизвестна"
+      | Some (x, y, h) ->
+        Printf.sprintf "x=%.0f y=%.0f h=%dм" x y h in
+    let icon = match a.ga_level with
+      | Warning -> "⚠"
+      | Critical -> "🆘" in
+    Printf.printf "  %s %s: %s %s = %.0f ppm (%s)\n"
+      icon a.ga_lamp (Domain.gas_level_name a.ga_level)
+      (Domain.gas_name a.ga_gas) a.ga_ppm pos_str
+  | Mf_event.Data (Gas_resolved r, _) ->
+    Printf.printf "  ✓ %s: %s вернулся в норму\n"
+      r.gr_lamp (Domain.gas_name r.gr_gas)
+  | Mf_event.Retract _ ->
+    (* Retract'ы свернуты в материализованной финальной картине ниже. *)
+    ()
+  | Mf_event.Watermark _ -> ()
+
+(** Сгруппировать алерты по lamp+gas, применяя retract'ы. Печатаем
+    итоговую картину — то, что диспетчер видит в моменте. *)
+let publish_gas_alerts (events : gas_alert Mf_event.t Stream.t) : unit =
+  let materialized =
+    events
+    |> Pipe.materialize ~by:(fun a _t ->
+         match a with
+         | Gas_alert ga -> `Alert (ga.ga_lamp, ga.ga_gas)
+         | Gas_resolved gr -> `Resolved (gr.gr_lamp, gr.gr_gas)) in
+  let active = Hashtbl.create 8 in
+  List.iter (fun (key, alert) ->
+    match key, alert with
+    | `Alert (lamp, gas), Gas_alert _ ->
+      Hashtbl.replace active (lamp, gas) alert
+    | `Resolved (lamp, gas), Gas_resolved _ ->
+      Hashtbl.remove active (lamp, gas)
+    | _ -> ()
+  ) materialized;
+  if Hashtbl.length active = 0 then
+    Printf.printf "  газовых алертов нет\n"
+  else
+    Hashtbl.iter (fun _ alert ->
+      publish_gas_alert (Mf_event.data alert 0)
+    ) active
