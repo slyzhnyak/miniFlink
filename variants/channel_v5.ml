@@ -80,7 +80,17 @@ let make_unbounded () =
   Unbounded { q = Queue.create (); closed = false }
 
 let make_bounded capacity =
-  let cap = max 2 capacity in   (* минимум 2 для SPSC *)
+  (* SPSC ring buffer использует «одну ячейку как сторож» чтобы
+     отличить пустой от полного (оба дают head == tail иначе).
+     Поэтому ВЫДЕЛЯЕМ на одну больше: пользователь просит capacity N,
+     значит должно влезть N элементов до блокировки. cap = N+1 ячеек,
+     из которых N доступны для данных, 1 — sentinel.
+
+     До этого фикса make_bounded N давал реальную capacity N-1, что
+     ломало test_channel:try_push (пользователь делал make_bounded 2,
+     ожидая что 2 элемента влезут до блокировки — а realную capacity
+     был 1, и второй push зависал в spin-loop'е). *)
+  let cap = max 2 (capacity + 1) in
   Bounded {
     buf      = Array.make cap None;
     cap;

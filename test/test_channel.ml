@@ -47,6 +47,32 @@ let test_try_pop_empty () =
     check "try_pop after push = Some 7" (Channel.try_pop ch = Some 7);
     check "try_pop drained = None" (Channel.try_pop ch = None))
 
+(* ── 3.5 capacity делает что обещает (регресс OCaml 5) ─────────
+   На OCaml 5 channel — SPSC ring buffer с sentinel-ячейкой; нужна
+   была capacity = N+1 чтобы N элементов реально влезали. До фикса
+   make_bounded 2 давал реальную ёмкость 1, и второй try_push зависал
+   в spin-loop'е. На OCaml 4 (Queue+Mutex) этого никогда не было.
+   Этот тест явно проверяет что capacity = что просили. *)
+let test_capacity_honors_request () =
+  Printf.printf "\n-- make_bounded N accepts N elements without blocking\n";
+  with_timeout 5 (fun () ->
+    let ch = Channel.make_bounded 3 in
+    check "push 1 of 3 non-blocking" (Channel.try_push ch 11 = true);
+    check "push 2 of 3 non-blocking" (Channel.try_push ch 22 = true);
+    check "push 3 of 3 non-blocking" (Channel.try_push ch 33 = true);
+    check "length = 3 after 3 pushes" (Channel.length ch = 3);
+    (* и сейчас при попытке 4-го должна быть блокировка — проверяем
+       через подсчёт, что producer не закончил мгновенно *)
+    let done4 = ref false in
+    let producer = Thread.create (fun () ->
+      ignore (Channel.try_push ch 44);
+      done4 := true) () in
+    Thread.delay 0.1;
+    check "4th push blocks (capacity full)" (not !done4);
+    ignore (Channel.pop ch);
+    Thread.join producer;
+    check "after pop, blocked push completed" !done4)
+
 (* ── 4. close: pop отдаёт остаток, потом None ───────────────── *)
 let test_close_drains () =
   Printf.printf "\n-- close: pop drains remaining then None\n";
@@ -140,6 +166,7 @@ let () =
   test_fifo ();
   test_length ();
   test_try_pop_empty ();
+  test_capacity_honors_request ();
   test_close_drains ();
   test_try_push_backpressure ();
   test_backpressure ();

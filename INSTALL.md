@@ -229,12 +229,15 @@ dpkg -L librocksdb-dev | grep '\.so'
 ### Тест зависает или падает с deadlock
 
 **Известный фиксированный кейс**: `test_channel: try_push blocks
-(backpressure)` зависал на OCaml 5 из-за busy-spin без yield в
-`Channel.try_push` (variants/channel_v5.ml). Producer-поток крутился
-на `Atomic.get + Domain.cpu_relax` не отдавая runtime-lock, consumer
-никогда не получал шанс сделать `pop`, чтобы освободить место.
-Фикс: добавлен `Thread.yield ()` в спин-loop. Сделай `git pull` —
-должно работать.
+(backpressure)` зависал на OCaml 5. Реальная причина оказалась
+не в spin-loop без yield (это была моя первая гипотеза, оказалась
+неверной), а в off-by-one в ring buffer'е: `make_bounded N` выделял
+массив размера N, в котором ring buffer с sentinel-ячейкой даёт
+реальную ёмкость N-1. Тест делал `make_bounded 2` ожидая что 2
+элемента влезут, но второй уходил в spin-loop ожидая места которое
+никогда не освободится. Фикс: `cap = N + 1`, плюс регрессионный
+тест `test_capacity_honors_request`. На OCaml 4 этого бага не было —
+там Queue+Mutex без ring buffer'а. Сделай `git pull` — должно работать.
 
 Если найдёте новый deadlock — это баг библиотеки. Воспроизведение и
 issue на GitHub: важно знать на какой команде зависло, в каком тесте.
