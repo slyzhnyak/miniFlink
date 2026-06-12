@@ -164,6 +164,10 @@ namespace `Miniflink.*` (`Miniflink.Pipe`, `Miniflink.Stream`, ...), либо
 
 ## Запуск
 
+> Подробная инструкция для Debian Stable + OCaml 5 (с настоящей
+> параллельностью через Domain): см. [INSTALL.md](INSTALL.md).
+> Ниже — краткий рецепт для OCaml 4.14 на Ubuntu/Debian.
+
 ```bash
 # Зависимости (Ubuntu/Debian)
 apt install ocaml-dune ocaml-findlib
