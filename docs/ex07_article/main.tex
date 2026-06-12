@@ -1,0 +1,93 @@
+% =====================================================================
+% Подробный разбор ex07: сервис локации и газовых алертов в шахте
+%
+% Сборка:
+%   pdflatex main
+%   pdflatex main   (повторно для оглавления)
+%
+% Требования:
+%   - pdflatex (texlive-full / MiKTeX)
+%   - Шрифты с кириллицей (любой современный TeX-дистрибутив)
+% =====================================================================
+
+\documentclass[11pt,a4paper]{article}
+
+% ── Кириллица ────────────────────────────────────────────────────────
+\usepackage[utf8]{inputenc}
+\usepackage[T2A]{fontenc}
+\usepackage[russian,english]{babel}
+
+% ── Типографика и геометрия ──────────────────────────────────────────
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{parskip}
+\usepackage{enumitem}
+\setlist{noitemsep, topsep=4pt, partopsep=0pt}
+
+% ── Гиперссылки и оглавление ─────────────────────────────────────────
+\usepackage{hyperref}
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!50!black,
+  urlcolor=blue!50!black,
+  citecolor=blue!50!black,
+  pdftitle={miniFlink ex07: локация и газовые алерты},
+  pdfauthor={miniFlink contributors}
+}
+
+% ── Код: listings для OCaml ──────────────────────────────────────────
+\input{listings_setup}
+
+% ── Графика (для ASCII-диаграмм будем использовать verbatim) ─────────
+\usepackage{xcolor}
+\definecolor{boxgray}{rgb}{0.95,0.95,0.95}
+\usepackage{tcolorbox}
+\tcbset{
+  colback=boxgray, colframe=gray!50,
+  boxrule=0.5pt, arc=2pt,
+  left=8pt, right=8pt, top=4pt, bottom=4pt,
+}
+
+% =====================================================================
+\title{\textbf{miniFlink ex07}\\[4pt]
+  \large Сервис локации и газовых алертов для подземной шахты:\\
+  пошаговый разбор архитектуры}
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+\noindent
+ex07 --- самый большой пример в репозитории miniFlink. Он строит сервис
+для подземной угольной шахты, который из двух независимых потоков
+(пакеты от фонарей и пакеты от газовых датчиков) выдаёт три типа
+выходов: алерты состояния шахтёра, локацию по маякам связи и
+обогащённые координатами газовые алерты. Под капотом используется
+почти весь арсенал библиотеки: скользящие окна с
+\texttt{allowed\_lateness}, \texttt{group\_by}, FSM через
+\texttt{process\_keyed}, объединение потоков с выравниванием
+watermark, retract-семантика для обновлений.
+
+Эта статья --- подробный разбор того, \textit{зачем} каждое решение
+принято таким, как оно принято: какие альтернативы рассматривались,
+почему отброшены, что бы случилось при наивной реализации. Цель ---
+дать инженеру, выбирающему stream processing, конкретный материал для
+оценки, а контрибьютору~--- понимание design-rationale.
+\end{abstract}
+
+\tableofcontents
+\bigskip
+
+% ─────────────────────────────────────────────────────────────────────
+\input{sections/01_problem}
+\input{sections/02_inputs}
+\input{sections/03_pipelines}
+\input{sections/04_retract}
+\input{sections/05_performance}
+\input{sections/06_conclusions}
+% ─────────────────────────────────────────────────────────────────────
+
+\end{document}

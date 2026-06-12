@@ -1,0 +1,7 @@
+# Артефакты сборки LaTeX
+*.aux
+*.log
+*.toc
+*.out
+*.pdf
+*.synctex.gz

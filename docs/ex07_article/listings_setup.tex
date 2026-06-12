@@ -1,0 +1,67 @@
+% Настройка пакета listings для подсветки OCaml.
+% Минимальный stylesheet, работает без внешних зависимостей.
+
+\usepackage{listings}
+\usepackage{xcolor}
+
+% Цвета (мягкие, нейтральные)
+\definecolor{kwcolor}{rgb}{0.20,0.20,0.65}   % ключевые слова — тёмно-синий
+\definecolor{strcolor}{rgb}{0.30,0.55,0.25}  % строки — зелёный
+\definecolor{cmtcolor}{rgb}{0.45,0.45,0.45}  % комментарии — серый
+\definecolor{bgcolor}{rgb}{0.98,0.98,0.96}   % фон листинга
+
+% Язык OCaml не встроен в listings — определяем словарь сами
+\lstdefinelanguage{OCaml}{
+  keywords={
+    let, in, fun, function, match, with, when, type, and, or,
+    if, then, else, begin, end, module, struct, sig, val,
+    open, include, of, rec, mutable, ref, true, false,
+    while, do, done, for, to, downto, exception, try, raise,
+    assert, lazy, object, class, method, inherit, new, virtual,
+    private, initializer
+  },
+  keywordstyle=\color{kwcolor}\bfseries,
+  sensitive=true,
+  comment=[s]{(*}{*)},
+  morecomment=[s][\color{cmtcolor}\itshape]{(*}{*)},
+  string=[b]",
+  stringstyle=\color{strcolor},
+}
+
+\lstset{
+  language=OCaml,
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{bgcolor},
+  frame=single,
+  framerule=0.4pt,
+  rulecolor=\color{gray!40},
+  xleftmargin=8pt,
+  xrightmargin=8pt,
+  framexleftmargin=4pt,
+  framexrightmargin=4pt,
+  framextopmargin=2pt,
+  framexbottommargin=2pt,
+  showstringspaces=false,
+  breaklines=true,
+  breakatwhitespace=true,
+  tabsize=2,
+  captionpos=b,
+  aboveskip=8pt,
+  belowskip=8pt,
+  numbers=none,
+  literate=
+    {→}{$\to$}1 {←}{$\leftarrow$}1
+    {≥}{$\geq$}1 {≤}{$\leq$}1 {≠}{$\neq$}1
+    {÷}{$\div$}1 {±}{$\pm$}1,
+  extendedchars=true,
+  inputencoding=utf8,
+}
+
+% Для ASCII-диаграмм — отдельный стиль без подсветки
+\lstdefinestyle{diagram}{
+  language=,
+  basicstyle=\ttfamily\footnotesize,
+  frame=none,
+  backgroundcolor=\color{bgcolor},
+  keywordstyle=,
+}
