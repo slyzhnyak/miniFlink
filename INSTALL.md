@@ -94,7 +94,7 @@ opam install -y \
 ```
 
 Эти библиотеки определены в `dune-project` / `miniflink.opam`. Если в
-будущем добавятся новые depends, `opam install . --deps-only` подтянет
+будущем добавятся новые depends, `opam install . --deps-only -t` подтянет
 их автоматически (см. ниже альтернативный путь).
 
 ---
@@ -111,7 +111,7 @@ cd miniFlink
 
 ```bash
 # В корне репо
-opam install . --deps-only -y
+opam install . --deps-only -t -y
 ```
 
 Этот вариант надёжнее на будущее — opam подтягивает ровно то что
@@ -183,6 +183,18 @@ dune exec bench/bench_parallel.exe
 
 ## Типичные проблемы
 
+### `Error: Library "qcheck" not found.`
+
+Установили зависимости без флага `-t` (with-test). `qcheck` в `.opam`
+помечен как тестовая зависимость, без `-t` opam её пропускает.
+Решение:
+
+```bash
+opam install . --deps-only -t -y
+# или явно
+opam install -y qcheck
+```
+
 ### `Error: Library "rocksdb" not found`
 
 Не установлен `librocksdb-dev` или версия слишком старая (нужна 6.20+).
@@ -224,7 +236,7 @@ dpkg -L librocksdb-dev | grep '\.so'
 ```bash
 opam switch create miniflink-4 ocaml-base-compiler.4.14.1
 eval $(opam env --switch=miniflink-4)
-opam install . --deps-only -y
+opam install . --deps-only -t -y
 dune clean && dune build
 ```
 
