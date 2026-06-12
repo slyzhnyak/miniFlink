@@ -10,7 +10,7 @@
 (test
  (name test_props)
  (libraries miniflink test_support qcheck-core qcheck-core.runner qcheck)
- (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70 -alert -deprecated))
  (modules test_props))
 
 (test
@@ -52,7 +52,7 @@
 (test
  (name test_determinism)
  (libraries miniflink test_support qcheck-core qcheck-core.runner qcheck unix threads.posix)
- (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70 -alert -deprecated))
  (modules test_determinism))
 
 (test
@@ -83,7 +83,7 @@
 (test
  (name test_codec)
  (libraries miniflink test_support qcheck-core qcheck-core.runner qcheck)
- (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
+ (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70 -alert -deprecated))
  (modules test_codec))
 
 (test
@@ -101,7 +101,7 @@
 (test
  (name test_invariants)
  (libraries miniflink test_support qcheck-core qcheck-core.runner qcheck)
- (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
+ (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70 -alert -deprecated))
  (modules test_invariants))
 
 (test
@@ -276,7 +276,7 @@
 (test
  (name test_watermark_fuzz)
  (libraries miniflink test_support qcheck-core qcheck-core.runner)
- (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
+ (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70 -alert -deprecated))
  (modules test_watermark_fuzz))
 
 (test
