@@ -98,7 +98,7 @@ variants/            — реализации channel/parallel по версии
 
 bin/    main.ml        демо pipeline
 examples/              самодостаточные примеры (см. examples/README.md)
-bench/  bench.ml bench_parallel.ml
+bench/  bench.ml bench_parallel.ml bench_ex07.ml soak.ml
 test/   49 тест-сюит (core, props, invariants, reliability, metrics,
                      retract, sliding, count_window, session_window,
                      global_window, window_fold, agg, union, safe, parallel_retract,
@@ -187,8 +187,9 @@ dune exec examples/ex06_topology.exe  # модель исполнения B+C: m
 dune exec examples/ex07_location/ex07_location.exe  # локация шахтёра: median RSSI, sliding, top-2 + координаты
 
 # Бенчмарки
-dune exec bench/bench.exe
-dune exec bench/bench_parallel.exe
+dune exec bench/bench.exe              # базовый: throughput single + parallel
+dune exec bench/bench_parallel.exe     # параллелизм по ядрам
+dune exec bench/bench_ex07.exe         # большая шахта (1M пакетов, ~90 сек)
 
 # Все тесты (быстрые, входят в CI)
 dune test
@@ -223,6 +224,33 @@ OCaml 4.14, 1 CPU, Xeon 2.80GHz, 1M events, 1000 devices, tumbling 30s:
 
 Channel overhead: ~106 нс/msg (Mutex+Condition).
 На OCaml 5 с Domain: ожидается ~3.5x на 4 ядрах (без GIL).
+
+### Production-сценарий: ex07 на большой шахте
+
+Бенчмарк `bench/bench_ex07.ml` прогоняет полные пайплайны примера 7
+на конфигурации, близкой к реальной шахте: 16 горизонтов × 64 бикона
+(1024 бикона), 16 × 256 = 4096 шахтёров, ~1 час event-time = ~950K
+пакетов. С реалистичными аномалиями канала: ~3% дублей и ~3% опоздавших
+(опоздание ≥ размер окна, гарантия retract). Cценарии алертов
+распределены процентами: 10% No_packets, 5% No_readings, 20% No_motion,
+30% Low_voltage, 1% SOS — с пересечениями.
+
+Замеры на той же машине:
+
+| Пайплайн                | Время  | Throughput | Heap   | Allocated |
+|-------------------------|--------|------------|--------|-----------|
+| `connectivity_alerts`   | 2.3 с  | 427K ev/s  | 775 MB | 2.4 GB    |
+| `median_rssi`           | 84.4 с | 12K ev/s   | 2 GB   | 70 GB     |
+
+Результаты: 2416 алертов всех типов (252 NoPkt / 204 NoRd / 705 NoMot /
+1217 LowV / 38 SOS), 2.8M событий окон, 180K ретракций от опоздавших
+пакетов. Пайплайн локации значительно медленнее — это цена окон с
+двухуровневой агрегацией (median per beacon → top-2) плюс ретракции;
+именно эту цену скрывал бы бенчмарк на «чистом» потоке без late+dups.
+
+```bash
+dune exec bench/bench_ex07.exe
+```
 
 ## Production-readiness
 
@@ -324,18 +352,28 @@ Channel overhead: ~106 нс/msg (Mutex+Condition).
 
 ### Приоритет 4 — производительность (только по замерам)
 
+Baseline для регрессий теперь даёт `bench/bench_ex07.ml` (production-
+сценарий: 1М пакетов с реалистичными аномалиями канала). Если кто-то
+ускорит/сломает hot path — будет видно сразу. Текущие цифры в разделе
+«Производительность» выше.
+
 - [x] **Инкрементальная агрегация окон.** `window_fold ~init ~add` —
   окно сворачивает событие в аккумулятор сразу, а не копит весь список и
   агрегирует в конце. O(1) памяти на окно по числу событий вместо O(n),
   меньше GC-давления на больших окнах. (`window |> aggregate` оставлен
   где нужен весь список окна.) Сверху — модуль `Agg`: комбинируемые
-  агрегаторы (count, sum, mean, min/max, arg_min/max, first/last) и
-  `window_agg`; через `Agg.both` / `let+`/`and+` несколько агрегатов
-  считаются за один проход.
+  агрегаторы (count, sum, mean, min/max, arg_min/max, first/last,
+  median, group_by, top_k_by/bottom_k_by) и `window_agg` / `window_agg_keyed`;
+  через `Agg.both` / `let+`/`and+` несколько агрегатов считаются за
+  один проход.
 - [ ] **Батчинг событий.** Обработка по одному несёт overhead на событие;
-  микро-батчи амортизируют издержки каналов/сериализации.
+  микро-батчи амортизируют издержки каналов/сериализации. {b Замер
+  до}: `bench_ex07` показывает 12K ev/s на `median_rssi` (главная цель
+  оптимизации) — есть с чем сравнивать после фикса.
 - [ ] **Снижение аллокаций в hot path.** Профилирование + переиспользование
-  буферов там где GC станет бутылочным горлышком.
+  буферов там где GC станет бутылочным горлышком. {b Замер до}:
+  `bench_ex07` показывает 70GB allocated на полном прогоне
+  `median_rssi` — кандидат №1 на профилирование.
 - [ ] **Инкрементальные чекпойнты.** Дельты вместо полного снапшота —
   только когда полный реально станет дорогим.
 
