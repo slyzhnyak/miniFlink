@@ -357,3 +357,233 @@ let connectivity_alerts (source : packet Mf_event.t Stream.t)
          let next = Fsm.next_check st.seen in
          if next > t && next < max_int then
            Self_timer.reschedule st.timer ctx ~target:next)
+
+
+(** {1 Газовые алерты с обогащением координатами} *)
+
+(* ════════════════════════════════════════════════════════════════
+   Газовый пайплайн: объединяем три потока в один через union-type,
+   обрабатываем в едином process_keyed.
+
+   Дизайн почему НЕ window join:
+   - Газовый алерт — safety, должен идти НЕМЕДЛЕННО (без ожидания пары)
+   - Частоты разные (10с газ vs 5с окно RSSI) → window join даёт дубли
+   - Координаты могут прийти ПОЗЖЕ первого газового алерта — и тогда
+     алерт должен ОБНОВИТЬСЯ через retract+emit, не запоздать
+
+   Делаем temporal-left-join через keyed state: gas — driver, position —
+   side input. В state помним последнюю позицию + активные алерты.
+   ════════════════════════════════════════════════════════════════ *)
+
+(** Union-тип входа газового пайплайна. *)
+type gas_input =
+  | Position_from_window of location
+    (** Точная позиция из закрытого RSSI окна — отстаёт от реального
+        времени, но точнее (медиана RSSI 60-секундного окна). *)
+  | Position_from_raw of packet
+    (** Грубая позиция от raw RSSI-пакета — обновляется мгновенно
+        каждые 15с, точность хуже (один маяк). Нужна чтобы первые
+        газовые алерты УЖЕ имели координаты, не дожидаясь окна. *)
+  | Gas of gas_packet
+    (** Газовый пакет — driver. По нему мы решаем эмитить alert или нет. *)
+
+(** State per шахтёра: последняя известная позиция + активные алерты
+    (по одному на (gas) пока шахтёр в опасной зоне). *)
+type gas_state = {
+  mutable position : (float * float * int) option;
+  active : (gas, active_alert) Hashtbl.t;
+}
+and active_alert = {
+  aa_level    : gas_level;
+  aa_ppm      : float;
+  aa_position : (float * float * int) option;
+}
+
+let make_gas_state () = { position = None; active = Hashtbl.create 4 }
+
+(** Извлечь (gas, ppm) пары из пакета — только те газы, что измерены. *)
+let gases_in_packet (g : gas_packet) : (gas * float) list =
+  let acc = ref [] in
+  (match g.g_ch4 with Some v -> acc := (Gas_CH4, v) :: !acc | None -> ());
+  (match g.g_h2  with Some v -> acc := (Gas_H2,  v) :: !acc | None -> ());
+  (match g.g_co  with Some v -> acc := (Gas_CO,  v) :: !acc | None -> ());
+  (match g.g_co2 with Some v -> acc := (Gas_CO2, v) :: !acc | None -> ());
+  !acc
+
+(** Существенно ли изменился ppm — порог 20% относительно старого. *)
+let ppm_changed_significantly ~old_ppm ~new_ppm =
+  if old_ppm = 0. then new_ppm > 0.
+  else abs_float (new_ppm -. old_ppm) /. old_ppm > Domain.gas_ppm_significant_change
+
+(** Обработка одного газа из пакета. Возвращает список эмиссий. *)
+let process_one_gas
+    (st : gas_state) (lamp : string) (ts : Time.t)
+    (g : gas) (ppm : float)
+  : gas_alert Mf_event.t list =
+  let cur_level = Domain.gas_level_for g ppm in
+  let prev = Hashtbl.find_opt st.active g in
+  match cur_level, prev with
+  | None, None ->
+    (* в норме, не было алерта → ничего *)
+    []
+  | None, Some old ->
+    (* был алерт, теперь норма → retract + Gas_resolved *)
+    Hashtbl.remove st.active g;
+    let retract_ev = Mf_event.retract
+      (Gas_alert {
+         ga_lamp = lamp; ga_ts = ts; ga_gas = g;
+         ga_level = old.aa_level; ga_ppm = old.aa_ppm;
+         ga_position = old.aa_position }) ts in
+    let resolved_ev = Mf_event.data
+      (Gas_resolved { gr_lamp = lamp; gr_ts = ts; gr_gas = g }) ts in
+    [retract_ev; resolved_ev]
+  | Some level, None ->
+    (* новый алерт *)
+    let aa = { aa_level = level; aa_ppm = ppm;
+               aa_position = st.position } in
+    Hashtbl.add st.active g aa;
+    [ Mf_event.data
+        (Gas_alert {
+           ga_lamp = lamp; ga_ts = ts; ga_gas = g;
+           ga_level = level; ga_ppm = ppm;
+           ga_position = st.position }) ts ]
+  | Some level, Some old ->
+    (* был алерт. Refresh нужен если: смена уровня, заметное изменение
+       ppm, или обновилась position (которую sink может показать). *)
+    let level_changed = level <> old.aa_level in
+    let ppm_changed = ppm_changed_significantly ~old_ppm:old.aa_ppm ~new_ppm:ppm in
+    let position_changed = st.position <> old.aa_position in
+    if not (level_changed || ppm_changed || position_changed) then []
+    else begin
+      let new_aa = { aa_level = level; aa_ppm = ppm;
+                     aa_position = st.position } in
+      Hashtbl.replace st.active g new_aa;
+      let retract_ev = Mf_event.retract
+        (Gas_alert {
+           ga_lamp = lamp; ga_ts = ts; ga_gas = g;
+           ga_level = old.aa_level; ga_ppm = old.aa_ppm;
+           ga_position = old.aa_position }) ts in
+      let data_ev = Mf_event.data
+        (Gas_alert {
+           ga_lamp = lamp; ga_ts = ts; ga_gas = g;
+           ga_level = level; ga_ppm = ppm;
+           ga_position = st.position }) ts in
+      [retract_ev; data_ev]
+    end
+
+(** При обновлении позиции — пройтись по активным алертам и для каждого
+    выпустить refresh (retract старого с position_then + data с новой).
+    Это и есть «когда координаты приходят позже, газовый алерт обновляется». *)
+let refresh_alerts_for_new_position
+    (st : gas_state) (lamp : string) (ts : Time.t)
+  : gas_alert Mf_event.t list =
+  let to_emit = ref [] in
+  Hashtbl.iter (fun g old ->
+    if st.position <> old.aa_position then begin
+      let retract_ev = Mf_event.retract
+        (Gas_alert {
+           ga_lamp = lamp; ga_ts = ts; ga_gas = g;
+           ga_level = old.aa_level; ga_ppm = old.aa_ppm;
+           ga_position = old.aa_position }) ts in
+      let data_ev = Mf_event.data
+        (Gas_alert {
+           ga_lamp = lamp; ga_ts = ts; ga_gas = g;
+           ga_level = old.aa_level; ga_ppm = old.aa_ppm;
+           ga_position = st.position }) ts in
+      to_emit := data_ev :: retract_ev :: !to_emit;
+      Hashtbl.replace st.active g { old with aa_position = st.position }
+    end
+  ) st.active;
+  List.rev !to_emit
+
+module ByGasInputLamp = Keyed.Make (struct
+  type t = gas_input
+  let key = function
+    | Position_from_window l -> l.loc_lamp
+    | Position_from_raw p    -> p.lamp
+    | Gas g                  -> g.g_lamp
+end)
+
+(** Основной газовый пайплайн.
+
+    Три входа сливаются в один union-stream по event-time. Затем сами
+    держим Hashtbl<lamp, gas_state> и для каждого Data-события из
+    union производим список Mf_event'ов (Data/Retract) для эмиссии.
+
+    process_keyed не подходит здесь: его ctx.emit ожидает только
+    значение (не Mf_event), и мы не можем эмитить retract'ы. Делаем
+    руками — это нормально для нестандартной retract-семантики.
+
+    [?find_beacon] — для расчёта грубой позиции из Position_from_raw
+    (single-beacon fallback). Default — {!Domain.beacon_coords}. *)
+let gas_alerts
+    ?(find_beacon = Domain.beacon_coords)
+    ~(rssi : packet Mf_event.t Stream.t)
+    ~(locations : location Mf_event.t Stream.t)
+    ~(gas : gas_packet Mf_event.t Stream.t)
+    () : gas_alert Mf_event.t Stream.t =
+  (* Маппим каждый входной поток в union-тип *)
+  let s_loc =
+    locations |> Pipe.map (fun l -> Position_from_window l) in
+  let s_raw =
+    rssi |> Pipe.map (fun p -> Position_from_raw p) in
+  let s_gas =
+    gas |> Pipe.map (fun g -> Gas g) in
+  (* Union трёх потоков: align watermarks (min) автоматически *)
+  let unioned = Mf_event.union (Mf_event.union s_loc s_raw) s_gas in
+  (* Per-lamp state и outbound буфер *)
+  let states : (string, gas_state) Hashtbl.t = Hashtbl.create 64 in
+  let get_or_create lamp =
+    match Hashtbl.find_opt states lamp with
+    | Some st -> st
+    | None ->
+      let st = make_gas_state () in
+      Hashtbl.add states lamp st;
+      st
+  in
+  let out_buf : gas_alert Mf_event.t Queue.t = Queue.create () in
+  let process_input = function
+    | Position_from_window loc ->
+      (match loc.loc_position with
+       | None -> ()
+       | Some _ as new_pos ->
+         let st = get_or_create loc.loc_lamp in
+         if new_pos <> st.position then begin
+           st.position <- new_pos;
+           List.iter (fun ev -> Queue.push ev out_buf)
+             (refresh_alerts_for_new_position st loc.loc_lamp loc.loc_wend)
+         end)
+    | Position_from_raw pkt ->
+      let st = get_or_create pkt.lamp in
+      (match st.position, single_beacon_position ~find_beacon pkt.readings with
+       | None, (Some _ as new_pos) ->
+         st.position <- new_pos;
+         List.iter (fun ev -> Queue.push ev out_buf)
+           (refresh_alerts_for_new_position st pkt.lamp pkt.ts)
+       | _ -> ())
+    | Gas g ->
+      let st = get_or_create g.g_lamp in
+      gases_in_packet g
+      |> List.iter (fun (gas_id, ppm) ->
+           List.iter (fun ev -> Queue.push ev out_buf)
+             (process_one_gas st g.g_lamp g.g_ts gas_id ppm))
+  in
+  (* Возвращаем stream: на каждом pull сначала отдаём накопленное в
+     out_buf, иначе подтягиваем следующее из upstream и обрабатываем. *)
+  let rec next () =
+    if not (Queue.is_empty out_buf) then Some (Queue.pop out_buf)
+    else
+      match unioned () with
+      | None -> None
+      | Some (Mf_event.Watermark wm) ->
+        (* watermark прокидываем как есть — газовый поток должен иметь
+           правильный wm для downstream *)
+        Some (Mf_event.Watermark wm)
+      | Some (Mf_event.Retract _) ->
+        (* Retract из upstream — пропускаем (нам нужны только Data) *)
+        next ()
+      | Some (Mf_event.Data (input, _ts)) ->
+        process_input input;
+        next ()
+  in
+  next
