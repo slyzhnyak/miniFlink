@@ -12,10 +12,17 @@
 
 (* ── Window ───────────────────────────────────────────────── *)
 
-module WMap = Map.Make(struct
-  type t = string * int * int
-  let compare = compare
-end)
+(* ── win_key + Hashtbl-based state ─────────────────────────
+   Раньше состояние окон жило в Map.Make (immutable), который на
+   каждый add создавал новое дерево с аллокациями. Sliding-окно 60s/5s
+   делает 12 add'ов на КАЖДОЕ событие — это была главная цена window.ml
+   (64% времени всего пайплайна median_rssi по bench_ops, перепроверено
+   A/B-бенчмарком: 2.3x speedup при переходе на Hashtbl).
+
+   Hashtbl мутабельный → нужна осторожность с iter: нельзя мутировать
+   таблицу во время обхода. Паттерн: сначала собрать ключи в список,
+   потом изменить таблицу. *)
+type win_key = string * int * int   (* (key, start, stop) *)
 
 type win_spec =
   | Tumbling of Time.t
@@ -92,7 +99,7 @@ let window
     (spec     : win_spec)
     (upstream : a Mf_event.t Stream.t)
     : (string * a list) Mf_event.t Stream.t =
-  let tbl : a win_state WMap.t ref = ref WMap.empty in
+  let tbl : (win_key, a win_state) Hashtbl.t = Hashtbl.create 4096 in
   let cur_wm = ref min_int in   (* последний виденный watermark *)
   (* самодиагностика сборки пайпа *)
   let saw_data = ref false and saw_wm = ref false in
@@ -120,28 +127,37 @@ let window
              watermark обгоняет данные; увеличьте lateness у Pipe.event_time \
              или allowed_lateness у окна";
         (* Закрываем все Open окна; Fired уже эмитили *)
-        WMap.iter (fun (k,_,stop) st ->
+        Hashtbl.iter (fun (k,_,stop) st ->
           match st with Open vs when vs <> [] -> emit_data k stop vs | _ -> ()
-        ) !tbl;
-        tbl := WMap.empty;
+        ) tbl;
+        Hashtbl.clear tbl;
         if Queue.is_empty out then None else Some (Queue.pop out)
       | Some (Mf_event.Watermark wm) ->
         saw_wm := true;
         cur_wm := wm;
-        (* Open окна со stop+latency <= wm → закрываем (Fire) *)
-        WMap.iter (fun (k,s,stop) st ->
+        (* Open окна со stop+latency <= wm → Fire. Hashtbl нельзя
+           мутировать в iter — собираем ключи отдельно. *)
+        let to_fire = ref [] in
+        Hashtbl.iter (fun key st ->
+          let (_,_,stop) = key in
           match st with
-          | Open vs when stop + latency <= wm ->
-            if vs <> [] then emit_data k stop vs;
-            tbl := WMap.add (k,s,stop) (Fired vs) !tbl
+          | Open vs when stop + latency <= wm -> to_fire := (key, vs) :: !to_fire
           | _ -> ()
-        ) !tbl;
+        ) tbl;
+        List.iter (fun ((k,_,stop) as key, vs) ->
+          if vs <> [] then emit_data k stop vs;
+          Hashtbl.replace tbl key (Fired vs)
+        ) !to_fire;
         (* Fired окна старше allowed_lateness → удаляем окончательно *)
-        tbl := WMap.filter (fun (_,_,stop) st ->
+        let to_remove = ref [] in
+        Hashtbl.iter (fun key st ->
+          let (_,_,stop) = key in
           match st with
-          | Fired _ -> stop + latency + allowed_lateness > wm
-          | Open _  -> true
-        ) !tbl;
+          | Fired _ when stop + latency + allowed_lateness <= wm ->
+            to_remove := key :: !to_remove
+          | _ -> ()
+        ) tbl;
+        List.iter (Hashtbl.remove tbl) !to_remove;
         Queue.push (Mf_event.wm wm) out;
         pull ()
       | Some (Mf_event.Retract _) -> pull ()
@@ -149,7 +165,7 @@ let window
         saw_data := true;
         List.iter (fun (s, stop) ->
           let mk = (K.key v, s, stop) in
-          match WMap.find_opt mk !tbl with
+          match Hashtbl.find_opt tbl mk with
           | None ->
             (* окна нет. Если его граница уже прошла порог окончательного
                удаления (stop+latency+allowed_lateness <= wm), значит
@@ -158,16 +174,16 @@ let window
             if stop + latency + allowed_lateness <= !cur_wm then
               on_late v
             else
-              tbl := WMap.add mk (Open [v]) !tbl
+              Hashtbl.add tbl mk (Open [v])
           | Some (Open vs) ->
-            tbl := WMap.add mk (Open (v :: vs)) !tbl
+            Hashtbl.replace tbl mk (Open (v :: vs))
           | Some (Fired vs) ->
             (* Late data в пределах allowed_lateness: переоткрываем окно.
                Retract старого результата, Data нового. *)
             emit_retract (K.key v) stop vs;
             let vs' = v :: vs in
             emit_data (K.key v) stop vs';
-            tbl := WMap.add mk (Fired vs') !tbl
+            Hashtbl.replace tbl mk (Fired vs')
         ) (assign spec t);
         pull ()
     in pull ()
@@ -211,7 +227,7 @@ let window_fold
     ~(add  : acc -> a -> acc)
     (upstream : a Mf_event.t Stream.t)
     : (string * acc) Mf_event.t Stream.t =
-  let tbl : acc fold_state WMap.t ref = ref WMap.empty in
+  let tbl : (win_key, acc fold_state) Hashtbl.t = Hashtbl.create 4096 in
   let out : (string * acc) Mf_event.t Queue.t = Queue.create () in
   let emit_data k stop acc = Queue.push (Mf_event.data (k, acc) stop) out in
   let emit_retract k stop acc = Queue.push (Mf_event.retract (k, acc) stop) out in
@@ -220,41 +236,52 @@ let window_fold
       if not (Queue.is_empty out) then Some (Queue.pop out) else
       match upstream () with
       | None ->
-        WMap.iter (fun (k,_,stop) st ->
+        Hashtbl.iter (fun (k,_,stop) st ->
           match st with FOpen (acc, true) -> emit_data k stop acc | _ -> ()
-        ) !tbl;
-        tbl := WMap.empty;
+        ) tbl;
+        Hashtbl.clear tbl;
         if Queue.is_empty out then None else Some (Queue.pop out)
       | Some (Mf_event.Watermark wm) ->
-        WMap.iter (fun (k,s,stop) st ->
+        (* Open окна со stop+latency <= wm → Fire (с двухфазным проходом) *)
+        let to_fire = ref [] in
+        Hashtbl.iter (fun key st ->
+          let (_,_,stop) = key in
           match st with
           | FOpen (acc, nonempty) when stop + latency <= wm ->
-            if nonempty then emit_data k stop acc;
-            tbl := WMap.add (k,s,stop) (FFired (acc, nonempty)) !tbl
+            to_fire := (key, acc, nonempty) :: !to_fire
           | _ -> ()
-        ) !tbl;
-        tbl := WMap.filter (fun (_,_,stop) st ->
+        ) tbl;
+        List.iter (fun ((k,_,stop) as key, acc, nonempty) ->
+          if nonempty then emit_data k stop acc;
+          Hashtbl.replace tbl key (FFired (acc, nonempty))
+        ) !to_fire;
+        (* Удаление старых FFired *)
+        let to_remove = ref [] in
+        Hashtbl.iter (fun key st ->
+          let (_,_,stop) = key in
           match st with
-          | FFired _ -> stop + latency + allowed_lateness > wm
-          | FOpen _  -> true
-        ) !tbl;
+          | FFired _ when stop + latency + allowed_lateness <= wm ->
+            to_remove := key :: !to_remove
+          | _ -> ()
+        ) tbl;
+        List.iter (Hashtbl.remove tbl) !to_remove;
         Queue.push (Mf_event.wm wm) out;
         pull ()
       | Some (Mf_event.Retract _) -> pull ()
       | Some (Mf_event.Data (v,t)) ->
         List.iter (fun (s, stop) ->
           let mk = (K.key v, s, stop) in
-          match WMap.find_opt mk !tbl with
+          match Hashtbl.find_opt tbl mk with
           | None ->
-            tbl := WMap.add mk (FOpen (add (init ()) v, true)) !tbl
+            Hashtbl.add tbl mk (FOpen (add (init ()) v, true))
           | Some (FOpen (acc, _)) ->
-            tbl := WMap.add mk (FOpen (add acc v, true)) !tbl
+            Hashtbl.replace tbl mk (FOpen (add acc v, true))
           | Some (FFired (acc, _)) ->
             (* late data: сворачиваем в сохранённый acc, пере-эмитим *)
             emit_retract (K.key v) stop acc;
             let acc' = add acc v in
             emit_data (K.key v) stop acc';
-            tbl := WMap.add mk (FFired (acc', true)) !tbl
+            Hashtbl.replace tbl mk (FFired (acc', true))
         ) (assign spec t);
         pull ()
     in pull ()
@@ -521,7 +548,7 @@ let window_instrumented
     (spec : win_spec)
     (upstream : a Mf_event.t Stream.t)
     : (string * a list) Mf_event.t Stream.t =
-  let tbl : a list WMap.t ref = ref WMap.empty in
+  let tbl : (win_key, a list) Hashtbl.t = Hashtbl.create 4096 in
   let out : (string * a list) Mf_event.t Queue.t = Queue.create () in
   let close k stop vs =
     if vs <> [] then begin
@@ -536,22 +563,28 @@ let window_instrumented
       if not (Queue.is_empty out) then Some (Queue.pop out) else
       match upstream () with
       | None ->
-        WMap.iter (fun (k,_,stop) vs -> close k stop vs) !tbl;
-        tbl := WMap.empty;
+        Hashtbl.iter (fun (k,_,stop) vs -> close k stop vs) tbl;
+        Hashtbl.clear tbl;
         if Queue.is_empty out then None else Some (Queue.pop out)
       | Some (Mf_event.Watermark wm) ->
-        let closed, open_ =
-          WMap.partition (fun (_,_,stop) _ -> stop + latency <= wm) !tbl in
-        tbl := open_;
-        WMap.iter (fun (k,_,stop) vs -> close k stop vs) closed;
+        (* собираем ключи к закрытию, потом удаляем и эмитим *)
+        let to_close = ref [] in
+        Hashtbl.iter (fun key vs ->
+          let (_,_,stop) = key in
+          if stop + latency <= wm then to_close := (key, vs) :: !to_close
+        ) tbl;
+        List.iter (fun ((k,_,stop) as key, vs) ->
+          Hashtbl.remove tbl key;
+          close k stop vs
+        ) !to_close;
         Queue.push (Mf_event.wm wm) out;
         pull ()
       | Some (Mf_event.Retract _) -> pull ()
       | Some (Mf_event.Data (v,t)) ->
         List.iter (fun (s, stop) ->
           let mk = (K.key v, s, stop) in
-          let existing = Option.value ~default:[] (WMap.find_opt mk !tbl) in
-          tbl := WMap.add mk (v :: existing) !tbl
+          let existing = Option.value ~default:[] (Hashtbl.find_opt tbl mk) in
+          Hashtbl.replace tbl mk (v :: existing)
         ) (assign spec t);
         pull ()
     in pull ()
