@@ -27,7 +27,13 @@ open Domain
 (** Сигнатура источника пакетов: блок данных + статистика. *)
 module type S = sig
   val read : unit -> packet Mf_event.t Stream.t
-  val stats : unit -> string list   (** строки описания, для логирования *)
+
+  (** Поток газовых пакетов от того же сценария. {b Независимый} от
+      {!read} — у газа свой период (~10 секунд), свои сценарии
+      превышений (только у части шахтёров), свои опоздавшие/дубли. *)
+  val read_gas : unit -> gas_packet Mf_event.t Stream.t
+
+  val stats : unit -> string list
 end
 
 (** {2 Внутренности сценария} *)
@@ -120,6 +126,71 @@ let with_late_and_dups (base : packet list) : packet list =
       before @ [late] @ after) base late_packets in
   with_late @ duplicates
 
+(** {2 Газовые пакеты — базовый сценарий}
+
+    Газ шлётся ОТДЕЛЬНО от RSSI: период ~10с (для базового сценария
+    {!gas_steps} шагов), у части шахтёров есть превышения для
+    демонстрации алертов и retract'ов при обновлении position. *)
+
+let gas_steps = 37          (* t = 0, 10, 20, ..., 360с (10-секундный шаг) *)
+let gas_dt = seconds 10
+
+(** Газовый профиль шахтёра по индексу шага. Возвращает [None] если в
+    этом шаге пакет газа не шлётся (например, конкретный шахтёр без
+    газового сенсора). Сценарии подобраны чтобы покрыть:
+    - Critical → диспетчер видит сразу;
+    - Warning → Critical → demo смены уровня (retract+emit);
+    - Critical → норма → demo Gas_resolved;
+    - постоянное Critical → demo обновления position (retract+emit
+      когда у шахтёра уточняется позиция от первого RSSI окна). *)
+let gas_for (lamp : string) (i : int) : gas_packet option =
+  let t = i * gas_dt in
+  let mk ~co2 ~co ~h2 ~ch4 =
+    Some { g_lamp = lamp; g_ts = t;
+           g_co2 = co2; g_co = co; g_h2 = h2; g_ch4 = ch4 } in
+  match lamp with
+  | "M1" ->
+    (* M1: критический CO быстро (t≈30с) и держится — главный demo retract'а
+       по обновлению position. *)
+    mk ~co2:(Some 400.) ~co:(Some (if t >= seconds 30 then 130. else 20.))
+       ~h2:None ~ch4:None
+  | "M2" ->
+    (* M2: CH4 warning → critical (демо смены уровня → retract+emit). *)
+    let ch4 =
+      if t < seconds 60 then 2000.       (* норма *)
+      else if t < seconds 180 then 6000. (* warning *)
+      else 12000.                          (* critical *)
+    in
+    mk ~co2:None ~co:None ~h2:None ~ch4:(Some ch4)
+  | "M3" ->
+    (* M3: critical CO2 → норма (демо Gas_resolved). *)
+    let co2 =
+      if t < seconds 60 then 18000.      (* critical *)
+      else if t < seconds 120 then 7000. (* warning *)
+      else 600.                            (* норма *)
+    in
+    mk ~co2:(Some co2) ~co:None ~h2:None ~ch4:None
+  | "M4" ->
+    (* M4: всё в норме, газовые пакеты идут для покрытия «без алертов». *)
+    mk ~co2:(Some 500.) ~co:(Some 5.) ~h2:None ~ch4:(Some 100.)
+  | "M5" ->
+    (* M5: H2 critical, постоянно, но шлёт через раз — пропуски. *)
+    if i mod 2 = 0 then None
+    else mk ~co2:None ~co:None ~h2:(Some 11000.) ~ch4:None
+  | "M6" ->
+    (* M6: нет газового сенсора (как у некоторых старых моделей). *)
+    None
+  | _ -> None
+
+let base_gas_packets () : gas_packet list =
+  let acc = ref [] in
+  for i = 0 to gas_steps - 1 do
+    List.iter (fun m -> match gas_for m i with
+      | Some g -> acc := g :: !acc
+      | None -> ()) miners
+  done;
+  List.rev !acc
+
 (** {2 Реализация модуля {!S}} *)
 
 (** Реалистичный источник: базовый поток + опоздавшие + дубли. ЭТО
@@ -135,14 +206,18 @@ module Default : S = struct
   let packets () = with_late_and_dups (base_packets ())
   let read () =
     Mf_event.of_list ~ts:(fun (p : packet) -> p.ts) (packets ())
+  let read_gas () =
+    Mf_event.of_list ~ts:(fun (g : gas_packet) -> g.g_ts) (base_gas_packets ())
   let stats () =
     let all = packets () in
     let unique = List.sort_uniq
       (fun a b -> compare (a.lamp, a.ts) (b.lamp, b.ts)) all in
+    let gas = base_gas_packets () in
     [
       Printf.sprintf "пакетов всего: %d" (List.length all);
       Printf.sprintf "из них дублей (тот же lamp+ts): %d"
         (List.length all - List.length unique);
+      Printf.sprintf "газовых пакетов: %d" (List.length gas);
     ]
 end
 
@@ -162,12 +237,14 @@ module Large_mine = struct
     miners_per_horizon   : int;
     simulation_minutes   : int;    (** длительность симуляции (event-time) *)
     step_seconds         : int;    (** период пакета фонаря (~15с) *)
+    gas_period_seconds   : int;    (** период газового пакета (~10с) *)
     (* проценты шахтёров с разными алертами; пересечения возможны *)
     pct_no_packets       : float;
     pct_no_readings      : float;
     pct_no_motion        : float;
     pct_low_voltage      : float;
     pct_sos              : float;
+    pct_gas_alerts       : float;  (** доля шахтёров с превышением газа *)
     (* частота аномалий канала *)
     pct_duplicates       : float;
     pct_late             : float;
@@ -179,11 +256,13 @@ module Large_mine = struct
     miners_per_horizon   = 256;
     simulation_minutes   = 60;
     step_seconds         = 15;
+    gas_period_seconds   = 10;
     pct_no_packets       = 0.10;
     pct_no_readings      = 0.05;
     pct_no_motion        = 0.20;
     pct_low_voltage      = 0.30;
     pct_sos              = 0.01;
+    pct_gas_alerts       = 0.05;  (* 5% шахтёров с газовыми событиями *)
     pct_duplicates       = 0.03;
     pct_late             = 0.03;
   }
@@ -245,6 +324,7 @@ module Large_mine = struct
     stops_moving   : bool;
     low_battery    : bool;
     presses_sos    : bool;
+    has_gas_alert  : bool;
   }
 
   let scenario_for ~cfg ~horizon ~miner_idx : scenario =
@@ -256,6 +336,7 @@ module Large_mine = struct
       stops_moving   = bucket (h / 131)        < cfg.pct_no_motion;
       low_battery    = bucket (h / 1009)       < cfg.pct_low_voltage;
       presses_sos    = bucket (h / 10007)      < cfg.pct_sos;
+      has_gas_alert  = bucket (h / 100003)     < cfg.pct_gas_alerts;
     }
 
   let packets_for_miner ~cfg ~horizon ~miner_idx =
@@ -327,25 +408,65 @@ module Large_mine = struct
     (* List.rev_append вместо @ — последний tail-rec, безопасен на 1М *)
     List.rev_append (List.rev (Array.to_list arr)) !dup_list
 
+  (** Газовый профиль шахтёра. Только для тех у кого has_gas_alert=true;
+      остальные не шлют газ (имитация шахтёров без сенсора). Для тех у
+      кого есть — половина симуляции в норме, потом фиксированное
+      превышение по CO (самый частый кейс в шахте). Это даёт явные
+      пары retract'ов на каждом таком шахтёре, не флудя весь поток. *)
+  let gas_packets_for_miner ~cfg ~horizon ~miner_idx =
+    let sc = scenario_for ~cfg ~horizon ~miner_idx in
+    if not sc.has_gas_alert then []
+    else
+      let lamp = miner_id ~horizon ~idx:miner_idx in
+      let n_steps = cfg.simulation_minutes * 60 / cfg.gas_period_seconds in
+      let alert_after = n_steps / 2 in
+      let acc = ref [] in
+      for i = 0 to n_steps - 1 do
+        let t = i * cfg.gas_period_seconds * 1000 in
+        let co_ppm = if i >= alert_after then 120. else 8. in
+        acc := { g_lamp = lamp; g_ts = t;
+                 g_co2 = Some 500.; g_co = Some co_ppm;
+                 g_h2 = None; g_ch4 = None } :: !acc
+      done;
+      List.rev !acc
+
+  let base_gas_packets (cfg : config) : gas_packet list =
+    let all = ref [] in
+    for h = 0 to cfg.horizons - 1 do
+      for m = 0 to cfg.miners_per_horizon - 1 do
+        let pkts = gas_packets_for_miner ~cfg ~horizon:h ~miner_idx:m in
+        all := List.rev_append pkts !all
+      done
+    done;
+    List.sort (fun a b -> compare a.g_ts b.g_ts) !all
+
   module Make (Cfg : sig val config : config end) : S = struct
     let cached_packets = lazy (with_channel_jitter Cfg.config
                                  (base_packets Cfg.config))
+    let cached_gas = lazy (base_gas_packets Cfg.config)
     let read () =
       Mf_event.of_list ~ts:(fun (p : packet) -> p.ts)
         (Lazy.force cached_packets)
+    let read_gas () =
+      Mf_event.of_list ~ts:(fun (g : gas_packet) -> g.g_ts)
+        (Lazy.force cached_gas)
     let stats () =
       let all = Lazy.force cached_packets in
       let unique = List.sort_uniq
         (fun a b -> compare (a.lamp, a.ts) (b.lamp, b.ts)) all in
+      let gas = Lazy.force cached_gas in
       [
         Printf.sprintf "горизонтов: %d, биконов/гор: %d, шахтёров/гор: %d"
           Cfg.config.horizons Cfg.config.beacons_per_horizon
           Cfg.config.miners_per_horizon;
-        Printf.sprintf "симуляция: %d минут, шаг %dс"
-          Cfg.config.simulation_minutes Cfg.config.step_seconds;
-        Printf.sprintf "пакетов всего: %d" (List.length all);
+        Printf.sprintf "симуляция: %d минут, шаг %dс RSSI / %dс газа"
+          Cfg.config.simulation_minutes Cfg.config.step_seconds
+          Cfg.config.gas_period_seconds;
+        Printf.sprintf "RSSI пакетов всего: %d" (List.length all);
         Printf.sprintf "из них дублей (тот же lamp+ts): %d"
           (List.length all - List.length unique);
+        Printf.sprintf "газовых пакетов: %d (от %.0f%% шахтёров с превышениями)"
+          (List.length gas) (Cfg.config.pct_gas_alerts *. 100.);
       ]
   end
 end
