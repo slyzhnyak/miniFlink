@@ -104,7 +104,9 @@ let publish_locations
       Printf.printf "%s:\n" lamp;
       List.iter (fun (wend, top2) ->
         publish_location ~beacon_coords
-          { loc_lamp = lamp; loc_wend = wend; loc_top2 = top2 }
+          { loc_lamp = lamp; loc_wend = wend; loc_top2 = top2;
+            loc_position = Pipelines.interpolate_position
+                             ~find_beacon:beacon_coords top2 }
       ) last3;
       print_newline ())
 

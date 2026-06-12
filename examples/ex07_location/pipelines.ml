@@ -17,6 +17,72 @@ open Domain
 
 module ByLamp = Keyed.Make (struct type t = packet let key p = p.lamp end)
 
+(** {1 Расчёт позиции шахтёра по RSSI} *)
+
+(** Расстояние от шахтёра до маяка по RSSI. Инверсия формулы из
+    [Mock_source.Large_mine]: RSSI = -40 - 20·log10(d).  Минимум 1м чтобы
+    избежать log(0). *)
+let distance_from_rssi (rssi : float) : float =
+  10. ** ((-. rssi -. 40.) /. 20.)
+
+(** Приближённая позиция шахтёра по двум сильнейшим маякам через
+    линейную интерполяцию.
+
+    Алгоритм: известны (x_a, y_a, d_a) и (x_b, y_b, d_b) — координаты
+    двух маяков и расстояния до них (из RSSI). Точку на отрезке
+    пропорционально расстояниям: t = d_a / (d_a + d_b),
+    pos = (1-t)·A + t·B.
+
+    {b Точность} — низкая. Шахтёр почти никогда не лежит точно на
+    отрезке между двумя биконами. Для production-точности нужна
+    {e трилатерация} на 3+ маяках. Эта функция — демо-уровень: даёт
+    «где-то рядом», что полезнее для спасателя чем ничего. Глубина (h)
+    берётся от первого маяка — шахтёр на одном горизонте со своими
+    биконами.
+
+    [find_beacon] — функция поиска координат маяка по ID. {!Domain.beacon_coords}
+    для базового сценария, [Hashtbl.find_opt (Large_mine.beacons_table cfg)]
+    для большой шахты. *)
+let interpolate_position
+    ~(find_beacon : string -> (float * float * int) option)
+    (top2 : (string * float) list)
+  : (float * float * int) option =
+  match top2 with
+  | (b_a, rssi_a) :: (b_b, rssi_b) :: _ ->
+    (match find_beacon b_a, find_beacon b_b with
+     | Some (xa, ya, ha), Some (xb, yb, _) ->
+       let d_a = distance_from_rssi rssi_a in
+       let d_b = distance_from_rssi rssi_b in
+       let total = d_a +. d_b in
+       if total = 0. then Some (xa, ya, ha)
+       else
+         let t = d_a /. total in
+         let x = (1. -. t) *. xa +. t *. xb in
+         let y = (1. -. t) *. ya +. t *. yb in
+         Some (x, y, ha)
+     | _ -> None)
+  | _ -> None
+  (* Меньше 2 маяков — позиции нет: одного для интерполяции мало. *)
+
+(** Грубая позиция по ОДНОМУ ближайшему маяку — fallback для
+    raw RSSI-пакета. Используется в [gas_alerts] чтобы получить
+    позицию сразу после первого RSSI-пакета шахтёра, не дожидаясь
+    закрытия RSSI-окна. Возвращает координаты самого маяка — шахтёр
+    где-то на сфере радиуса d вокруг него. *)
+let single_beacon_position
+    ~(find_beacon : string -> (float * float * int) option)
+    (readings : (string * float) list)
+  : (float * float * int) option =
+  match readings with
+  | [] -> None
+  | rs ->
+    (* Сильнейший = максимум RSSI (RSSI отрицательный, -40 > -90). *)
+    let (b, _) = List.fold_left
+      (fun ((_, best) as acc) ((_, r) as cur) ->
+         if r > best then cur else acc)
+      (List.hd rs) (List.tl rs) in
+    find_beacon b
+
 (** {1 Локация: median RSSI в скользящем окне} *)
 
 (** [median_rssi packets] — для каждого 5-секундного окна выдаёт топ-2
@@ -34,8 +100,15 @@ module ByLamp = Keyed.Make (struct type t = packet let key p = p.lamp end)
 
     На выходе — поток {!location} событий по каждому закрытию окна
     (включая Retract от опоздавших пакетов; sink применяет их через
-    [Pipe.materialize] чтобы получить финальную картину). *)
-let median_rssi (source : packet Mf_event.t Stream.t)
+    [Pipe.materialize] чтобы получить финальную картину).
+
+    [?find_beacon] — функция поиска координат маяка для вычисления
+    [loc_position]. По умолчанию {!Domain.beacon_coords} (5 маяков для
+    базового сценария). Для большой шахты передавайте
+    [Hashtbl.find_opt (Large_mine.beacons_table cfg)]. *)
+let median_rssi
+    ?(find_beacon = Domain.beacon_coords)
+    (source : packet Mf_event.t Stream.t)
     : location Mf_event.t Stream.t =
   source
   |> Pipe.dedup (module ByLamp)
@@ -59,17 +132,18 @@ let median_rssi (source : packet Mf_event.t Stream.t)
                    match med with Some m -> Some (b, m) | None -> None)
               |> Agg.run (top_k_by 2 ~by:snd)))
   (* window_agg_keyed эмитит (Data (lamp, top2)) с ts=конец окна.
-     Преобразуем в Location, сохраняя event-time. *)
+     Преобразуем в Location, сохраняя event-time + считаем позицию. *)
   |> (fun stream ->
+       let build_loc lamp top2 wend =
+         { loc_lamp = lamp; loc_wend = wend; loc_top2 = top2;
+           loc_position = interpolate_position ~find_beacon top2 } in
        let rec out () =
          match stream () with
          | None -> None
          | Some (Mf_event.Data ((lamp, top2), wend)) ->
-           Some (Mf_event.Data ({ loc_lamp = lamp; loc_wend = wend;
-                                  loc_top2 = top2 }, wend))
+           Some (Mf_event.Data (build_loc lamp top2 wend, wend))
          | Some (Mf_event.Retract ((lamp, top2), wend)) ->
-           Some (Mf_event.Retract ({ loc_lamp = lamp; loc_wend = wend;
-                                     loc_top2 = top2 }, wend))
+           Some (Mf_event.Retract (build_loc lamp top2 wend, wend))
          | Some (Mf_event.Watermark wm) -> Some (Mf_event.Watermark wm)
        in out)
 
