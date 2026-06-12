@@ -1,4 +1,12 @@
 ; miniFlink — бенчмарки
+
+; Общая обвязка для измерений (warmup, multiple runs, stats)
+(library
+ (name bench_stats)
+ (modules bench_stats)
+ (libraries unix)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70)))
+
 (executable
  (name bench)
  (libraries miniflink test_support unix)
@@ -19,6 +27,12 @@
 
 (executable
  (name bench_ex07)
- (libraries miniflink ex07_location_lib unix)
+ (libraries miniflink ex07_location_lib bench_stats unix)
  (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
  (modules bench_ex07))
+
+(executable
+ (name bench_ops)
+ (libraries miniflink ex07_location_lib bench_stats unix)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
+ (modules bench_ops))
