@@ -216,7 +216,9 @@ Runtime.run Runtime.prod     (* всё: метрики HTTP :9090 + shutdown *)
 
 ## Производительность
 
-OCaml 4.14, 1 CPU, Xeon 2.80GHz, 1M events, 1000 devices, tumbling 30s:
+### OCaml 4.14 (baseline)
+
+Xeon 2.80GHz, 1M events, 1000 devices, tumbling 30s:
 
 | режим          | ev/s  | speedup |
 |----------------|-------|---------|
@@ -227,7 +229,35 @@ OCaml 4.14, 1 CPU, Xeon 2.80GHz, 1M events, 1000 devices, tumbling 30s:
 | 8 workers      | 600K  | 2.87x   |
 
 Channel overhead: ~106 нс/msg (Mutex+Condition).
-На OCaml 5 с Domain: ожидается ~3.5x на 4 ядрах (без GIL).
+Потолок параллельности на v4 — ~2.9x из-за runtime-lock (GIL).
+
+### OCaml 5.1 (Domain.spawn, реальная параллельность)
+
+i7-8700 @ 3.2 GHz, 6 физ + HT = 12 логических ядер,
+500K events, 1000 devices, tumbling 30s:
+
+| воркеров   | время (с) | ev/s  | speedup |
+|------------|-----------|-------|---------|
+| sequential | 12.79     | 39K   | 1.00x   |
+| 1          | 13.15     | 38K   | 0.97x   |
+| 2          | 5.77      | 87K   | 2.22x   |
+| 4          | 2.79      | 179K  | 4.58x   |
+| 6          | 2.62      | 191K  | 4.89x   |
+| 8          | 2.56      | 195K  | 5.00x   |
+| 12         | 2.24      | 223K  | **5.71x** |
+
+Замер: `dune exec bench/bench_scaling.exe` (warmup + 4 прогонов, p95).
+Видно линейное масштабирование до 4 воркеров (4.58x, эффективность
+~115% на ядро — выигрыш от L3 cache distribution). Колено на ~4
+воркерах — sink-mutex и dispatcher становятся bottleneck'ом. HT даёт
++14% сверх физических ядер (5.00 → 5.71). Сравнение **5.71x vs 2.87x**
+на OCaml 4 — это и есть настоящая выгода Domain.spawn без runtime-lock.
+
+Сравните цифры sequential между v4 и v5: 210K (Xeon @2.8) vs 39K
+(i7-8700 @3.2) — НЕ опечатка, это разные нагрузки (1M событий vs
+500K, разный размер окна и enrichment). Per-machine OCaml 5 быстрее
+OCaml 4 на single-thread тоже, но конкретно эти числа сравнивать
+между машинами нельзя.
 
 ### Production-сценарий: ex07 на большой шахте
 
