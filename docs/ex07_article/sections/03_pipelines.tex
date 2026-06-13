@@ -480,3 +480,360 @@ Sink через \texttt{Pipe.materialize} сворачивает поток в \
 Дальше --- самый интересный пайплайн, газовый. У него три потока на
 входе, и retract-семантика не из коробки оператора окон, а написана
 вручную.
+
+\subsection{gas\_alerts: три потока и retract вручную}\label{ssec:gas}
+
+Это самый интересный из трёх пайплайнов, и единственный из них,
+в котором retract-семантика реализована \emph{вручную}, а не
+встроенным оператором окна. По дороге заодно отвечаем на исходный
+вопрос задачи: \emph{если пакеты с координатами приходят позже газа,
+обновятся ли уже эмитированные алерты?} Ответ --- да, через
+механизм описанный ниже.
+
+\subsubsection{Что хотим}
+
+Газовый пакет приходит \emph{отдельно} от RSSI-пакета и сам по себе
+не знает координат шахтёра. Когда в пакете обнаружено превышение
+порога (CO > 50 ppm, CH$_4$ > 5000 ppm, и т.д.) --- мы хотим:
+
+\begin{itemize}
+\item эмитить алерт \emph{немедленно}, не дожидаясь координат
+(потому что безопасность важнее красоты);
+\item включить в алерт координаты если они \emph{известны} (из
+любого источника: грубо из последнего RSSI-пакета, точно из
+последнего закрытого окна локации);
+\item \emph{обновить} ранее эмитированный алерт когда координаты
+становятся доступны или уточняются --- через retract старого и emit
+нового;
+\item не флудить диспетчера на стабильных показаниях ---
+одно превышение давать один \emph{живой} алерт пока шахтёр в опасной
+зоне; обновлять алерт только при существенных изменениях.
+\end{itemize}
+
+Это явно \emph{stateful} обработка по ключу (шахтёр + газ), с
+\emph{временной зависимостью} между двумя независимыми потоками
+(газ и позиция). Кажется задачей для stream join. Не делаем join по
+двум причинам.
+
+\subsubsection{Почему не window join}
+
+В Flink-DSL есть оператор \texttt{join} с временным окном:
+\emph{сматчить} событие из левого потока с событием из правого
+потока, если их event-time различается не более чем на $\Delta$.
+Применить к нашей задаче:
+
+\begin{itemize}
+\item \textbf{Задержка алерта.} Чтобы сделать join, нужно
+\emph{дождаться} пары --- газа и позиции. Если газа нет --- ждём.
+Если позиции нет --- ждём. Окно длиной 30с означает \emph{до 30
+секунд задержки} газового алерта. В шахте при критическом CO это
+непригодно: алерт нужен сразу, координаты или нет.
+
+\item \textbf{Дубли при разных частотах.} Газ шлётся каждые 10с,
+окно локации закрывается каждые 5с. Каждый газовый пакет матчится
+\emph{несколькими} location-окнами в пределах временного окна
+join'а. Один газ + 3 близких location-окна = 3 алерта вместо одного.
+Можно фильтровать ``по ближайшему'', но это уже не симметричный
+join.
+\end{itemize}
+
+То что мы делаем семантически --- это \emph{temporal left-join} с
+особенностью «брать последнее известное, не ждать пары».
+В Flink-терминах это \texttt{KeyedCoProcessFunction} с
+\texttt{ValueState<Position>}: газ --- driver, позиция --- side input,
+обновляется в state но не блокирует газ.
+
+\subsubsection{Три потока на входе}
+
+\begin{lstlisting}
+type gas_input =
+  | Position_from_window of location
+  | Position_from_raw    of packet
+  | Gas                  of gas_packet
+\end{lstlisting}
+
+Три варианта одного union-типа. Первые два --- разные источники
+позиции:
+
+\begin{itemize}
+\item \textbf{Position\_from\_window} --- результат
+\texttt{median\_rssi}, точная позиция из закрытого 60-секундного
+окна. \emph{Отстаёт} от реального времени (до минуты), но точнее
+(медиана RSSI, интерполяция между двумя биконами).
+\item \textbf{Position\_from\_raw} --- грубая позиция от raw
+RSSI-пакета через \texttt{single\_beacon\_position}. Обновляется
+\emph{мгновенно} на каждом пакете (раз в 15 секунд), точность ---
+координаты ближайшего бикона (где-то на сфере радиуса $d$).
+\end{itemize}
+
+Зачем нам \emph{оба}? Чтобы алерты имели координаты с самого первого
+момента работы сервиса. Без \texttt{Position\_from\_raw} первый
+газовый алерт после старта смены не имеет координат целую минуту ---
+пока не закроется первое RSSI-окно. С raw-fallback --- координаты
+появляются в первом же газовом алерте после первого RSSI-пакета (то
+есть в течение 15 секунд).
+
+Три потока сливаются через \texttt{Mf\_event.union}, выравнивающий
+watermark по минимуму:
+
+\begin{lstlisting}
+let s_loc = locations |> Pipe.map (fun l -> Position_from_window l) in
+let s_raw = rssi      |> Pipe.map (fun p -> Position_from_raw p) in
+let s_gas = gas       |> Pipe.map (fun g -> Gas g) in
+let unioned = Mf_event.union (Mf_event.union s_loc s_raw) s_gas
+\end{lstlisting}
+
+\paragraph{Watermark-выравнивание не игрушка.}
+\texttt{Mf\_event.union} ждёт пока все подключённые потоки продвинут
+watermark, и только тогда продвигает свой. Без этого один из потоков
+обогнал бы другие и события «из будущего» обогащали бы state до того
+как у нас есть «прошлые» события другого потока. Например, газовый
+пакет $t=100s$ обработался бы до того как позиционный пакет $t=80s$
+обновил state --- алерт ушёл бы без координат, хотя они уже
+\emph{были известны}. Union с min-watermark гарантирует строгий
+event-time порядок.
+
+\subsubsection{Состояние per-шахтёр}
+
+\begin{lstlisting}
+type gas_state = {
+  mutable position : (float * float * int) option;
+  active : (gas, active_alert) Hashtbl.t;
+}
+and active_alert = {
+  aa_level    : gas_level;
+  aa_ppm      : float;
+  aa_position : (float * float * int) option;
+}
+\end{lstlisting}
+
+\texttt{position} --- последняя известная координата шахтёра
+(перезаписывается при обновлении из любого источника позиции).
+\texttt{active} --- хэш-таблица «газ $\to$ что мы последний раз
+эмитили по нему», по одному входу на каждый активный алерт. Когда
+шахтёр в норме по CH$_4$, но активен по CO --- в таблице один
+вход \texttt{(Gas\_CO, ...)}.
+
+\texttt{active\_alert} помнит \emph{что было эмитировано}: уровень,
+ppm, позиция \emph{на момент эмиссии}. Это нужно потому что
+retract должен \emph{в точности повторить} старое событие
+(включая позицию которая могла измениться) --- иначе sink не
+поймёт что ретракт относится к тому самому раннему алерту.
+
+\subsubsection{Шесть случаев на одном газовом пакете}
+
+Когда приходит газовый пакет, для каждого газа в нём (CO, CO$_2$,
+H$_2$, CH$_4$ --- те что измерены) выполняется
+\texttt{process\_one\_gas}. Логика разбита на шесть случаев в
+зависимости от пары (текущий уровень опасности, был ли активный
+алерт):
+
+\begin{lstlisting}
+match current_level, previous_alert with
+\end{lstlisting}
+
+\paragraph{Случай 1: норма, не было алерта.} Ничего не делаем.
+\begin{lstlisting}
+| None, None -> []
+\end{lstlisting}
+
+\paragraph{Случай 2: норма, был алерт --- ситуация улучшилась.}
+Эмитим retract старого \texttt{Gas\_alert} + новый
+\texttt{Gas\_resolved}:
+\begin{lstlisting}
+| None, Some old ->
+  Hashtbl.remove st.active g;
+  [ Mf_event.retract (Gas_alert {...old...}) ts;
+    Mf_event.data    (Gas_resolved {...})    ts ]
+\end{lstlisting}
+
+\texttt{Gas\_resolved} --- отдельный конструктор. По нему sink
+понимает что тревога \emph{снята} (а не просто исчезла из ленты).
+Параллель с \texttt{Voltage\_ok} в connectivity --- диспетчер видит
+явное событие «теперь в норме».
+
+\paragraph{Случай 3: превышение, не было алерта --- новый алерт.}
+\begin{lstlisting}
+| Some level, None ->
+  Hashtbl.add st.active g { aa_level=level; aa_ppm=ppm;
+                            aa_position=st.position };
+  [ Mf_event.data (Gas_alert {level; ppm; position=st.position}) ts ]
+\end{lstlisting}
+
+Записываем в \texttt{active} что эмитили, эмитим \texttt{Data}.
+
+\paragraph{Случаи 4, 5, 6: был алерт, всё ещё превышение.}
+
+\begin{lstlisting}
+| Some level, Some old ->
+  let level_changed    = level <> old.aa_level in
+  let ppm_changed      = ppm_changed_significantly old ppm in
+  let position_changed = st.position <> old.aa_position in
+  if not (level_changed || ppm_changed || position_changed) then []
+  else (* retract old + emit new *)
+\end{lstlisting}
+
+Три проверки:
+
+\begin{itemize}
+\item \texttt{level\_changed} --- Warning стал Critical или наоборот;
+\item \texttt{ppm\_changed} --- изменение более чем на 20\%;
+\item \texttt{position\_changed} --- координаты обновились (главный
+случай для исходного вопроса задачи).
+\end{itemize}
+
+Если ни одно из условий не выполнено --- ничего не эмитим
+(\emph{sticky} семантика, защита от спама). Иначе --- retract
+старого + emit нового.
+
+\paragraph{Порог 20\% на ppm.} Сделан конфигурируемым через
+\texttt{Domain.gas\_ppm\_significant\_change}. Меньше --- спам
+обновлений на каждом колебании датчика. Больше --- диспетчер не
+видит роста опасности. 20\% --- эмпирический баланс.
+
+\subsubsection{Refresh при обновлении позиции}
+
+Когда приходит \texttt{Position\_from\_window} или
+\texttt{Position\_from\_raw}, мы обновляем \texttt{st.position}.
+Но это в одиночку \emph{не} эмитит обновлений уже-активных алертов.
+Для них нужен явный проход:
+
+\begin{lstlisting}
+let refresh_alerts_for_new_position st lamp ts =
+  Hashtbl.iter (fun g old ->
+    if st.position <> old.aa_position then begin
+      (* retract old + data with new position *)
+      Queue.push (Mf_event.retract (Gas_alert {...old...}) ts) out_buf;
+      Queue.push (Mf_event.data    (Gas_alert {...new...}) ts) out_buf;
+      Hashtbl.replace st.active g { old with aa_position = st.position }
+    end
+  ) st.active
+\end{lstlisting}
+
+Этот проход вызывается \emph{сразу после} обновления
+\texttt{st.position}. Все активные алерты текущего шахтёра получают
+retract + emit с новой позицией. Это и есть \emph{обновление состояния
+газа уже с координатами} из исходного вопроса задачи.
+
+\paragraph{Порядок приоритетов источников.} На \texttt{Position\_from\_window}
+обновляем безусловно --- точная позиция всегда заменяет грубую.
+На \texttt{Position\_from\_raw} обновляем \emph{только если позиции
+ещё нет}:
+
+\begin{lstlisting}
+| Position_from_raw pkt ->
+  (match st.position, single_beacon_position pkt.readings with
+   | None, (Some _ as new_pos) ->
+     st.position <- new_pos;
+     refresh_alerts_for_new_position st pkt.lamp pkt.ts
+   | _ -> ())
+\end{lstlisting}
+
+Иначе грубая позиция от raw RSSI \emph{переписала} бы более точную
+позицию от закрытого окна --- и алерты flap'али бы между точной и
+грубой каждые 15 секунд.
+
+\subsubsection{Почему руками, а не process\_keyed}
+
+\texttt{Pipe.process\_keyed} --- идиоматичный способ построить
+stateful per-key оператор. Логично было бы использовать его и
+здесь. Но не получилось.
+
+\texttt{process\_keyed.on\_event} принимает callback c \texttt{ctx},
+у которого есть \texttt{ctx.emit : 'out -> unit}. То есть пользователь
+эмитит \emph{значение} типа \texttt{'out}, а runtime сам оборачивает
+его в \texttt{Mf\_event.Data (v, t)}. Это удобно когда мы хотим
+эмитить только данные.
+
+Но нам нужны \texttt{Mf\_event.Retract}. Через \texttt{ctx.emit} их
+не выпустить --- API не предусмотрен.
+
+Это не баг библиотеки, а сознательное ограничение
+\texttt{process\_keyed}: подавляющее большинство stateful операторов
+эмитит только \texttt{Data}, а retract'ы порождают \emph{операторы
+окон} (через \texttt{allowed\_lateness}). Газовый алерт ---
+\emph{нетипичный} случай, где пользовательский код сам решает когда
+retract.
+
+Поэтому \texttt{gas\_alerts} написан \emph{вручную}: per-lamp Hashtbl
+для state, Queue для накопления исходящих событий, рекурсивный pull
+по upstream-потоку.
+
+\begin{lstlisting}
+let states : (string, gas_state) Hashtbl.t = Hashtbl.create 64 in
+let out_buf : gas_alert Mf_event.t Queue.t = Queue.create () in
+let process_input = function ... in
+let rec next () =
+  if not (Queue.is_empty out_buf) then Some (Queue.pop out_buf)
+  else match unioned () with
+    | None -> None
+    | Some (Mf_event.Watermark wm) -> Some (Mf_event.Watermark wm)
+    | Some (Mf_event.Retract _) -> next ()
+    | Some (Mf_event.Data (input, _ts)) ->
+      process_input input; next ()
+in next
+\end{lstlisting}
+
+Двадцать строк, и каждая делает ровно одно: либо выдаёт накопленное
+из буфера, либо подтягивает следующее событие из upstream, либо
+обрабатывает событие и рекурсивно идёт дальше.
+
+\paragraph{Что это значит для библиотеки.} Если бы такой паттерн
+встречался часто, имело бы смысл расширить \texttt{process\_keyed}
+до варианта где \texttt{ctx.emit} принимает \texttt{Mf\_event.t}.
+Пока это единственный случай, и руками --- приемлемо. Архитектурное
+правило: когда у библиотеки нет ровно нужного API, можно реализовать
+\emph{по своему}; main concern --- читаемость и тестируемость, а не
+``всё через одну функцию''.
+
+\subsubsection{Главный сценарий: позиция приходит позже газа}
+
+Соберём всё вместе на примере шахтёра M1 со сценарием из
+\texttt{Mock\_source.Default}:
+
+\begin{enumerate}
+\item $t = 10s$ --- газовый пакет M1 c CO = 120 ppm (Critical).
+\texttt{st.position = None}. Эмитим \texttt{Gas\_alert(level=Critical,
+ppm=120, position=None)}. \texttt{active[Gas\_CO]} запомнила это.
+
+\item $t = 15s$ --- первый RSSI-пакет M1 с reading'ами от B1, B2, B3.
+\texttt{Position\_from\_raw}. \texttt{st.position} была \texttt{None},
+\texttt{single\_beacon\_position} даёт координаты B1
+(сильнейший reading). \texttt{st.position} обновлена.
+\texttt{refresh\_alerts\_for\_new\_position} проходит по \texttt{active}:
+видит \texttt{Gas\_CO} с position=None, position обновилась $\to$
+эмитим \texttt{Retract(old alert, position=None)} + \texttt{Data(new
+alert, position=B1's coords)}.
+
+\item $t = 20s$ --- ещё один газовый пакет CO = 119 ppm. Critical
+тот же, ppm в пределах 20\% (119 vs 120), position та же. Все три
+проверки false --- ничего не эмитим.
+
+\item $t = 60s$ --- первое RSSI-окно $[0, 60)$ закрывается. M1
+имел в нём reading'и от B1 и B2 (как минимум). \texttt{median\_rssi}
+эмитит \texttt{location} с \texttt{loc\_position} равной интерполяции
+B1-B2. \texttt{Position\_from\_window} обновляет
+\texttt{st.position} --- безусловно (точная позиция важнее грубой).
+\texttt{refresh\_alerts\_for\_new\_position} снова: \texttt{Retract}
+старого алерта (с грубой позицией B1) + \texttt{Data} с новой
+позицией.
+\end{enumerate}
+
+После этого алерт \emph{остаётся живым} с актуальной позицией. Если
+координаты дальше не меняются (sliding окна выдают ту же интерполяцию)
+--- больше ничего не эмитится. Если меняются --- ещё один retract +
+emit. Если CO падает ниже 50 ppm --- retract + \texttt{Gas\_resolved}.
+
+\paragraph{Что видит диспетчер.} Sink через \texttt{Pipe.materialize}
+сворачивает retract'ы. На дашборде в любой момент видна
+\emph{одна} запись на (M1, CO) с \emph{текущим} ppm и
+\emph{актуальной} позицией. Промежуточные retract'ы под капотом
+обеспечивают что эта запись правильная --- но на экран попадает
+только финальная картина. Это и есть ценность retract-семантики ---
+диспетчер видит правду, не флудя истории.
+
+\medskip
+
+На этом разбор трёх пайплайнов закончен. В следующем разделе
+обобщаем retract как \emph{сквозной механизм} проходящий через все
+три, и объясняем как sink его материализует.
