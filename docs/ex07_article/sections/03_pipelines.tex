@@ -208,3 +208,275 @@ heartbeats веб-сервисов, dropped sessions в чатах). В этом
 (один длинный pipe из операторов), но с насыщенной алгоритмикой:
 скользящие окна с retract'ами, медиана по биконам, top-2, и
 линейная интерполяция координат.
+
+\subsection{median\_rssi: скользящие окна и интерполяция координат}\label{ssec:median}
+
+Задача пайплайна --- для каждого шахтёра выдавать «топ-2 маяков с
+самой сильной медианной RSSI» в скользящем 60-секундном окне с
+шагом 5 секунд, а из них приближённо вычислять координаты шахтёра в
+двумерной плоскости горизонта.
+
+Архитектурно это \emph{линейный} pipe из операторов; интересна не
+структура, а каждый отдельный шаг и почему он выглядит так.
+
+\subsubsection{Шаги пайплайна}
+
+\paragraph{1. dedup по бизнес-ключу.}
+\begin{lstlisting}
+|> Pipe.dedup (module ByLamp)
+     ~rule:(fun p -> string_of_int p.ts)
+     ~cooldown:(seconds 120)
+\end{lstlisting}
+
+\texttt{Pipe.dedup} держит per-key cache недавно виденных rule-значений
+и фильтрует повторы. Ключ дедупликации --- \texttt{(lamp, ts)},
+выражаемый как \texttt{string\_of\_int p.ts} в пределах ключа
+\texttt{p.lamp}. Если пакет от M1 с \texttt{ts=88s} пришёл дважды
+(at-least-once Kafka, UDP retry), мы дедуплицируем по бизнес-ключу
+\emph{пакета} (lamp + event-time), а не по байтовому содержимому
+сетевого сообщения --- которое шлюз вполне мог обогатить полем
+\texttt{received\_at} перед ретрансляцией.
+
+\texttt{cooldown 120s} означает: дедуплицируем дубли в пределах двух
+минут. Если тот же ключ придёт через 3 минуты --- это уже не дубль,
+а что-то странное (битый clock на устройстве?), но пропускаем дальше,
+не теряя данные.
+
+\paragraph{2. flat\_map: разворот в reading'и.}
+\begin{lstlisting}
+|> Pipe.flat_map (fun p ->
+     List.map (fun (b, rssi) ->
+       { r_lamp = p.lamp; r_beacon = b;
+         r_rssi = rssi; r_ts = p.ts })
+       p.readings)
+\end{lstlisting}
+
+Каждый пакет имеет от одного до пяти reading'ов. \texttt{flat\_map}
+разворачивает один пакет в несколько событий, каждое --- запись
+вида ``шахтёр X слышал маяк Y с уровнем Z в момент T''. Дальше
+работаем с плоским потоком, а не с пакетами.
+
+Почему это правильно: для медианы по бикону нам нужно
+\emph{сгруппировать} все RSSI данного маяка отдельно, что естественно
+делается на плоских записях. Если бы оставили пакеты,
+\texttt{group\_by} пришлось бы делать по \texttt{packet.readings}, и
+агрегаты усложнились бы.
+
+\paragraph{3. event\_time с lateness.}
+\begin{lstlisting}
+|> Pipe.event_time ~lateness:(seconds 1)
+\end{lstlisting}
+
+Вставка watermark'ов на основе event-time каждого reading'а. Параметр
+\texttt{lateness:1s} означает: «watermark отстаёт от максимального
+виденного event-time на 1 секунду». Это \emph{out-of-order tolerance}
+между близкими во времени событиями: если у нас сейчас прошло событие
+с \texttt{ts=100s}, watermark поднимется только до 99с, давая 1
+секунду на ``последние опоздавшие'' до того как окно закроется.
+
+\paragraph{Почему именно 1 секунда.} В нашем сценарии reading'и
+сгенерированы из одного пакета с одинаковым \texttt{ts} --- они
+синхронны. Out-of-order возникает только между пакетами от разных
+шахтёров, доставленными через сеть. Эмпирически разброс доставки
+для не-aномальных пакетов укладывается в 1с. Если поставить больше
+(скажем, 60с) --- окна закрываются медленнее, дашборд лагает на
+минуту. Меньше --- теряем близко-опоздавшие. Это типичный
+out-of-order trade-off; 1с в нашем сценарии нормально, в шахтах с
+очень плохим радио может потребоваться 5--10с.
+
+Сама обработка \emph{сильно} опоздавших пакетов (более 60с) лежит на
+\texttt{allowed\_lateness} следующего оператора --- они переоткрывают
+окно через retract.
+
+\paragraph{4. window\_agg\_keyed: главный оператор.}
+\begin{lstlisting}
+|> Pipe.window_agg_keyed
+     ~by:(fun r -> r.r_lamp)
+     ~allowed_lateness:(seconds 60)
+     (Pipe.sliding (seconds 60) (seconds 5))
+     Agg.(...)
+\end{lstlisting}
+
+Здесь несколько параметров:
+
+\begin{itemize}
+\item \texttt{by} --- ключ партиционирования (шахтёр);
+\item \texttt{sliding (60s) (5s)} --- окно длиной 60с с шагом 5с,
+то есть событие $t=30$с попадает в окна $[-30, 30)$, $[-25, 35)$,
+$[-20, 40)$ \ldots, $[30, 90)$. Двенадцать окон на событие;
+\item \texttt{allowed\_lateness 60s} --- если опоздавший пакет
+попадает в \emph{уже закрытое} окно, но не более чем на 60с
+прошлое --- окно \textbf{переоткрывается}, агрегат пересчитывается,
+эмитится \texttt{Retract} старого результата плюс \texttt{Data}
+нового. Пакеты опоздавшие сильнее --- идут в side output (мы их не
+собираем; в проде шли бы в DLQ);
+\item \texttt{Agg.t} --- комбинаторно-собираемый агрегат, см. ниже.
+\end{itemize}
+
+Это \emph{единственный} stateful оператор всего пайплайна. Состояние
+--- хеш-таблица «окно $\to$ список значений (или сложенный
+аккумулятор)», очищается автоматически при закрытии окна (или
+оставляется на время \texttt{allowed\_lateness}).
+
+\paragraph{5. Двухуровневая агрегация через Agg.}
+\begin{lstlisting}
+Agg.(
+  group_by
+    ~key:(fun r -> r.r_beacon)
+    ~inner:(median (fun r -> r.r_rssi))
+  |> map (fun per_beacon ->
+       per_beacon
+       |> List.filter_map (fun (b, med) ->
+            match med with
+            | Some m -> Some (b, m)
+            | None -> None)
+       |> Agg.run (top_k_by 2 ~by:snd)))
+\end{lstlisting}
+
+Внутри одного окна шахтёра М1 у нас может быть, например, 8
+reading'ов от B1, 12 от B2, 5 от B3. \texttt{group\_by ~key:beacon}
+группирует их по маяку. \texttt{\textasciitilde inner: median} ---
+агрегат, применяемый к каждой группе: для B1 даёт medianX,
+для B2 --- medianY, для B3 --- medianZ. На выходе списка пар
+\texttt{[(B1, X); (B2, Y); (B3, Z)]}.
+
+Дальше \texttt{map} превращает этот список в top-2 через
+\texttt{top\_k\_by 2}. У нас два уровня агрегации --- сначала
+медиана внутри маяка, потом ranking между маяками --- собранные
+\emph{декларативно} из библиотечных кубиков, без рукописных циклов.
+
+\subsubsection{Линейная интерполяция координат}\label{sssec:interpolate}
+
+Имея top-2 маяков с известными координатами и медианной RSSI до
+каждого, мы хотим приближённо найти координаты шахтёра в плоскости
+горизонта.
+
+\paragraph{От RSSI к расстоянию.} В \texttt{Large\_mine} RSSI
+генерируется по формуле $\text{RSSI} = -40 - 20 \log_{10}(d)$.
+Инверсия:
+$$d = 10^{\frac{-\text{RSSI} - 40}{20}}$$
+
+\begin{lstlisting}
+let distance_from_rssi (rssi : float) : float =
+  10. ** ((-. rssi -. 40.) /. 20.)
+\end{lstlisting}
+
+В реальной шахте этот калибровочный коэффициент зависит от частоты
+радио, влажности воздуха, рельефа тоннеля, и в проде калибруется
+эмпирически на каждом горизонте. У нас вшито в код --- демо.
+
+\paragraph{Интерполяция между двумя маяками.} Имея A с координатами
+\texttt{(xa, ya)} и расстоянием \texttt{d\_a}, B с координатами
+\texttt{(xb, yb)} и расстоянием \texttt{d\_b}, точку на отрезке
+$AB$ пропорционально расстояниям:
+$$t = \frac{d_a}{d_a + d_b}, \quad
+\text{pos} = (1 - t) \cdot A + t \cdot B$$
+
+\begin{lstlisting}
+let interpolate_position ~find_beacon (top2 : (string * float) list) =
+  match top2 with
+  | (b_a, rssi_a) :: (b_b, rssi_b) :: _ ->
+    (match find_beacon b_a, find_beacon b_b with
+     | Some (xa, ya, ha), Some (xb, yb, _) ->
+       let d_a = distance_from_rssi rssi_a in
+       let d_b = distance_from_rssi rssi_b in
+       let total = d_a +. d_b in
+       if total = 0. then Some (xa, ya, ha)
+       else
+         let t = d_a /. total in
+         let x = (1. -. t) *. xa +. t *. xb in
+         let y = (1. -. t) *. ya +. t *. yb in
+         Some (x, y, ha)
+     | _ -> None)
+  | _ -> None
+\end{lstlisting}
+
+\paragraph{Точность.} Низкая. Шахтёр почти никогда не лежит точно
+на отрезке между двумя биконами --- он в 2D-плоскости. Без \emph{3-го}
+маяка позиция геометрически не определяется однозначно: пересечение
+двух окружностей с центрами в биконах даёт две точки симметрично
+относительно линии $AB$, наш алгоритм просто выбирает середину между
+ними.
+
+В реальной production-системе это нужно делать \emph{трилатерацией}
+на 3+ маяках: метод наименьших квадратов на пересечении трёх (и
+более) окружностей. Существенно сложнее в коде (нужен solver
+нелинейной системы), но даёт реалистичную позицию.
+
+Делаем интерполяцию намеренно: на ex07 это \emph{демо}, и
+интерполяция показывает идею «координаты вычисляются из чего-то, у
+нас есть что-то». Газовому пайплайну для обогащения алертов важнее
+\emph{наличие хоть какой-то позиции}, чем её точность ---
+``приблизительно где'' лучше для спасателя чем ``неизвестно где''.
+
+\subsubsection{Single-beacon fallback}
+
+Что делать если в reading'ах шахтёра \emph{один} маяк или ноль?
+\texttt{interpolate\_position} вернёт \texttt{None}. Но для
+газового пайплайна это плохо: первый алерт мы можем эмитить вообще
+без позиции, и хотелось бы хоть какую-то указать.
+
+\texttt{single\_beacon\_position} --- вспомогательная функция:
+берёт reading с самым сильным RSSI и возвращает координаты
+\emph{этого маяка}. То есть «шахтёр где-то рядом с B1, точнее
+сказать не можем». Точность ниже чем у интерполяции, но это лучше
+чем \texttt{None}.
+
+\begin{lstlisting}
+let single_beacon_position ~find_beacon (readings : (string * float) list) =
+  match readings with
+  | [] -> None
+  | rs ->
+    let (b, _) = List.fold_left
+      (fun ((_, best) as acc) ((_, r) as cur) ->
+         if r > best then cur else acc)
+      (List.hd rs) (List.tl rs) in
+    find_beacon b
+\end{lstlisting}
+
+Эта функция используется в газовом пайплайне (раздел~\ref{ssec:gas})
+для обогащения координат \emph{до} того как первое окно RSSI
+закрылось --- сразу после первого raw RSSI-пакета шахтёра.
+
+\subsubsection{Собирая всё вместе}
+
+Финальный пайплайн:
+
+\begin{lstlisting}
+let median_rssi ?(find_beacon = Domain.beacon_coords)
+    (source : packet Mf_event.t Stream.t)
+    : location Mf_event.t Stream.t =
+  source
+  |> Pipe.dedup (module ByLamp)
+       ~rule:(fun p -> string_of_int p.ts)
+       ~cooldown:(seconds 120)
+  |> Pipe.flat_map (fun p -> ... (* expand to readings *))
+  |> Pipe.event_time ~lateness:(seconds 1)
+  |> Pipe.window_agg_keyed ~by:(fun r -> r.r_lamp)
+       ~allowed_lateness:(seconds 60)
+       (Pipe.sliding (seconds 60) (seconds 5))
+       Agg.(group_by ~key:... ~inner:median |> map top_k_by_2)
+  |> map_to_location_with_position ~find_beacon
+\end{lstlisting}
+
+Шесть операторов, каждый делает ровно одну вещь. Можно прочитать
+сверху вниз и понять полный жизненный цикл события. Это и есть
+обещание stream processing fluent-DSL: пайплайн читается как описание
+\emph{бизнес-преобразования}, без runtime-деталей про state и
+таймеры.
+
+\paragraph{Что эмитит этот пайплайн.} Поток событий
+\texttt{location Mf\_event.t}: \texttt{Data} при закрытии окна,
+\texttt{Retract} плюс новый \texttt{Data} при опоздавшем пакете в
+\texttt{allowed\_lateness}. \texttt{Watermark}'ы продвигаются по
+event-time.
+
+Sink через \texttt{Pipe.materialize} сворачивает поток в \emph{финальную
+таблицу} «(шахтёр, конец окна) $\to$ location» --- retract'ы
+автоматически отменяют старые значения. Это позволяет диспетчерскому
+пульту показывать \emph{актуальную картину}, не флудя на каждом
+обновлении.
+
+Дальше --- самый интересный пайплайн, газовый. У него три потока на
+входе, и retract-семантика не из коробки оператора окон, а написана
+вручную.
