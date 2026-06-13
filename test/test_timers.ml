@@ -1,5 +1,5 @@
 open Miniflink
-(* ProcessFunction с таймерами — для minePASS:
+(* ProcessFunction с таймерами:
    1. heartbeat: нет событий от шахтёра дольше порога -> алерт (event-time)
    2. смена: шахтёр под землёй дольше смены -> алерт (processing-time)
    Таймеры per-key, set/cancel в обработчиках; срабатывание:

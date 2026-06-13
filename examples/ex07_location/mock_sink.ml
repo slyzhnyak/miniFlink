@@ -65,7 +65,7 @@ let publish_location ?(beacon_coords = beacon_coords) (loc : location) : unit =
         Printf.printf "%s%s %.1f dBm"
           (if i > 0 then "; " else "") beacon med) xs;
     if List.length xs < 2 then
-      Printf.printf "  ⚠ слышен 1 маяк — для трилатерации мало";
+      Printf.printf "  ⚠ слышен 1 маяк — для интерполяции мало";
     print_newline ()
 
 (** Сгруппировать локации по шахтёру, для каждого показать последние 3
