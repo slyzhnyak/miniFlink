@@ -1,3 +1,210 @@
+% ─────────────────────────────────────────────────────────────────────
 % Раздел 3 — Три пайплайна
+% ─────────────────────────────────────────────────────────────────────
+
 \section{Три пайплайна}\label{sec:pipelines}
-\textit{Этот раздел ещё не написан.}
+
+Три пайплайна образуют ядро сервиса. У каждого свой набор операторов
+и свои дизайнерские решения, но между ними виден общий стиль: все
+три потребляют один и тот же \texttt{packet}-поток (или его
+производные), все три используют event-time, у всех трёх результат
+идёт в sink-обвязку, которая отображает или публикует данные.
+
+Разбираем по одному. Самый простой по семантике, но самый
+интересный архитектурно --- \texttt{connectivity\_alerts}.
+
+\subsection{connectivity\_alerts: три слоя FSM}\label{ssec:connectivity}
+
+Этот пайплайн ловит пять диагностических состояний шахтёра:
+
+\begin{itemize}
+\item \textbf{No\_packets} --- пакеты от фонаря перестали приходить
+($> 2$ мин тишины);
+\item \textbf{No\_readings} --- пакеты идут, но \texttt{readings}
+пустой ($> 5$ мин не слышит ни одного маяка);
+\item \textbf{No\_motion} --- датчик ускорения молчит ($> 2$ мин
+без движения);
+\item \textbf{Low\_voltage} --- напряжение батареи ниже 3{,}5 В,
+держится дольше 2 минут (с гистерезисом возврата 3{,}7 В);
+\item \textbf{Sos} --- кнопка SOS нажата (мгновенно, без таймера).
+\end{itemize}
+
+Любая из четырёх первых тревог снимается, когда условие перестаёт
+выполняться (для напряжения --- с гистерезисом, об этом ниже).
+
+\paragraph{Соблазн монолита.} Самое прямое решение --- один большой
+\texttt{process\_keyed.on\_event} с per-key state, в котором
+аккумулируем «время последнего пакета, время последнего движения,
+текущее напряжение, флаг что был ли уже Low\_voltage». На каждом
+пакете обновляем state, смотрим что изменилось, эмитим алерты.
+
+Это работает, но плохо читается и плохо тестируется. На каждом
+пакете мы одновременно делаем три разных вещи:
+\textbf{запоминаем факты} (когда последний пакет),
+\textbf{принимаем решения} (нужно ли алертить),
+\textbf{регистрируем таймеры} (когда проверить тишину снова, если
+сейчас пакетов нет). Все три смешаны в одной функции, и поправить
+поведение для одного типа алерта означает читать весь файл.
+
+\paragraph{Разделение на три слоя.} Поэтому
+\texttt{Pipelines} раскладывает FSM на три модуля:
+
+\begin{itemize}
+\item \textbf{Last\_seen} --- хранилище фактов;
+\item \textbf{Fsm} --- чистые функции «факты $\to$ алерт»;
+\item \textbf{Self\_timer} --- регистрация таймеров.
+\end{itemize}
+
+\texttt{process\_keyed} склеивает их в общий пайплайн, но каждый
+модуль изолирован и тестируем независимо.
+
+\subsubsection{Слой 1: Last\_seen}
+
+Просто запись того, что мы знаем о шахтёре в данный момент.
+
+\begin{lstlisting}
+type t = {
+  mutable last_pkt_ts    : Time.t;   (* any packet *)
+  mutable last_reading_ts: Time.t;   (* packet with non-empty readings *)
+  mutable last_motion_ts : Time.t;   (* packet with moving=true *)
+  mutable last_voltage   : float;
+  mutable last_voltage_ts: Time.t;
+  mutable low_v_since    : Time.t option;
+  mutable in_low_v       : bool;     (* for debounce + hysteresis *)
+}
+\end{lstlisting}
+
+Метод \texttt{record} обновляет нужные поля по приходящему пакету.
+В нём \emph{нет} логики «что эмитить» --- только запоминание.
+
+Этот слой решает проблему «когда таймер сработал в момент молчания,
+у нас нет пакета чтобы взять из него факты» --- факты уже лежат в
+\texttt{Last\_seen}.
+
+\subsubsection{Слой 2: Fsm}
+
+Чистые функции от \texttt{Last\_seen} к опциональному алерту:
+
+\begin{lstlisting}
+let no_packets seen ~now =
+  if now - seen.last_pkt_ts > no_packets_threshold
+  then Some (No_packets (seen.lamp, seen.last_pkt_ts))
+  else None
+
+let no_motion seen ~now = ...
+let no_readings seen ~now = ...
+let low_voltage seen ~now = ...
+
+(* Aggregate: at what nearest moment in time should we
+   re-check the state, assuming no new packet arrives? *)
+let next_check seen = ...
+\end{lstlisting}
+
+В этом слое нет state и нет I/O --- любая функция здесь принимает
+\texttt{Last\_seen.t} и возвращает чистое значение. Тесты пишутся
+тривиально: «вот snapshot, вот ожидаемый алерт».
+
+\paragraph{next\_check как сердце таймера.} Самая интересная функция
+здесь --- \texttt{next\_check}. Она отвечает на вопрос: «если сейчас
+\emph{не} придёт нового пакета, в какой ближайший момент состояние
+может измениться?» Например, если последний пакет был в 100с и
+порог тишины --- 2 минуты, то изменение наступит в 220с
+(100 + 120). Если последнее движение было в 95с --- то в 215с. И
+так далее. \texttt{next\_check} берёт минимум по всем «пробудкам»
+и возвращает один timestamp.
+
+Это нужно \texttt{Self\_timer}'у, чтобы знать, на какой момент
+будить пайплайн.
+
+\subsubsection{Слой 3: Self\_timer}
+
+\texttt{process\_keyed} в miniFlink имеет встроенную поддержку
+self-timers через \texttt{ctx.set\_timer}. \texttt{Self\_timer}
+тонко оборачивает её, добавляя одну инвариантность: на каждом ключе
+живой может быть \emph{максимум один} таймер. Когда приходит новый
+пакет и \texttt{Fsm.next\_check} даёт новое время будильника, старый
+таймер отменяется и регистрируется новый. Это уберегает от
+накопления старых таймеров (особенно опасно для долгоживущих
+шахтёров).
+
+\begin{lstlisting}
+let reschedule t ctx ~target =
+  match t.armed with
+  | Some old when old = target -> ()       (* same timer *)
+  | _ ->
+    (* Old timer will be ignored on fire -- we changed `armed`,
+       so when it fires the handler sees it's stale. *)
+    ctx.Pipe.set_timer target Pipe.Wallclock;
+    t.armed <- Some target
+\end{lstlisting}
+
+\subsubsection{Склейка через process\_keyed}
+
+\begin{lstlisting}
+let connectivity_alerts source =
+  source
+  |> Pipe.event_time ~lateness:(seconds 1)
+  |> Pipe.process_keyed (module ByLamp)
+       ~init:make_state
+       ~on_event:(fun ctx key st p ->
+         (* Layer 1: remember facts *)
+         (match Last_seen.record st.seen ~p with
+          | `Sos_pressed -> ctx.emit (Sos (key, p.ts))
+          | `Quiet -> ());
+         (* Layer 2 + emission *)
+         check_and_emit ctx key st ~now:p.ts;
+         (* Layer 3: schedule the next check *)
+         Self_timer.reschedule st.timer ctx
+           ~target:(Fsm.next_check st.seen))
+       ~on_timer:(fun ctx key st t _kind ->
+         Self_timer.consumed st.timer;
+         check_and_emit ctx key st ~now:t;
+         let next = Fsm.next_check st.seen in
+         if next > t && next < max_int then
+           Self_timer.reschedule st.timer ctx ~target:next)
+\end{lstlisting}
+
+Двадцать строк кода, и каждая строка делает ровно одну вещь. Это
+прямой эффект разделения: ни одна функция в этом пайплайне не
+смешивает «помню что было» с «решаю что делать».
+
+\paragraph{Гистерезис напряжения.} Один из неприметных, но важных
+моментов --- \texttt{Low\_voltage} имеет \emph{два} порога:
+\texttt{low\_voltage\_threshold = 3.5} (вход в подозрение) и
+\texttt{voltage\_ok\_threshold = 3.7} (выход обратно). Это
+\emph{гистерезис}: вошёл в Low\_voltage при $V < 3{,}5$, вышел только
+при $V > 3{,}7$. Между ними --- \emph{мёртвая зона}, в которой
+состояние не меняется.
+
+Без гистерезиса колебания напряжения около 3{,}5 В (нормальное
+поведение под нагрузкой фонарика) дали бы \emph{дребезг алертов} ---
+Low\_voltage, Voltage\_ok, Low\_voltage, Voltage\_ok --- много раз в
+минуту. Диспетчер увидел бы хаос. Один из тех мелких моментов,
+которые отличают workable систему от непригодной.
+
+Дополнительно есть \texttt{voltage\_debounce = 2 минуты}: алерт
+\texttt{Low\_voltage} эмитится не сразу как напряжение упало ниже 3{,}5,
+а только если оно \emph{держится} там 2 минуты подряд. Это уже не
+гистерезис, это debounce --- защита от кратковременных просадок
+напряжения (включение фонаря на полную мощность даёт мгновенный
+провал).
+
+\paragraph{Почему такой подход универсален.} Каждый раз, когда в
+проде встаёт задача «детектировать состояние из временного ряда
+событий», возникают те же три проблемы:
+а) надо помнить факты;
+б) надо принимать решения о них;
+в) надо реагировать на молчание.
+Three-layer split здесь не специфичен для шахты или для miniFlink ---
+он будет применим к любой подобной задаче (мониторинг IoT-устройств,
+heartbeats веб-сервисов, dropped sessions в чатах). В этом примере
+он реализуется в идиомах OCaml + \texttt{process\_keyed}, в Java
++ Flink \texttt{KeyedProcessFunction} был бы тот же split в тех
+же трёх классах.
+
+\medskip
+
+Дальше переходим к пайплайну локации --- архитектурно проще
+(один длинный pipe из операторов), но с насыщенной алгоритмикой:
+скользящие окна с retract'ами, медиана по биконам, top-2, и
+линейная интерполяция координат.
