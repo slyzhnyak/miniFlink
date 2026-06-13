@@ -1,0 +1,20 @@
+; Пример 8 — демонстрация триггерной системы.
+;
+; Структура:
+;   - library `ex08_triggers_lib` (Domain, Items, Triggers) - ядро
+;   - executable `ex08_triggers` - топология (тонкая)
+;
+; Использует ex07_location_lib для Mock_source и Domain.packet/
+; gas_packet — Triggers работают на том же источнике что и FSM из ex07.
+
+(library
+ (name ex08_triggers_lib)
+ (libraries miniflink ex07_location_lib)
+ (modules domain items triggers)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70)))
+
+(executable
+ (name ex08_triggers)
+ (libraries miniflink ex07_location_lib ex08_triggers_lib)
+ (modules ex08_triggers)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70)))

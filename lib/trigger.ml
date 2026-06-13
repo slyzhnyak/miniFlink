@@ -196,6 +196,7 @@ let of_stream
   : a Mf_event.t Stream.t =
 
   let states : (string, (k, v, a) state * k) Hashtbl.t = Hashtbl.create 64 in
+  let last_event_ts : (string, Time.t) Hashtbl.t = Hashtbl.create 64 in
   let timers = Timers.create () in
   let out_buf : a Mf_event.t Queue.t = Queue.create () in
 
@@ -213,9 +214,15 @@ let of_stream
     | None -> None
   in
 
-  (* Обработка Data ((key, value), ts) *)
+  (* Обработка Data ((key, value), ts).
+     Out-of-order events (ts < last_event_ts[key]) игнорируются —
+     иначе опоздавший пакет с устаревшим значением мог бы ложно
+     перевести триггер в recovery. Триггер — strictly forward-in-time. *)
   let on_data (key : k) (value : v) (ts : Time.t) =
     let ks = key_to_string key in
+    let last = try Hashtbl.find last_event_ts ks with Not_found -> min_int in
+    if ts < last then () else begin
+    Hashtbl.replace last_event_ts ks ts;
     let st = get_state ks in
     match st with
     | S_ok ->
@@ -280,6 +287,7 @@ let of_stream
           problem_since; last_alert; last_alert_ts;
           recovery_since = ts; fire_at;
         })
+    end
   in
 
   (* Обработка таймера: переход из Pending_* в финальное состояние.
