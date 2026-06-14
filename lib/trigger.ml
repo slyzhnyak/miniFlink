@@ -85,6 +85,15 @@ type ('key, 'v, 'alert) spec = {
   s_severity         : severity;
   s_produce_alert    : key:'key -> value:'v -> ts:Time.t -> 'alert;
   s_produce_recovery : key:'key -> ts:Time.t -> 'alert;
+  (* Опциональные сериализаторы для persistence. Если хотя бы один
+     None, использовать backend в [of_stream] нельзя — получим
+     Invalid_argument. *)
+  s_serialize_key      : ('key -> Yojson.Safe.t) option;
+  s_deserialize_key    : (Yojson.Safe.t -> 'key) option;
+  s_serialize_value    : ('v -> Yojson.Safe.t) option;
+  s_deserialize_value  : (Yojson.Safe.t -> 'v) option;
+  s_serialize_alert    : ('alert -> Yojson.Safe.t) option;
+  s_deserialize_alert  : (Yojson.Safe.t -> 'alert) option;
 }
 
 let create
@@ -95,15 +104,27 @@ let create
     ?(severity     = Not_classified)
     ~produce_alert
     ~produce_recovery
+    ?serialize_key
+    ?deserialize_key
+    ?serialize_value
+    ?deserialize_value
+    ?serialize_alert
+    ?deserialize_alert
     () =
   {
-    s_name             = name;
-    s_condition        = condition;
-    s_problem_for      = problem_for;
-    s_recovery_for     = recovery_for;
-    s_severity         = severity;
-    s_produce_alert    = produce_alert;
-    s_produce_recovery = produce_recovery;
+    s_name              = name;
+    s_condition         = condition;
+    s_problem_for       = problem_for;
+    s_recovery_for      = recovery_for;
+    s_severity          = severity;
+    s_produce_alert     = produce_alert;
+    s_produce_recovery  = produce_recovery;
+    s_serialize_key     = serialize_key;
+    s_deserialize_key   = deserialize_key;
+    s_serialize_value   = serialize_value;
+    s_deserialize_value = deserialize_value;
+    s_serialize_alert   = serialize_alert;
+    s_deserialize_alert = deserialize_alert;
   }
 
 let name     s = s.s_name
@@ -191,9 +212,32 @@ let key_to_string : 'k -> string = fun k ->
 
 let of_stream
     (type k v a)
+    ?(backend : State_backend.t option)
     (spec : (k, v, a) spec)
     (source : (k * v) Mf_event.t Stream.t)
   : a Mf_event.t Stream.t =
+
+  (* Если backend подключён, обязательны сериализаторы для всех трёх
+     параметров. Иначе Invalid_argument в момент создания stream'а
+     (не на первом event'е). *)
+  (match backend with
+   | None -> ()
+   | Some _ ->
+     let missing =
+       (if spec.s_serialize_key     = None then ["serialize_key"]     else []) @
+       (if spec.s_deserialize_key   = None then ["deserialize_key"]   else []) @
+       (if spec.s_serialize_value   = None then ["serialize_value"]   else []) @
+       (if spec.s_deserialize_value = None then ["deserialize_value"] else []) @
+       (if spec.s_serialize_alert   = None then ["serialize_alert"]   else []) @
+       (if spec.s_deserialize_alert = None then ["deserialize_alert"] else [])
+     in
+     if missing <> [] then
+       invalid_arg (Printf.sprintf
+         "Trigger.of_stream: backend provided but missing serializers: %s"
+         (String.concat ", " missing)));
+  (* Step 1: backend parameter принимается, но snapshot/restore логика
+     ещё не реализована. Будет в Step 2. *)
+  let _ = backend in
 
   let states : (string, (k, v, a) state * k) Hashtbl.t = Hashtbl.create 64 in
   let last_event_ts : (string, Time.t) Hashtbl.t = Hashtbl.create 64 in
@@ -349,20 +393,24 @@ let of_stream
 
 let combine
     (type k v a)
+    ?(backend : State_backend.t option)
     (specs : (k, v, a) spec list)
     (source : (k * v) Mf_event.t Stream.t)
   : a Mf_event.t Stream.t =
   (* Простой подход: каждый триггер получает свою копию (через
      материализацию в список и обратно), затем сливаем через
      Mf_event.union. Это требует материализации, но для разумного
-     числа триггеров (<10) приемлемо. *)
+     числа триггеров (<10) приемлемо.
+
+     Если backend подключён — передаётся каждому триггеру; они
+     различаются по [name] и не интерферируют в backend по ключам. *)
   let source_list = Stream.to_list source in
   match specs with
   | [] -> Stream.empty
-  | [s] -> of_stream s (Stream.of_list source_list)
+  | [s] -> of_stream ?backend s (Stream.of_list source_list)
   | first :: rest ->
-    let first_stream = of_stream first (Stream.of_list source_list) in
+    let first_stream = of_stream ?backend first (Stream.of_list source_list) in
     List.fold_left
       (fun acc s ->
-         Mf_event.union acc (of_stream s (Stream.of_list source_list)))
+         Mf_event.union acc (of_stream ?backend s (Stream.of_list source_list)))
       first_stream rest
