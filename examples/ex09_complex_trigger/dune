@@ -1,0 +1,16 @@
+; Пример 9 - Multi-condition trigger через композицию items.
+;
+; Демонстрация сложного триггерного выражения вида
+; (CO>50 AND V<3.5 AND avg_rssi<-75) for 1m — нашими средствами.
+
+(library
+ (name ex09_complex_trigger_lib)
+ (libraries miniflink ex07_location_lib)
+ (modules domain items triggers)
+ (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70)))
+
+(executable
+ (name ex09_complex_trigger)
+ (libraries miniflink ex07_location_lib ex09_complex_trigger_lib)
+ (modules ex09_complex_trigger)
+ (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70)))
