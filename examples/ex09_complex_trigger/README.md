@@ -37,9 +37,10 @@ dune exec examples/ex09_complex_trigger/ex09_complex_trigger.exe
 === ex09: multi-condition evacuation trigger ===
 Условие: CO>50ppm И V<3.5В И avg_rssi_5m<-75dBm, дольше 1мин
 
-Источник: 2 шахтёра, симуляция 8 минут
-  M_critical: voltage 3.8→3.0В, RSSI~-80dBm (далеко), CO 30→100ppm в t=240с
-  M_safe:     voltage 3.9В, RSSI -45dBm (рядом), CO 10ppm (норма)
+Источник: 6 шахтёров из ex07 (M1-M6) + 2 шахтёра из ex09
+  M_critical (ex09): voltage 3.8→3.0В, RSSI~-80dBm (далеко), CO 30→100ppm в t=240с
+  M_safe     (ex09): voltage 3.9В, RSSI -45dBm (рядом), CO 10ppm (норма)
+  M1-M6      (ex07): voltage 3.2-4.0В, RSSI -45..-65 (норма), без CO-аномалий
 
   🆘 M_critical [360000 мс]: CRITICAL evacuation — CO=100 ppm, V=3.17 В, RSSI=-80.0 dBm
 
@@ -47,15 +48,18 @@ dune exec examples/ex09_complex_trigger/ex09_complex_trigger.exe
 Триггер сработал на M_critical когда все три условия дозрели одновременно.
 ```
 
-Логика:
+Топология показывает **избирательность** триггера на разнородном
+источнике: один alert из 8 шахтёров. Только у M_critical все три
+условия выполнены одновременно — M1-M6 имеют сильный RSSI (avg > -75),
+M_safe в норме по всем измерениям.
+
+Logика на M_critical:
 - voltage M_critical пересекает 3.5 примерно в t=225с
 - CO M_critical скачет с 30 до 100 в t=240с (становится > 50)
 - avg_rssi M_critical = -80 dBm (стабильно), первое 5-минутное окно
   закрывается в t=300с
 - В t=300с все три условия выполнены одновременно
 - problem_for = 1 минута дозревает в t=360с → emit alert
-
-M_safe в норме (voltage=3.9В, RSSI=-45dBm, CO=10ppm) → нет алерта.
 
 ## Структура
 

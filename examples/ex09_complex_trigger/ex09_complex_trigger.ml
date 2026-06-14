@@ -35,22 +35,37 @@ let () =
     Ex09_complex_trigger_lib.Triggers.v_problem
     Ex09_complex_trigger_lib.Triggers.rssi_problem;
 
-  Printf.printf "Источник: 2 шахтёра, симуляция 8 минут\n";
-  Printf.printf "  M_critical: voltage 3.8→3.0В, RSSI~-80dBm (далеко), CO 30→100ppm в t=240с\n";
-  Printf.printf "  M_safe:     voltage 3.9В, RSSI -45dBm (рядом), CO 10ppm (норма)\n\n";
+  Printf.printf "Источник: 6 шахтёров из ex07 (M1-M6) + 2 шахтёра из ex09\n";
+  Printf.printf "  M_critical (ex09): voltage 3.8→3.0В, RSSI~-80dBm (далеко), CO 30→100ppm в t=240с\n";
+  Printf.printf "  M_safe     (ex09): voltage 3.9В, RSSI -45dBm (рядом), CO 10ppm (норма)\n";
+  Printf.printf "  M1-M6      (ex07): voltage 3.2-4.0В, RSSI -45..-65 (норма), без CO-аномалий\n\n";
 
-  let module Src = Ex09_complex_trigger_lib.Demo_source in
+  let module Ex07_src = Ex07_location_lib.Mock_source.Default in
+  let module Demo_src = Ex09_complex_trigger_lib.Demo_source in
 
-  (* Two independent reads of the source — pull-streams can't be
-     duplicated (each call to s() consumes one event). For two
-     items derived from the same packet source, we read twice. *)
-  let packets_for_voltage = Src.read () |> Pipe.event_time ~lateness:(Time.seconds 1) in
-  let packets_for_rssi    = Src.read () |> Pipe.event_time ~lateness:(Time.seconds 1) in
-  let gas = Src.read_gas () |> Pipe.event_time ~lateness:(Time.seconds 1) in
+  (* Объединяем потоки из двух источников. ex07 даёт 6 шахтёров с
+     реалистичным сценарием, ex09 — 2 шахтёра с заданным сценарием для
+     срабатывания evacuation-trigger. После union — единый поток,
+     trigger сработает только на M_critical (только у него все три
+     условия одновременно). *)
+  let merged_packets =
+    Mf_event.union
+      (Ex07_src.read () |> Pipe.event_time ~lateness:(Time.seconds 1))
+      (Demo_src.read () |> Pipe.event_time ~lateness:(Time.seconds 1)) in
+  let merged_gas =
+    Mf_event.union
+      (Ex07_src.read_gas () |> Pipe.event_time ~lateness:(Time.seconds 1))
+      (Demo_src.read_gas () |> Pipe.event_time ~lateness:(Time.seconds 1)) in
+
+  (* Stream.split — правильный способ разделить pull-stream между
+     несколькими потребителями. Заменяет хак с двумя Src.read() из
+     первой версии ex09. *)
+  let packets_for_voltage, packets_for_rssi =
+    Stream.tee merged_packets in
 
   let module I = Ex09_complex_trigger_lib.Items in
   let voltage = I.voltage_item packets_for_voltage in
-  let co      = I.co_item gas in
+  let co      = I.co_item merged_gas in
   let rssi    = I.avg_rssi_item packets_for_rssi in
   let combined = I.combined_item ~voltage ~co ~rssi in
 
