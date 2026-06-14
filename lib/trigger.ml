@@ -30,6 +30,27 @@ let severity_name = function
   | Disaster -> "DISASTER"
 
 (* ────────────────────────────────────────────────────────────────────
+   Backend для persistence
+   ──────────────────────────────────────────────────────────────────── *)
+
+type backend = {
+  get    : string -> bytes option;
+  set    : string -> bytes -> unit;
+  delete : string -> unit;
+  keys   : unit -> string list;
+}
+
+(* Обёртка над State_backend_memory (Hashtbl) — для тестов и
+   простых случаев. *)
+let backend_of_memory (tbl : (string, bytes) Hashtbl.t) : backend =
+  {
+    get    = (fun k   -> Hashtbl.find_opt tbl k);
+    set    = (fun k v -> Hashtbl.replace tbl k v);
+    delete = (fun k   -> Hashtbl.remove tbl k);
+    keys   = (fun ()  -> Hashtbl.fold (fun k _ a -> k :: a) tbl []);
+  }
+
+(* ────────────────────────────────────────────────────────────────────
    Условие
    ──────────────────────────────────────────────────────────────────── *)
 
@@ -212,7 +233,7 @@ let key_to_string : 'k -> string = fun k ->
 
 let of_stream
     (type k v a)
-    ?(backend : State_backend.t option)
+    ?(backend : backend option)
     (spec : (k, v, a) spec)
     (source : (k * v) Mf_event.t Stream.t)
   : a Mf_event.t Stream.t =
@@ -235,14 +256,108 @@ let of_stream
        invalid_arg (Printf.sprintf
          "Trigger.of_stream: backend provided but missing serializers: %s"
          (String.concat ", " missing)));
-  (* Step 1: backend parameter принимается, но snapshot/restore логика
-     ещё не реализована. Будет в Step 2. *)
-  let _ = backend in
 
   let states : (string, (k, v, a) state * k) Hashtbl.t = Hashtbl.create 64 in
   let last_event_ts : (string, Time.t) Hashtbl.t = Hashtbl.create 64 in
   let timers = Timers.create () in
   let out_buf : a Mf_event.t Queue.t = Queue.create () in
+
+  (* ════════════════════════════════════════════════════════════════
+     PERSISTENCE LAYER (Step 2)
+
+     Сериализация state-машины в JSON, запись в backend на каждом
+     изменении state. Реализована только если [backend] передан;
+     иначе persist_state и restore_all — no-op.
+
+     Формат backend-ключа:
+       "trigger:{spec.name}:" ^ Yojson.to_string (serialize_key user_key)
+
+     Формат значения (JSON в bytes):
+       {
+         "key": <serialized 'k>,
+         "state": <tagged state>,
+         "last_event_ts": int
+       }
+
+     Tagged state:
+       {"tag":"ok"}
+       {"tag":"pending_problem", "since":int, "last_value":<v>, "fire_at":int}
+       {"tag":"problem", "since":int, "last_alert":<a>, "last_alert_ts":int}
+       {"tag":"pending_ok", "problem_since":int, "last_alert":<a>,
+        "last_alert_ts":int, "recovery_since":int, "fire_at":int}
+     ════════════════════════════════════════════════════════════════ *)
+
+  let key_prefix = "trigger:" ^ spec.s_name ^ ":" in
+
+  (* Безопасные дёрнут-сериализаторы. Вызываются только когда backend
+     подключён, т.е. сериализаторы заведомо Some после валидации. *)
+  let ser_v v =
+    match spec.s_serialize_value with
+    | Some f -> f v
+    | None -> assert false
+  in
+  let ser_a a =
+    match spec.s_serialize_alert with
+    | Some f -> f a
+    | None -> assert false
+  in
+  let ser_k k =
+    match spec.s_serialize_key with
+    | Some f -> f k
+    | None -> assert false
+  in
+
+  let state_to_json (s : (k, v, a) state) : Yojson.Safe.t =
+    match s with
+    | S_ok ->
+      `Assoc [("tag", `String "ok")]
+    | S_pending_problem { since; last_value; fire_at } ->
+      `Assoc [
+        ("tag",        `String "pending_problem");
+        ("since",      `Int since);
+        ("last_value", ser_v last_value);
+        ("fire_at",    `Int fire_at);
+      ]
+    | S_problem { since; last_alert; last_alert_ts } ->
+      `Assoc [
+        ("tag",            `String "problem");
+        ("since",          `Int since);
+        ("last_alert",     ser_a last_alert);
+        ("last_alert_ts",  `Int last_alert_ts);
+      ]
+    | S_pending_ok { problem_since; last_alert; last_alert_ts;
+                     recovery_since; fire_at } ->
+      `Assoc [
+        ("tag",             `String "pending_ok");
+        ("problem_since",   `Int problem_since);
+        ("last_alert",      ser_a last_alert);
+        ("last_alert_ts",   `Int last_alert_ts);
+        ("recovery_since",  `Int recovery_since);
+        ("fire_at",         `Int fire_at);
+      ]
+  in
+
+  let backend_key_for_user_key (key : k) : string =
+    key_prefix ^ Yojson.Safe.to_string (ser_k key)
+  in
+
+  let persist_state (ks : string) (key : k) (st : (k, v, a) state) : unit =
+    match backend with
+    | None -> ()
+    | Some be ->
+      let last_ts =
+        match Hashtbl.find_opt last_event_ts ks with
+        | Some t -> t | None -> 0
+      in
+      let json =
+        `Assoc [
+          ("key",            ser_k key);
+          ("state",          state_to_json st);
+          ("last_event_ts",  `Int last_ts);
+        ] in
+      let bk = backend_key_for_user_key key in
+      be.set bk (Bytes.of_string (Yojson.Safe.to_string json))
+  in
 
   let get_state ks =
     match Hashtbl.find_opt states ks with
@@ -250,7 +365,10 @@ let of_stream
     | None -> S_ok
   in
   let set_state ks key st =
-    Hashtbl.replace states ks (st, key)
+    Hashtbl.replace states ks (st, key);
+    (* На каждое изменение state — пишем snapshot в backend (если есть).
+       persist_state — no-op без backend'а. *)
+    persist_state ks key st
   in
   let get_key ks =
     match Hashtbl.find_opt states ks with
@@ -393,7 +511,7 @@ let of_stream
 
 let combine
     (type k v a)
-    ?(backend : State_backend.t option)
+    ?(backend : backend option)
     (specs : (k, v, a) spec list)
     (source : (k * v) Mf_event.t Stream.t)
   : a Mf_event.t Stream.t =

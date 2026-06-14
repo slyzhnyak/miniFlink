@@ -159,10 +159,30 @@ val create :
 val name     : ('key, 'v, 'alert) spec -> string
 val severity : ('key, 'v, 'alert) spec -> severity
 
+(** {1 Backend для persistence}
+
+    Простой record-of-functions интерфейс к key-value хранилищу.
+    Позволяет подключать любую реализацию (in-memory, RocksDB, mock
+    для тестов) через первоклассные значения, без functor'ов. *)
+
+type backend = {
+  get    : string -> bytes option;
+  set    : string -> bytes -> unit;
+  delete : string -> unit;
+  keys   : unit -> string list;
+}
+(** Минимальный key-value интерфейс. Ключи — strings, значения —
+    bytes. Trigger использует только [get]/[set]/[keys]; [delete]
+    для будущей admin-функциональности. *)
+
+val backend_of_memory : (string, bytes) Hashtbl.t -> backend
+(** Удобный конструктор: обёртка над [State_backend_memory] (Hashtbl).
+    Используется в тестах. *)
+
 (** {1 Основной оператор} *)
 
 val of_stream :
-  ?backend:State_backend.t ->
+  ?backend:backend ->
   ('key, 'v, 'alert) spec ->
   ('key * 'v) Mf_event.t Stream.t ->
   'alert Mf_event.t Stream.t
@@ -198,7 +218,7 @@ val of_stream :
     при завершении процесса). *)
 
 val combine :
-  ?backend:State_backend.t ->
+  ?backend:backend ->
   ('key, 'v, 'alert) spec list ->
   ('key * 'v) Mf_event.t Stream.t ->
   'alert Mf_event.t Stream.t
