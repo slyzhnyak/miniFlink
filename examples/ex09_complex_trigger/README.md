@@ -31,14 +31,31 @@ combined |> Trigger.of_stream Triggers.evacuation
 dune exec examples/ex09_complex_trigger/ex09_complex_trigger.exe
 ```
 
-На `Mock_source.Default` алерт **не срабатывает** — это правильное
-поведение. Default-сценарий не содержит шахтёра, у которого одновременно:
-- CO выше 50 ppm
-- voltage ниже 3.5 В
-- среднее RSSI за 5 минут хуже -75 dBm
+Вывод:
 
-Сложный multi-condition trigger срабатывает редко, только при настоящей
-опасности — в этом и смысл.
+```
+=== ex09: multi-condition evacuation trigger ===
+Условие: CO>50ppm И V<3.5В И avg_rssi_5m<-75dBm, дольше 1мин
+
+Источник: 2 шахтёра, симуляция 8 минут
+  M_critical: voltage 3.8→3.0В, RSSI~-80dBm (далеко), CO 30→100ppm в t=240с
+  M_safe:     voltage 3.9В, RSSI -45dBm (рядом), CO 10ppm (норма)
+
+  🆘 M_critical [360000 мс]: CRITICAL evacuation — CO=100 ppm, V=3.17 В, RSSI=-80.0 dBm
+
+Итого: 1 алертов (0 retracts)
+Триггер сработал на M_critical когда все три условия дозрели одновременно.
+```
+
+Логика:
+- voltage M_critical пересекает 3.5 примерно в t=225с
+- CO M_critical скачет с 30 до 100 в t=240с (становится > 50)
+- avg_rssi M_critical = -80 dBm (стабильно), первое 5-минутное окно
+  закрывается в t=300с
+- В t=300с все три условия выполнены одновременно
+- problem_for = 1 минута дозревает в t=360с → emit alert
+
+M_safe в норме (voltage=3.9В, RSSI=-45dBm, CO=10ppm) → нет алерта.
 
 ## Структура
 
@@ -48,9 +65,18 @@ ex09_complex_trigger/
                         + type combined для triplet значения
   items.ml           — voltage_item, co_item, avg_rssi_item, combined_item
   triggers.ml        — Triggers.evacuation с Trigger.custom predicate
+  demo_source.ml     — собственный источник: 2 шахтёра с заданными
+                        сценариями (M_critical в опасной зоне, M_safe
+                        в норме); 8 минут симуляции event-time
   ex09_complex_trigger.ml  — топология
   dune
 ```
+
+Demo_source — не модификация ex07's Mock_source, а отдельный
+небольшой источник с **детерминированным** сценарием, в котором
+триггер заведомо срабатывает. Это даёт живую регрессию полной цепочки
+(источник → items → window aggregate → process_keyed merger → trigger),
+не зависящую от Mock_source.Default ex07.
 
 ## Что демонстрирует
 

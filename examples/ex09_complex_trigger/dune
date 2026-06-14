@@ -6,7 +6,7 @@
 (library
  (name ex09_complex_trigger_lib)
  (libraries miniflink ex07_location_lib)
- (modules domain items triggers)
+ (modules domain items triggers demo_source)
  (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70)))
 
 (executable

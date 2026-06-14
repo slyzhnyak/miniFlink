@@ -35,14 +35,23 @@ let () =
     Ex09_complex_trigger_lib.Triggers.v_problem
     Ex09_complex_trigger_lib.Triggers.rssi_problem;
 
-  let module Src = Ex07_location_lib.Mock_source.Default in
-  let packets = Src.read () |> Pipe.event_time ~lateness:(Time.seconds 1) in
+  Printf.printf "Источник: 2 шахтёра, симуляция 8 минут\n";
+  Printf.printf "  M_critical: voltage 3.8→3.0В, RSSI~-80dBm (далеко), CO 30→100ppm в t=240с\n";
+  Printf.printf "  M_safe:     voltage 3.9В, RSSI -45dBm (рядом), CO 10ppm (норма)\n\n";
+
+  let module Src = Ex09_complex_trigger_lib.Demo_source in
+
+  (* Two independent reads of the source — pull-streams can't be
+     duplicated (each call to s() consumes one event). For two
+     items derived from the same packet source, we read twice. *)
+  let packets_for_voltage = Src.read () |> Pipe.event_time ~lateness:(Time.seconds 1) in
+  let packets_for_rssi    = Src.read () |> Pipe.event_time ~lateness:(Time.seconds 1) in
   let gas = Src.read_gas () |> Pipe.event_time ~lateness:(Time.seconds 1) in
 
   let module I = Ex09_complex_trigger_lib.Items in
-  let voltage = I.voltage_item packets in
+  let voltage = I.voltage_item packets_for_voltage in
   let co      = I.co_item gas in
-  let rssi    = I.avg_rssi_item packets in
+  let rssi    = I.avg_rssi_item packets_for_rssi in
   let combined = I.combined_item ~voltage ~co ~rssi in
 
   let alerts =
@@ -66,6 +75,7 @@ let () =
 
   Printf.printf "\nИтого: %d алертов (%d retracts)\n" !total !retracts;
   if !total = 0 then
-    Printf.printf "Default-сценарий не содержит шахтёра с критической комбинацией.\n\
-                   Это и есть смысл сложного триггера — он срабатывает редко,\n\
-                   только при настоящей угрозе.\n"
+    Printf.printf "Триггер не сработал — проверьте параметры сценария\n"
+  else
+    Printf.printf
+      "Триггер сработал на M_critical когда все три условия дозрели одновременно.\n"
