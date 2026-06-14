@@ -30,3 +30,47 @@ let flat_map f s =
 let iter  f s = let rec go () = match s () with None -> () | Some x -> f x; go () in go ()
 let fold  f z s = let a = ref z in iter (fun x -> a := f !a x) s; !a
 let to_list s = List.rev (fold (fun a x -> x :: a) [] s)
+
+let tee (s : 'a t) : 'a t * 'a t =
+  let q_a = Queue.create () in
+  let q_b = Queue.create () in
+  let ended = ref false in
+  (* Pull from src — кладём элемент в очередь "другой" копии, возвращаем элемент. *)
+  let next_a () =
+    if not (Queue.is_empty q_a) then Some (Queue.pop q_a)
+    else if !ended then None
+    else
+      match s () with
+      | None -> ended := true; None
+      | Some v -> Queue.push v q_b; Some v
+  in
+  let next_b () =
+    if not (Queue.is_empty q_b) then Some (Queue.pop q_b)
+    else if !ended then None
+    else
+      match s () with
+      | None -> ended := true; None
+      | Some v -> Queue.push v q_a; Some v
+  in
+  (next_a, next_b)
+
+let split n (s : 'a t) : 'a t list =
+  if n <= 0 then invalid_arg "Stream.split: n must be positive";
+  if n = 1 then [s]
+  else
+    let queues = Array.init n (fun _ -> Queue.create ()) in
+    let ended = ref false in
+    let make_next i () =
+      if not (Queue.is_empty queues.(i)) then Some (Queue.pop queues.(i))
+      else if !ended then None
+      else
+        match s () with
+        | None -> ended := true; None
+        | Some v ->
+          (* В очереди других копий кладём элемент, своему возвращаем напрямую. *)
+          for j = 0 to n - 1 do
+            if j <> i then Queue.push v queues.(j)
+          done;
+          Some v
+    in
+    List.init n make_next
