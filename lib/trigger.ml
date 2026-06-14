@@ -262,6 +262,15 @@ let of_stream
   let timers = Timers.create () in
   let out_buf : a Mf_event.t Queue.t = Queue.create () in
 
+  (* Локальный key_to_string. Без backend'а используем Hashtbl.hash
+     (быстрее), с backend'ом — JSON-сериализованный ключ (детерминирован,
+     корректно работает с restore). *)
+  let key_to_string (key : k) : string =
+    match backend, spec.s_serialize_key with
+    | Some _, Some sk -> Yojson.Safe.to_string (sk key)
+    | _ -> string_of_int (Hashtbl.hash key)
+  in
+
   (* ════════════════════════════════════════════════════════════════
      PERSISTENCE LAYER (Step 2)
 
@@ -358,6 +367,97 @@ let of_stream
       let bk = backend_key_for_user_key key in
       be.set bk (Bytes.of_string (Yojson.Safe.to_string json))
   in
+
+  (* Десериализация одного state-значения из JSON. *)
+  let deser_v j =
+    match spec.s_deserialize_value with
+    | Some f -> f j
+    | None -> assert false
+  in
+  let deser_a j =
+    match spec.s_deserialize_alert with
+    | Some f -> f j
+    | None -> assert false
+  in
+  let deser_k j =
+    match spec.s_deserialize_key with
+    | Some f -> f j
+    | None -> assert false
+  in
+  let state_of_json (j : Yojson.Safe.t) : (k, v, a) state =
+    match j with
+    | `Assoc kv ->
+      let tag = Yojson.Safe.Util.to_string (List.assoc "tag" kv) in
+      (match tag with
+       | "ok" -> S_ok
+       | "pending_problem" ->
+         let since      = Yojson.Safe.Util.to_int   (List.assoc "since" kv) in
+         let last_value = deser_v (List.assoc "last_value" kv) in
+         let fire_at    = Yojson.Safe.Util.to_int   (List.assoc "fire_at" kv) in
+         S_pending_problem { since; last_value; fire_at }
+       | "problem" ->
+         let since         = Yojson.Safe.Util.to_int (List.assoc "since" kv) in
+         let last_alert    = deser_a (List.assoc "last_alert" kv) in
+         let last_alert_ts = Yojson.Safe.Util.to_int (List.assoc "last_alert_ts" kv) in
+         S_problem { since; last_alert; last_alert_ts }
+       | "pending_ok" ->
+         let problem_since   = Yojson.Safe.Util.to_int (List.assoc "problem_since" kv) in
+         let last_alert      = deser_a (List.assoc "last_alert" kv) in
+         let last_alert_ts   = Yojson.Safe.Util.to_int (List.assoc "last_alert_ts" kv) in
+         let recovery_since  = Yojson.Safe.Util.to_int (List.assoc "recovery_since" kv) in
+         let fire_at         = Yojson.Safe.Util.to_int (List.assoc "fire_at" kv) in
+         S_pending_ok { problem_since; last_alert; last_alert_ts;
+                        recovery_since; fire_at }
+       | other -> failwith ("Trigger.restore: unknown state tag: " ^ other))
+    | _ -> failwith "Trigger.restore: state JSON not object"
+  in
+
+  (* На старте, если backend подключён, восстанавливаем все per-key
+     state из его записей. Заодно re-register'им pending timers
+     (они derive'ятся из Pending_* состояний). *)
+  let restore_all () =
+    match backend with
+    | None -> ()
+    | Some be ->
+      let all_keys = be.keys () in
+      List.iter (fun bk ->
+        (* Фильтр по нашему префиксу — backend может содержать ключи
+           других триггеров на той же backend-таблице. *)
+        let plen = String.length key_prefix in
+        if String.length bk >= plen
+           && String.sub bk 0 plen = key_prefix
+        then begin
+          match be.get bk with
+          | None -> ()  (* race с delete? игнорируем *)
+          | Some v_bytes ->
+            (try
+               let json = Yojson.Safe.from_string (Bytes.to_string v_bytes) in
+               match json with
+               | `Assoc kv ->
+                 let key       = deser_k (List.assoc "key" kv) in
+                 let st        = state_of_json (List.assoc "state" kv) in
+                 let last_ts   = Yojson.Safe.Util.to_int (List.assoc "last_event_ts" kv) in
+                 let ks        = key_to_string key in
+                 Hashtbl.replace states ks (st, key);
+                 if last_ts > 0 then
+                   Hashtbl.replace last_event_ts ks last_ts;
+                 (* Pending state'ы → восстанавливаем timer *)
+                 (match st with
+                  | S_pending_problem { fire_at; _ }
+                  | S_pending_ok { fire_at; _ } ->
+                    Timers.insert timers
+                      { t_fire_at = fire_at; t_key = ks }
+                  | _ -> ())
+               | _ -> failwith "Trigger.restore: top-level JSON not object"
+             with
+             | Yojson.Json_error msg ->
+               failwith ("Trigger.restore: invalid JSON in backend (key=" ^ bk ^ "): " ^ msg)
+             | Not_found ->
+               failwith ("Trigger.restore: missing field in backend record (key=" ^ bk ^ ")"))
+        end
+      ) all_keys
+  in
+  restore_all ();
 
   let get_state ks =
     match Hashtbl.find_opt states ks with

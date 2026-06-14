@@ -140,4 +140,134 @@ let () =
   with Invalid_argument msg ->
     pass (Printf.sprintf "raised: %s" (String.sub msg 0 (min 60 (String.length msg)))));
 
-  Printf.printf "\nStep 2 tests passed.\n"
+  (* ── 4. Restore: state переживает создание нового триггера ─── *)
+  Printf.printf "\n-- 4. Restore: new of_stream picks up persisted state\n";
+
+  let tbl3 = Hashtbl.create 16 in
+  let backend3 = Trigger.backend_of_memory tbl3 in
+  let spec3 = make_spec () in
+
+  (* Фаза 1: создаём триггер, прогоняем events до фактически
+     выпущенного Problem-алерта. Backend пишет state=Problem. *)
+  let phase1_events = [
+    Mf_event.data ("X", 7.0) 0;
+    Mf_event.wm 20_000;  (* problem_for=10000 → fires at 10000 *)
+  ] in
+  let phase1_stream =
+    phase1_events |> Stream.of_list
+    |> Trigger.of_stream ~backend:backend3 spec3 in
+  let phase1_data = ref 0 in
+  let rec drain1 () = match phase1_stream () with
+    | None -> ()
+    | Some (Mf_event.Data _) -> incr phase1_data; drain1 ()
+    | Some _ -> drain1 ()
+  in drain1 ();
+  check "phase 1: alert fired" (!phase1_data = 1);
+
+  (* Между фазами проверяем что backend имеет state=problem *)
+  let bk = "trigger:test_above5:\"X\"" in
+  (match Hashtbl.find_opt tbl3 bk with
+   | None -> fail "phase 1: backend has no key for X"
+   | Some v_bytes ->
+     let json = Yojson.Safe.from_string (Bytes.to_string v_bytes) in
+     match json with
+     | `Assoc kv ->
+       (match List.assoc "state" kv with
+        | `Assoc skv ->
+          let tag = Yojson.Safe.Util.to_string (List.assoc "tag" skv) in
+          check (Printf.sprintf "phase 1: state.tag=%s" tag) (tag = "problem")
+        | _ -> fail "state not assoc")
+     | _ -> fail "json not assoc");
+
+  (* Фаза 2: создаём НОВЫЙ триггер с тем же backend.
+     Restore должен подгрузить состояние, и при value=4.0 (ниже
+     порога) триггер эмитит Retract+Resolved. *)
+  let spec3' = make_spec () in
+  let phase2_events = [
+    Mf_event.data ("X", 4.0) 30_000;  (* recovery — ниже порога *)
+  ] in
+  let phase2_stream =
+    phase2_events |> Stream.of_list
+    |> Trigger.of_stream ~backend:backend3 spec3' in
+  let phase2_data = ref 0 in
+  let phase2_retract = ref 0 in
+  let rec drain2 () = match phase2_stream () with
+    | None -> ()
+    | Some (Mf_event.Data _) -> incr phase2_data; drain2 ()
+    | Some (Mf_event.Retract _) -> incr phase2_retract; drain2 ()
+    | Some _ -> drain2 ()
+  in drain2 ();
+  check (Printf.sprintf "phase 2: %d Data, %d Retract (expect 1D=Resolved + 1R=of-Problem)"
+           !phase2_data !phase2_retract)
+    (!phase2_data = 1 && !phase2_retract = 1);
+
+  (* После recovery в backend должно быть state=ok *)
+  (match Hashtbl.find_opt tbl3 bk with
+   | None -> fail "phase 2: backend has no key for X"
+   | Some v_bytes ->
+     let json = Yojson.Safe.from_string (Bytes.to_string v_bytes) in
+     match json with
+     | `Assoc kv ->
+       (match List.assoc "state" kv with
+        | `Assoc skv ->
+          let tag = Yojson.Safe.Util.to_string (List.assoc "tag" skv) in
+          check (Printf.sprintf "phase 2: state.tag=%s" tag) (tag = "ok")
+        | _ -> fail "state not assoc")
+     | _ -> fail "json not assoc");
+
+  (* ── 5. Restore Pending_problem: timer пересоздаётся ──────── *)
+  Printf.printf "\n-- 5. Restore Pending_problem: timer re-registered\n";
+
+  let tbl4 = Hashtbl.create 16 in
+  let backend4 = Trigger.backend_of_memory tbl4 in
+
+  (* Фаза 1: event входит в проблемную зону, debounce 10000ms,
+     но wm только до 5000 (не fire'ил пока). State = Pending_problem. *)
+  let p1 = [
+    Mf_event.data ("Y", 7.0) 0;
+    Mf_event.wm 5_000;
+  ] in
+  let s1 =
+    p1 |> Stream.of_list
+    |> Trigger.of_stream ~backend:backend4 (make_spec ()) in
+  let d1 = ref 0 in
+  let rec drain () = match s1 () with
+    | None -> ()
+    | Some (Mf_event.Data _) -> incr d1; drain ()
+    | Some _ -> drain ()
+  in drain ();
+  check "phase 1: no alert yet (debounce not matured)" (!d1 = 0);
+
+  let bky = "trigger:test_above5:\"Y\"" in
+  (match Hashtbl.find_opt tbl4 bky with
+   | Some v_bytes ->
+     let json = Yojson.Safe.from_string (Bytes.to_string v_bytes) in
+     (match json with
+      | `Assoc kv ->
+        (match List.assoc "state" kv with
+         | `Assoc skv ->
+           let tag = Yojson.Safe.Util.to_string (List.assoc "tag" skv) in
+           check (Printf.sprintf "phase 1: state.tag=%s (Pending_problem)" tag)
+             (tag = "pending_problem")
+         | _ -> fail "state not assoc")
+      | _ -> fail "json not assoc")
+   | None -> fail "phase 1: no backend record");
+
+  (* Фаза 2: новый триггер. Restore должен подтянуть Pending_problem
+     с fire_at=10000 + re-register timer. После wm=15000 timer fires. *)
+  let p2 = [
+    Mf_event.wm 15_000;
+  ] in
+  let s2 =
+    p2 |> Stream.of_list
+    |> Trigger.of_stream ~backend:backend4 (make_spec ()) in
+  let d2 = ref 0 in
+  let rec drain () = match s2 () with
+    | None -> ()
+    | Some (Mf_event.Data _) -> incr d2; drain ()
+    | Some _ -> drain ()
+  in drain ();
+  check (Printf.sprintf "phase 2: timer fires after restore (got %d Data)" !d2)
+    (!d2 = 1);
+
+  Printf.printf "\nStep 2+3 tests passed.\n"
