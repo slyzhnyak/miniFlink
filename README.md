@@ -558,21 +558,30 @@ Baseline для регрессий теперь даёт `bench/bench_ex07.ml` (
 - [ ] **Broadcast state.** Состояние, реплицируемое на всех воркеров
   (правила/конфиг, видимые всем). На single-node проще чем в
   распределённом. Низкая-средняя сложность.
-- [ ] **Durable-таймеры и persistent state для оставшегося stateful
-  оператора (переживающие рестарт).** Три оператора уже сделаны
-  (см. закрытые пункты в Приоритете 7 ниже). Остаётся один:
-  - `Pipe.window_agg_keyed` — содержимое окон в зоне `allowed_lateness`.
-    На рестарте retract'ы от опоздавших пакетов перестают эмититься,
-    inconsistent state с downstream.
+- [x] **Durable-таймеры и persistent state для всех четырёх
+  stateful операторов (переживают рестарт).** Все четыре оператора
+  имеют опциональный `?backend:Persistence_backend.t` параметр; с
+  подключённым backend'ом per-key state и timers сохраняются в
+  JSON и восстанавливаются на старте автоматически. Общий тип
+  `Persistence_backend.t` (record-of-functions `get/set/delete/keys`)
+  вынесен в `lib/persistence_backend.ml/mli`; любой KV-store
+  подходит (in-memory Hashtbl, RocksDB через обёртку, mock для
+  тестов). См. закрытые пункты по каждому оператору в Приоритете 7
+  ниже (Trigger, silence_age, process_keyed, window_fold).
 
-  Полноценное решение: содержимое окон + watermark в зоне lateness
-  снапшотятся вместе в checkpoint и восстанавливаются при recovery
-  автоматически. Подход уже проверен на трёх операторах
-  (`Trigger`, `Item.silence_age`, `Pipe.process_keyed`) — общий
-  `Persistence_backend` тип, JSON-сериализация per-key state,
-  восстановление на старте. Для window_agg_keyed та же схема: см.
-  `docs/trigger-persistence.md`, `docs/silence-age-persistence.md`
-  и `docs/process-keyed-persistence.md` как образцы.
+  Что **остаётся** для полного closure темы persistence:
+  - **`Pipe.window_agg` / `window_agg_keyed`** работают поверх
+    `window_fold`, но используют `Agg.t` с экзистенциальным
+    типом аккумулятора — пользователь не видит `'acc` и не может
+    дать `serialize_acc`. Чтобы сделать `window_agg` полностью
+    persistent, нужно расширить `Agg.t` с опциональными persistence
+    hooks per встроенный агрегатор (`count` это `int`, `sum` это
+    `float`, `mean` это `float*int` и т.д.). Это refactor `lib/agg.ml`,
+    отдельный TODO. Пока работа-around: использовать `window_fold`
+    напрямую где нужна persistence в окнах, теряя удобство `Agg.t`.
+  - **`Pipe.count_window`, `Pipe.global_window`, `Pipe.session_window`** —
+    не были в scope изначального TODO, но имеют per-key state. Та же
+    схема (Persistence_backend + JSON) применима если понадобится.
 
 - [ ] **Kafka EOS: транзакции в C-слое.** `kafka_rdkafka.ml` имеет
   заглушки `begin_txn`/`commit_txn` (через flush); для полного
@@ -643,9 +652,10 @@ evolution уже частично покрывают).
   формат backend-ключей и ограничения — в
   `docs/trigger-persistence.md`. Practical guide в
   `docs/triggers-cookbook.md`. Из четырёх stateful операторов
-  закрыты три (`Trigger`, `silence_age`, `process_keyed`); остаётся
-  один (`window_agg_keyed`) — см. отдельный открытый пункт
-  «Durable таймеры» в Приоритете 6.
+  закрыты четыре (`Trigger`, `silence_age`, `process_keyed`,
+  `window_fold`) — см. отдельные закрытые пункты ниже. Тема
+  persistence stateful операторов закрыта (см. также закрытый пункт
+  «Durable-таймеры» в Приоритете 6).
 - [x] **Persistence `Item.silence_age` (переживает рестарт).**
   `Item.silence_age` принимает опциональный `?backend` +
   `?backend_name` + сериализаторы ключа. С backend'ом
@@ -673,6 +683,25 @@ evolution уже частично покрывают).
   ex07.connectivity_alerts) доказывают invariant
   `phase1_alerts + phase2_alerts = baseline_alerts` per key.
   Документация: `docs/process-keyed-persistence.md`.
+- [x] **Persistence `Pipe.window_fold` (переживает рестарт).**
+  Четвёртый и последний stateful оператор. Принимает опциональный
+  `?backend` + `?backend_name` + `?serialize_acc`/`?deserialize_acc`.
+  Per-window state — `(FOpen | FFired)` × `accumulator` × `nonempty` —
+  сохраняется в JSON на каждом watermark'е (натуральный checkpoint
+  barrier), не на каждом event'е. Один backend-ключ на окно:
+  `"window_fold:{backend_name}:{user_key}:{start}:{stop}"`. После
+  рестарта окна в `FOpen` продолжают накапливать, окна в `FFired`
+  корректно обрабатывают late events (retract + re-emit).
+  Дополнительно: при подключённом backend'е end-of-stream {b не}
+  fire'ит open окна (предполагается что upstream восстановится после
+  рестарта); без backend'а поведение прежнее (final flush).
+  5 unit-тестов + E2E на Mock_source.Default со sliding(60s, 15s)
+  и `allowed_lateness=30s` доказывают invariant
+  `phase1_emits + phase2_emits = baseline_emits` per key (132 = 52+80).
+  **Ограничение:** `Pipe.window_agg` / `window_agg_keyed` используют
+  `Agg.t` с экзистенциальным аккумулятором — для них persistence
+  напрямую невозможна, нужен refactor `Agg.t` (см. открытый пункт в
+  Приоритете 6). Документация: `docs/window-fold-persistence.md`.
 - [ ] **Refresh внутри Problem-состояния (опциональный).** Сейчас
   триггер sticky: один Data на Problem, retract+Recovery на выход.
   Для случаев типа «обновить алерт при изменении ppm >20% или

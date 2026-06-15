@@ -222,24 +222,192 @@ let window_fold
     (module K : Keyed.S with type t = a)
     ?(latency = 0)
     ?(allowed_lateness = 0)
+    ?(backend : Persistence_backend.t option)
+    ?(backend_name : string option)
+    ?(serialize_acc : (acc -> Yojson.Safe.t) option)
+    ?(deserialize_acc : (Yojson.Safe.t -> acc) option)
     (spec : win_spec)
     ~(init : unit -> acc)
     ~(add  : acc -> a -> acc)
     (upstream : a Mf_event.t Stream.t)
     : (string * acc) Mf_event.t Stream.t =
+
+  (* Если backend подключён — обязательны name + сериализаторы. *)
+  (match backend with
+   | None -> ()
+   | Some _ ->
+     let missing =
+       (if backend_name    = None then ["backend_name"]    else []) @
+       (if serialize_acc   = None then ["serialize_acc"]   else []) @
+       (if deserialize_acc = None then ["deserialize_acc"] else [])
+     in
+     if missing <> [] then
+       invalid_arg (Printf.sprintf
+         "Window.window_fold: backend provided but missing: %s"
+         (String.concat ", " missing)));
+
   let tbl : (win_key, acc fold_state) Hashtbl.t = Hashtbl.create 4096 in
   let out : (string * acc) Mf_event.t Queue.t = Queue.create () in
   let emit_data k stop acc = Queue.push (Mf_event.data (k, acc) stop) out in
   let emit_retract k stop acc = Queue.push (Mf_event.retract (k, acc) stop) out in
+
+  (* ════════════════════════════════════════════════════════════════
+     PERSISTENCE LAYER
+
+     Backend-ключ:
+       "window_fold:{backend_name}:{user_key}:{start}:{stop}"
+
+     Значение (JSON):
+       {
+         "state":    "open" | "fired",
+         "acc":      <serialized 'acc>,
+         "nonempty": bool
+       }
+
+     Snapshot пишется на каждом Watermark: после обработки
+     to_fire/to_remove логики записываем текущее состояние всех
+     записей tbl в backend. Это даёт consistent snapshot потому что
+     watermark — естественный checkpoint barrier.
+     ════════════════════════════════════════════════════════════════ *)
+  let key_prefix =
+    match backend_name with
+    | Some n -> "window_fold:" ^ n ^ ":"
+    | None -> ""
+  in
+
+  let ser_acc a =
+    match serialize_acc with
+    | Some f -> f a
+    | None -> assert false
+  in
+  let deser_acc j =
+    match deserialize_acc with
+    | Some f -> f j
+    | None -> assert false
+  in
+
+  (* Backend-ключ для (user_key, start, stop). Используем
+     ':'-разделители; user_key может содержать ':' но это не
+     приводит к коллизиям так как start/stop — int. *)
+  let backend_key_for (uk, start, stop) =
+    Printf.sprintf "%s%s:%d:%d" key_prefix uk start stop
+  in
+
+  (* Разбор backend-ключа обратно в win_key. Берём из конца два int
+     (start, stop), всё остальное между prefix и start — user_key. *)
+  let parse_backend_key (bk : string) : win_key option =
+    let plen = String.length key_prefix in
+    if String.length bk < plen
+       || String.sub bk 0 plen <> key_prefix
+    then None
+    else
+      try
+        let suffix = String.sub bk plen (String.length bk - plen) in
+        (* Найти последние два ':' *)
+        let last_colon = String.rindex suffix ':' in
+        let pre = String.sub suffix 0 last_colon in
+        let stop_str = String.sub suffix (last_colon + 1)
+                         (String.length suffix - last_colon - 1) in
+        let last_colon2 = String.rindex pre ':' in
+        let uk = String.sub pre 0 last_colon2 in
+        let start_str = String.sub pre (last_colon2 + 1)
+                          (String.length pre - last_colon2 - 1) in
+        Some (uk, int_of_string start_str, int_of_string stop_str)
+      with _ -> None
+  in
+
+  let state_to_json (st : acc fold_state) : Yojson.Safe.t =
+    match st with
+    | FOpen (acc, nonempty) ->
+      `Assoc [
+        ("state",    `String "open");
+        ("acc",      ser_acc acc);
+        ("nonempty", `Bool nonempty);
+      ]
+    | FFired (acc, nonempty) ->
+      `Assoc [
+        ("state",    `String "fired");
+        ("acc",      ser_acc acc);
+        ("nonempty", `Bool nonempty);
+      ]
+  in
+
+  let state_of_json (j : Yojson.Safe.t) : acc fold_state =
+    match j with
+    | `Assoc kv ->
+      let state = Yojson.Safe.Util.to_string (List.assoc "state" kv) in
+      let acc = deser_acc (List.assoc "acc" kv) in
+      let nonempty = Yojson.Safe.Util.to_bool (List.assoc "nonempty" kv) in
+      (match state with
+       | "open" -> FOpen (acc, nonempty)
+       | "fired" -> FFired (acc, nonempty)
+       | other -> failwith ("window_fold restore: unknown state tag: " ^ other))
+    | _ -> failwith "window_fold restore: top-level not assoc"
+  in
+
+  (* Snapshot всех окон в backend.
+     Также собираем set текущих ключей tbl чтобы удалить из backend
+     записи которые были удалены из tbl (FFired beyond lateness). *)
+  let persist_all () =
+    match backend with
+    | None -> ()
+    | Some be ->
+      let current_keys = Hashtbl.create 64 in
+      Hashtbl.iter (fun key st ->
+        let bk = backend_key_for key in
+        Hashtbl.add current_keys bk ();
+        be.set bk (Bytes.of_string (Yojson.Safe.to_string (state_to_json st)))
+      ) tbl;
+      (* Удалить из backend ключи которые больше не в tbl *)
+      List.iter (fun bk ->
+        let plen = String.length key_prefix in
+        if String.length bk >= plen
+           && String.sub bk 0 plen = key_prefix
+           && not (Hashtbl.mem current_keys bk)
+        then be.delete bk
+      ) (be.keys ())
+  in
+
+  (* Восстановление при старте. *)
+  let restore_all () =
+    match backend with
+    | None -> ()
+    | Some be ->
+      List.iter (fun bk ->
+        match parse_backend_key bk with
+        | None -> ()
+        | Some win_key ->
+          match be.get bk with
+          | None -> ()
+          | Some v_bytes ->
+            (try
+              let json = Yojson.Safe.from_string (Bytes.to_string v_bytes) in
+              let st = state_of_json json in
+              Hashtbl.replace tbl win_key st
+            with
+            | Yojson.Json_error msg ->
+              failwith ("window_fold restore: invalid JSON (" ^ bk ^ "): " ^ msg))
+      ) (be.keys ())
+  in
+  restore_all ();
+
   fun () ->
     let rec pull () =
       if not (Queue.is_empty out) then Some (Queue.pop out) else
       match upstream () with
       | None ->
-        Hashtbl.iter (fun (k,_,stop) st ->
-          match st with FOpen (acc, true) -> emit_data k stop acc | _ -> ()
-        ) tbl;
-        Hashtbl.clear tbl;
+        (* На конце потока поведение зависит от наличия backend:
+           - Без backend: end-of-stream fire — финальная очистка,
+             выдаём что есть, чтобы данные не потерялись.
+           - С backend: считаем что upstream может вернуться (recovery
+             сценарий) и оставляем open окна в backend как есть, чтобы
+             новый instance продолжил их при рестарте. *)
+        if backend = None then begin
+          Hashtbl.iter (fun (k,_,stop) st ->
+            match st with FOpen (acc, true) -> emit_data k stop acc | _ -> ()
+          ) tbl;
+          Hashtbl.clear tbl
+        end;
         if Queue.is_empty out then None else Some (Queue.pop out)
       | Some (Mf_event.Watermark wm) ->
         (* Open окна со stop+latency <= wm → Fire (с двухфазным проходом) *)
@@ -265,6 +433,8 @@ let window_fold
           | _ -> ()
         ) tbl;
         List.iter (Hashtbl.remove tbl) !to_remove;
+        (* Snapshot после всех изменений по watermark'у *)
+        persist_all ();
         Queue.push (Mf_event.wm wm) out;
         pull ()
       | Some (Mf_event.Retract _) -> pull ()
