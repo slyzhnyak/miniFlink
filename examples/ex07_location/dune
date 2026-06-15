@@ -9,8 +9,8 @@
 (library
  (name ex07_location_lib)
  (libraries miniflink)
- (modules domain mock_source mock_sink pipelines)
- (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70)))
+ (modules domain mock_source mock_sink pipelines replayable_mock)
+ (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70)))
 
 (executable
  (name ex07_location)
