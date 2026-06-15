@@ -94,5 +94,31 @@ state** через опциональный параметр `?backend` у `Trig
    item |> Trigger.of_stream ~backend triggers_spec
    ```
 
-Подробности — в `docs/triggers-cookbook.md` (раздел Persistence) и
-`docs/trigger-persistence.md` (формат backend, гарантии, ограничения).
+### no_packets и persistence
+
+Триггер `no_packets` особенный — он опирается на `Item.silence_age`
+который тоже хранит per-key state (`last_seen` и pending tick
+timer). Чтобы триггер «нет пакетов 2 минуты» **полностью** пережил
+рестарт, нужно подключить persistence и к silence_age **тоже**:
+
+```ocaml
+let no_packets_item packets =
+  packets
+  |> Item.silence_age
+       ~backend                       (* тот же что у Trigger *)
+       ~backend_name:"no_packets"
+       ~serialize_key:(fun k -> `String k)
+       ~deserialize_key:(fun j -> Yojson.Safe.Util.to_string j)
+       ~by:(fun (p : Domain.packet) -> p.lamp)
+       ~tick:(Time.seconds 30)
+```
+
+С обоими подключёнными к одному backend'у после рестарта
+восстанавливается **и** silence_age (знает `last_seen` каждого
+шахтёра), **и** trigger (помнит свой Pending_problem). Без
+silence_age persistence триггер `no_packets` после рестарта получит
+ложный `(key, 0)` и сбросит debounce.
+
+Подробности — в `docs/triggers-cookbook.md` (раздел Persistence),
+`docs/trigger-persistence.md` (Trigger reference) и
+`docs/silence-age-persistence.md` (silence_age reference).

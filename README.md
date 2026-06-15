@@ -559,29 +559,27 @@ Baseline для регрессий теперь даёт `bench/bench_ex07.ml` (
   (правила/конфиг, видимые всем). На single-node проще чем в
   распределённом. Низкая-средняя сложность.
 - [ ] **Durable-таймеры и persistent state для оставшихся stateful
-  операторов (переживающие рестарт).** Триггеры уже сделаны (см.
-  отдельный закрытый пункт в Приоритете 7 ниже). Остаются три
-  оператора:
+  операторов (переживающие рестарт).** Триггеры и `silence_age` уже
+  сделаны (см. отдельные закрытые пункты в Приоритете 7 ниже).
+  Остаются два оператора:
   - `Pipe.process_keyed` — self-timers и per-key state. Для рестарта
     есть паттерн пере-регистрации из снапшота (`set_event_timer_for`,
     покрыт тестом), но он требует кода в каждом пайплайне.
   - `Pipe.window_agg_keyed` — содержимое окон в зоне `allowed_lateness`.
     На рестарте retract'ы от опоздавших пакетов перестают эмититься,
     inconsistent state с downstream.
-  - `lib/item.ml` `silence_age` — `last_seen` per key + tick таймеры.
-    После рестарта silence обнуляется ложно.
 
   Полноценное решение: таймеры и keyed-state снапшотятся вместе в
   checkpoint и восстанавливаются при recovery автоматически. Важно
   для heartbeat-задач (пропавший до краха источник должен
   обнаружиться после рестарта без ручной пере-регистрации) и
   безопасности (активный газовый алерт не должен теряться при
-  рестарте сервера). Средняя сложность: сериализация TimerSet +
-  state-таблиц + интеграция с checkpoint_parallel. Подход уже
-  проверен на `Trigger` (см. `docs/trigger-persistence.md`) —
-  можно использовать ту же схему для оставшихся операторов:
-  record-of-functions backend + JSON-сериализация + восстановление
-  на старте.
+  рестарте сервера). Подход уже проверен на двух операторах
+  (`Trigger`, `Item.silence_age`) — общий [Persistence_backend]
+  тип, JSON-сериализация per-key state, восстановление на старте.
+  Для оставшихся двух операторов та же схема: см.
+  `docs/trigger-persistence.md` и `docs/silence-age-persistence.md`
+  как образцы.
 
 - [ ] **Kafka EOS: транзакции в C-слое.** `kafka_rdkafka.ml` имеет
   заглушки `begin_txn`/`commit_txn` (через flush); для полного
@@ -652,9 +650,20 @@ evolution уже частично покрывают).
   формат backend-ключей и ограничения — в
   `docs/trigger-persistence.md`. Practical guide в
   `docs/triggers-cookbook.md`. Из четырёх stateful операторов
-  закрыт первый; остальные три (process_keyed, window_agg_keyed,
-  silence_age) — см. отдельный открытый пункт «Durable таймеры»
-  в Приоритете 6.
+  закрыты два (`Trigger` и `silence_age`); остальные два
+  (`process_keyed`, `window_agg_keyed`) — см. отдельный открытый
+  пункт «Durable таймеры» в Приоритете 6.
+- [x] **Persistence `Item.silence_age` (переживает рестарт).**
+  `Item.silence_age` принимает опциональный `?backend` +
+  `?backend_name` + сериализаторы ключа. С backend'ом
+  per-key state (`last_seen_ts` + pending timer `fire_at`)
+  сохраняется в JSON и восстанавливается на старте. Использует
+  общий `Persistence_backend` (выделен из `Trigger.backend` как
+  shared infrastructure). После рестарта silence для каждого ключа
+  продолжается с того же момента, не сбрасывается. 5 unit-тестов
+  + E2E на Mock_source.Default доказывают invariant
+  `phase1_zeros + phase2_zeros = baseline_zeros` per key.
+  Документация: `docs/silence-age-persistence.md`.
 - [ ] **Refresh внутри Problem-состояния (опциональный).** Сейчас
   триггер sticky: один Data на Problem, retract+Recovery на выход.
   Для случаев типа «обновить алерт при изменении ppm >20% или
