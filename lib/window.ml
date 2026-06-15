@@ -396,10 +396,18 @@ let window_fold
       if not (Queue.is_empty out) then Some (Queue.pop out) else
       match upstream () with
       | None ->
-        Hashtbl.iter (fun (k,_,stop) st ->
-          match st with FOpen (acc, true) -> emit_data k stop acc | _ -> ()
-        ) tbl;
-        Hashtbl.clear tbl;
+        (* На конце потока поведение зависит от наличия backend:
+           - Без backend: end-of-stream fire — финальная очистка,
+             выдаём что есть, чтобы данные не потерялись.
+           - С backend: считаем что upstream может вернуться (recovery
+             сценарий) и оставляем open окна в backend как есть, чтобы
+             новый instance продолжил их при рестарте. *)
+        if backend = None then begin
+          Hashtbl.iter (fun (k,_,stop) st ->
+            match st with FOpen (acc, true) -> emit_data k stop acc | _ -> ()
+          ) tbl;
+          Hashtbl.clear tbl
+        end;
         if Queue.is_empty out then None else Some (Queue.pop out)
       | Some (Mf_event.Watermark wm) ->
         (* Open окна со stop+latency <= wm → Fire (с двухфазным проходом) *)
