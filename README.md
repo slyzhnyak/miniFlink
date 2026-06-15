@@ -558,28 +558,21 @@ Baseline для регрессий теперь даёт `bench/bench_ex07.ml` (
 - [ ] **Broadcast state.** Состояние, реплицируемое на всех воркеров
   (правила/конфиг, видимые всем). На single-node проще чем в
   распределённом. Низкая-средняя сложность.
-- [ ] **Durable-таймеры и persistent state для оставшихся stateful
-  операторов (переживающие рестарт).** Триггеры и `silence_age` уже
-  сделаны (см. отдельные закрытые пункты в Приоритете 7 ниже).
-  Остаются два оператора:
-  - `Pipe.process_keyed` — self-timers и per-key state. Для рестарта
-    есть паттерн пере-регистрации из снапшота (`set_event_timer_for`,
-    покрыт тестом), но он требует кода в каждом пайплайне.
+- [ ] **Durable-таймеры и persistent state для оставшегося stateful
+  оператора (переживающие рестарт).** Три оператора уже сделаны
+  (см. закрытые пункты в Приоритете 7 ниже). Остаётся один:
   - `Pipe.window_agg_keyed` — содержимое окон в зоне `allowed_lateness`.
     На рестарте retract'ы от опоздавших пакетов перестают эмититься,
     inconsistent state с downstream.
 
-  Полноценное решение: таймеры и keyed-state снапшотятся вместе в
-  checkpoint и восстанавливаются при recovery автоматически. Важно
-  для heartbeat-задач (пропавший до краха источник должен
-  обнаружиться после рестарта без ручной пере-регистрации) и
-  безопасности (активный газовый алерт не должен теряться при
-  рестарте сервера). Подход уже проверен на двух операторах
-  (`Trigger`, `Item.silence_age`) — общий [Persistence_backend]
-  тип, JSON-сериализация per-key state, восстановление на старте.
-  Для оставшихся двух операторов та же схема: см.
-  `docs/trigger-persistence.md` и `docs/silence-age-persistence.md`
-  как образцы.
+  Полноценное решение: содержимое окон + watermark в зоне lateness
+  снапшотятся вместе в checkpoint и восстанавливаются при recovery
+  автоматически. Подход уже проверен на трёх операторах
+  (`Trigger`, `Item.silence_age`, `Pipe.process_keyed`) — общий
+  `Persistence_backend` тип, JSON-сериализация per-key state,
+  восстановление на старте. Для window_agg_keyed та же схема: см.
+  `docs/trigger-persistence.md`, `docs/silence-age-persistence.md`
+  и `docs/process-keyed-persistence.md` как образцы.
 
 - [ ] **Kafka EOS: транзакции в C-слое.** `kafka_rdkafka.ml` имеет
   заглушки `begin_txn`/`commit_txn` (через flush); для полного
@@ -650,9 +643,9 @@ evolution уже частично покрывают).
   формат backend-ключей и ограничения — в
   `docs/trigger-persistence.md`. Practical guide в
   `docs/triggers-cookbook.md`. Из четырёх stateful операторов
-  закрыты два (`Trigger` и `silence_age`); остальные два
-  (`process_keyed`, `window_agg_keyed`) — см. отдельный открытый
-  пункт «Durable таймеры» в Приоритете 6.
+  закрыты три (`Trigger`, `silence_age`, `process_keyed`); остаётся
+  один (`window_agg_keyed`) — см. отдельный открытый пункт
+  «Durable таймеры» в Приоритете 6.
 - [x] **Persistence `Item.silence_age` (переживает рестарт).**
   `Item.silence_age` принимает опциональный `?backend` +
   `?backend_name` + сериализаторы ключа. С backend'ом
@@ -664,6 +657,22 @@ evolution уже частично покрывают).
   + E2E на Mock_source.Default доказывают invariant
   `phase1_zeros + phase2_zeros = baseline_zeros` per key.
   Документация: `docs/silence-age-persistence.md`.
+- [x] **Persistence `Pipe.process_keyed` (переживает рестарт).**
+  `Pipe.process_keyed` принимает опциональный `?backend` +
+  `?backend_name` + `?serialize_state`/`?deserialize_state` для
+  пользовательского типа `'st`. С backend'ом per-key state +
+  per-key event_timers + per-key processing_timers сохраняются в
+  JSON после каждого `on_event`/`on_timer`. На старте `restore_all`
+  загружает все state'ы и пересоздаёт таймеры в TimerSet.
+  Ключ всегда `string` (через `Keyed.S.key`), поэтому пользователь
+  даёт только сериализаторы state'а — проще чем у Trigger где
+  было три параметризованных типа. Snapshot пишется после {b каждого}
+  on_event/on_timer (даже если state не изменился) — безопасно но
+  не оптимально, watermark-based batched snapshot — TODO.
+  5 unit-тестов + E2E на синтетическом FSM (паттерн
+  ex07.connectivity_alerts) доказывают invariant
+  `phase1_alerts + phase2_alerts = baseline_alerts` per key.
+  Документация: `docs/process-keyed-persistence.md`.
 - [ ] **Refresh внутри Problem-состояния (опциональный).** Сейчас
   триггер sticky: один Data на Problem, retract+Recovery на выход.
   Для случаев типа «обновить алерт при изменении ppm >20% или
