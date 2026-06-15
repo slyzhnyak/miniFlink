@@ -316,6 +316,10 @@ val process_keyed :
   (module Keyed.S with type t = 'a) ->
   ?now_ms:(unit -> int) ->
   ?on_stat:(Process_fn.stat -> unit) ->
+  ?backend:Persistence_backend.t ->
+  ?backend_name:string ->
+  ?serialize_state:('st -> Yojson.Safe.t) ->
+  ?deserialize_state:(Yojson.Safe.t -> 'st) ->
   init:(unit -> 'st) ->
   on_event:('out ctx -> string -> 'st -> 'a -> unit) ->
   on_timer:('out ctx -> string -> 'st -> Time.t -> timer_kind -> unit) ->

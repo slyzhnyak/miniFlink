@@ -375,3 +375,9 @@
  (libraries miniflink ex07_location_lib)
  (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
  (modules test_silence_age_persistence_e2e))
+
+(test
+ (name test_process_keyed_persistence)
+ (libraries miniflink)
+ (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
+ (modules test_process_keyed_persistence))
