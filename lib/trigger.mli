@@ -126,6 +126,12 @@ val create :
   ?severity:severity ->
   produce_alert:(key:'key -> value:'v -> ts:Time.t -> 'alert) ->
   produce_recovery:(key:'key -> ts:Time.t -> 'alert) ->
+  ?serialize_key:('key -> Yojson.Safe.t) ->
+  ?deserialize_key:(Yojson.Safe.t -> 'key) ->
+  ?serialize_value:('v -> Yojson.Safe.t) ->
+  ?deserialize_value:(Yojson.Safe.t -> 'v) ->
+  ?serialize_alert:('alert -> Yojson.Safe.t) ->
+  ?deserialize_alert:(Yojson.Safe.t -> 'alert) ->
   unit -> ('key, 'v, 'alert) spec
 (** Сконструировать spec.
 
@@ -141,14 +147,42 @@ val create :
     [produce_alert] / [produce_recovery] — конструируют пользовательский
     [alert]-тип. На Problem-переходе вызывается [produce_alert];
     на Recovery-переходе [Mf_event.retract] последнего Problem-alert'а
-    плюс [Mf_event.data] от [produce_recovery]. *)
+    плюс [Mf_event.data] от [produce_recovery].
+
+    {b Опциональные сериализаторы} ([serialize_*]/[deserialize_*])
+    необходимы, если триггер запускается с persistence (см.
+    [?backend] параметр в [of_stream]). Без backend'а они
+    игнорируются. Если backend подключён, а хотя бы один
+    сериализатор отсутствует — [of_stream] выбросит
+    [Invalid_argument]. *)
 
 val name     : ('key, 'v, 'alert) spec -> string
 val severity : ('key, 'v, 'alert) spec -> severity
 
+(** {1 Backend для persistence}
+
+    Простой record-of-functions интерфейс к key-value хранилищу.
+    Позволяет подключать любую реализацию (in-memory, RocksDB, mock
+    для тестов) через первоклассные значения, без functor'ов. *)
+
+type backend = {
+  get    : string -> bytes option;
+  set    : string -> bytes -> unit;
+  delete : string -> unit;
+  keys   : unit -> string list;
+}
+(** Минимальный key-value интерфейс. Ключи — strings, значения —
+    bytes. Trigger использует только [get]/[set]/[keys]; [delete]
+    для будущей admin-функциональности. *)
+
+val backend_of_memory : (string, bytes) Hashtbl.t -> backend
+(** Удобный конструктор: обёртка над [State_backend_memory] (Hashtbl).
+    Используется в тестах. *)
+
 (** {1 Основной оператор} *)
 
 val of_stream :
+  ?backend:backend ->
   ('key, 'v, 'alert) spec ->
   ('key * 'v) Mf_event.t Stream.t ->
   'alert Mf_event.t Stream.t
@@ -169,9 +203,22 @@ val of_stream :
     - Pending-переходы (внутри debounce) ничего не эмитят.
 
     Эмитируемые события идут в event-time порядке (определяется
-    upstream watermark'ами + моментами срабатывания таймеров). *)
+    upstream watermark'ами + моментами срабатывания таймеров).
+
+    {b [?backend]} — если передан, триггер сохраняет и восстанавливает
+    своё состояние (state machine per key + last_event_ts + pending
+    timers) через [State_backend]. На старте читает все ключи с
+    префиксом ["trigger:{name}:"] и восстанавливает state. На каждое
+    изменение state-машины пишет обратно в backend.
+
+    Требует чтобы в [spec] были заполнены все [serialize_*] и
+    [deserialize_*] поля. Иначе [Invalid_argument].
+
+    Без backend'а — поведение как раньше (state в памяти, теряется
+    при завершении процесса). *)
 
 val combine :
+  ?backend:backend ->
   ('key, 'v, 'alert) spec list ->
   ('key * 'v) Mf_event.t Stream.t ->
   'alert Mf_event.t Stream.t
@@ -182,4 +229,8 @@ val combine :
     ['alert] (естественное ограничение для слияния в один поток).
 
     Под капотом — независимые per-(trigger, key) state-таблицы;
-    триггеры не интерферируют. *)
+    триггеры не интерферируют.
+
+    [?backend], если передан, разделяется всеми триггерами в списке.
+    Они различаются по [name] и не интерферируют в backend'е по
+    ключам. *)

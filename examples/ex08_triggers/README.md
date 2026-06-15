@@ -59,3 +59,40 @@ ex08_triggers/
 Оба подхода **сосуществуют**: в реальном сервисе можно использовать FSM
 там где нужны сложные переходы, и триггеры — для большинства простых
 threshold-алертов.
+
+## Persistence (опционально)
+
+Каждый из триггеров в `Triggers` можно запустить с **persistent
+state** через опциональный параметр `?backend` у `Trigger.of_stream`
+или `Trigger.combine`. После рестарта сервиса:
+
+- Триггер в `Problem` помнит что он в `Problem` — не выпустит повторный alert
+- Триггер в `Pending_problem` помнит свой `since`-момент — debounce продолжается с того же места, а не начинается заново
+- `last_event_ts` сохраняется — out-of-order фильтр работает корректно после рестарта
+
+В ex08 persistence не используется (упрощённый учебный пример).
+Чтобы подключить, нужно:
+
+1. Добавить серилизаторы в `Trigger.create`:
+   ```ocaml
+   ~serialize_key:(fun k -> `String k)
+   ~deserialize_key:(fun j -> Yojson.Safe.Util.to_string j)
+   ~serialize_value:(fun v -> `Float v)
+   ~deserialize_value:(fun j -> Yojson.Safe.Util.to_number j)
+   ~serialize_alert:Domain.alert_to_json
+   ~deserialize_alert:Domain.alert_of_json
+   ```
+
+2. Создать backend (memory для тестов, RocksDB для прода):
+   ```ocaml
+   let tbl = Hashtbl.create 64 in
+   let backend = Trigger.backend_of_memory tbl in
+   ```
+
+3. Передать backend в `of_stream` или `combine`:
+   ```ocaml
+   item |> Trigger.of_stream ~backend triggers_spec
+   ```
+
+Подробности — в `docs/triggers-cookbook.md` (раздел Persistence) и
+`docs/trigger-persistence.md` (формат backend, гарантии, ограничения).

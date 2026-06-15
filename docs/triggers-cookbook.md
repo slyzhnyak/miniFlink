@@ -292,10 +292,142 @@ let high_cpu = Trigger.create
 Объёмнее, чем Zabbix. Но **компилятор проверяет типы**, и
 **компонуется** с другими операторами.
 
-## Итог
+## Persistence: триггер переживает рестарт
 
-Сложные условия в нашей системе строятся через **композицию**, не
-через DSL-выражение. Это значит:
+Все приведённые выше подходы работают и с persistent state — нужно
+только подключить backend и сериализаторы в spec'ах.
+
+### Зачем
+
+Без persistence триггер в `Problem` или `Pending_problem` забывает
+своё состояние при рестарте сервиса. Конкретные последствия:
+
+- Активный газовый алерт **исчезает** — диспетчер думает что
+  обстановка нормализовалась
+- Pending_problem с накопленным debounce 90 из 120 секунд
+  **начинает заново** — алерт срабатывает на 2 минуты позже чем
+  должен
+- `last_event_ts` сбрасывается — late events после рестарта
+  считаются свежими, могут сделать ложное recovery
+
+Для системы безопасности шахты это **неприемлемо**. Persistence
+решает проблему.
+
+### Минимальный пример
+
+```ocaml
+(* 1. Spec с сериализаторами *)
+let evacuation_spec =
+  Trigger.create
+    ~name:"evacuation"
+    ~condition:(Trigger.custom ~problem:is_critical ~recovery:is_safe)
+    ~problem_for:(Time.minutes 1)
+    ~severity:Trigger.Disaster
+    ~produce_alert:(fun ~key ~value ~ts -> mk_alert key value ts)
+    ~produce_recovery:(fun ~key ~ts -> mk_cleared key ts)
+    (* Persistence: указать как (де)сериализовать key, value, alert *)
+    ~serialize_key:(fun k -> `String k)
+    ~deserialize_key:(fun j -> Yojson.Safe.Util.to_string j)
+    ~serialize_value:value_to_json
+    ~deserialize_value:value_of_json
+    ~serialize_alert:alert_to_json
+    ~deserialize_alert:alert_of_json
+    ()
+
+(* 2. Backend — обёртка над key-value хранилищем *)
+let tbl = Hashtbl.create 64 in
+let backend = Trigger.backend_of_memory tbl in
+(* для production: Trigger.backend_of_rocksdb или ваша обёртка *)
+
+(* 3. of_stream с подключённым backend *)
+combined |> Trigger.of_stream ~backend evacuation_spec
+```
+
+На каждом изменении state-машины (Ok→Pending_problem,
+Pending_problem→Problem, и т.д.) триггер автоматически пишет
+snapshot в backend. На старте `of_stream` читает существующие
+записи и восстанавливает state, включая pending debounce-таймеры.
+
+### Crash + restart pattern с replayable_source
+
+Для полноценной recovery-семантики нужно не только сохранять
+состояние триггера, но и **знать с какого места** перечитать
+source. Сейчас в библиотеке есть `lib/replayable_source` — простой
+in-memory source с возможностью seek to offset (как в Kafka):
+
+```ocaml
+(* Создаём source *)
+let src = Replayable_source.of_list events in
+
+(* Phase 1: читаем, периодически коммитим offset в backend *)
+let stream, get_offset = Replayable_source.read_from src in
+let pipeline =
+  stream
+  |> Pipe.event_time ~lateness:(Time.seconds 1)
+  |> Pipe.map extract_item
+  |> Trigger.of_stream ~backend evacuation_spec in
+let rec loop () = match pipeline () with
+  | None -> ()
+  | Some event ->
+    handle event;
+    (* Каждые N events — commit offset *)
+    if !processed mod 5 = 0 then
+      backend.set "consumer:offset"
+        (Bytes.of_string (string_of_int (get_offset ())));
+    loop ()
+in loop ()
+```
+
+После рестарта:
+
+```ocaml
+(* Phase 2: новый процесс. Тот же src, тот же backend.
+   Восстанавливаем offset, открываем source с этой позиции. *)
+let restored_offset =
+  match backend.get "consumer:offset" with
+  | Some b -> int_of_string (Bytes.to_string b)
+  | None -> 0 in
+let stream', _ = Replayable_source.read_from ~offset:restored_offset src in
+let pipeline' =
+  stream'
+  |> Pipe.event_time ~lateness:(Time.seconds 1)
+  |> Pipe.map extract_item
+  |> Trigger.of_stream ~backend evacuation_spec in
+  (* Trigger автоматически подгрузит state из того же backend *)
+(* ... обработка продолжается без потерь и дублей ... *)
+```
+
+Это **exactly-once-style** semantics после рестарта:
+- Source — committed offset гарантирует **no skip, no replay**
+- Trigger — persisted state гарантирует **continuation, not restart**
+- Один и тот же backend хранит обе вещи синхронно
+
+### Когда нужно / не нужно
+
+**Нужно:**
+- Production-deployment системы безопасности (mining, healthcare, finance)
+- Длительные debounce'ы (минуты-часы) которые жалко терять при рестарте
+- Sticky-alerts критической важности (Disaster, High severity)
+
+**Не нужно:**
+- Демо-примеры и тесты (overhead не оправдан)
+- Триггеры с очень короткими debounce'ами (<1с — переживание рестарта не важно)
+- Stateless обработка (просто threshold без hysteresis/debounce — нечего сохранять)
+
+### Ограничения текущей реализации
+
+Описаны подробно в `docs/trigger-persistence.md`:
+
+- Snapshot **только на state-машинных transitions**, не на каждом event.
+  Если упали между двумя event'ами без перехода — теряем
+  ≈секундный окно out-of-order tolerance, не критично.
+- Только `'k = string` сейчас работает на 100%. Для произвольных
+  ключей нужен deterministic serialize_key.
+- Нет координации между несколькими триггерами или с другими
+  операторами — каждый триггер snapshot'ит свой namespace
+  независимо. Atomic multi-operator checkpoint — в TODO.
+
+
 
 - **Не короче** Zabbix-выражения для простых случаев
 - **Гораздо выразительнее** для сложных (multi-stream, derived
