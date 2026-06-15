@@ -427,6 +427,34 @@ let pipeline' =
   операторами — каждый триггер snapshot'ит свой namespace
   независимо. Atomic multi-operator checkpoint — в TODO.
 
+### silence_age тоже persistent
+
+`Item.silence_age` (главный non-trivial item для триггеров «нет
+пакетов дольше N») использует тот же паттерн persistence:
+
+```ocaml
+let no_packets_item packets =
+  packets
+  |> Item.silence_age
+       ~backend                              (* тот же что у Trigger *)
+       ~backend_name:"no_packets"            (* namespace *)
+       ~serialize_key:(fun k -> `String k)
+       ~deserialize_key:(fun j -> Yojson.Safe.Util.to_string j)
+       ~by:(fun (p : Domain.packet) -> p.lamp)
+       ~tick:(Time.seconds 30)
+```
+
+Это **важно** для триггеров с silence_age в pipeline'е: без
+persistence silence_age сбрасывал бы свой `last_seen` при рестарте,
+выдавая `(key, 0)` ложно, что в свою очередь сбивало бы триггер
+«нет пакетов 2 минуты» — он бы перезапускал debounce с 0 секунд.
+
+С persistence обе части (silence_age + trigger) восстанавливаются
+из **того же backend'а** — конкатенация состояний.
+
+Детали: `docs/silence-age-persistence.md`.
+
+
 
 
 - **Не короче** Zabbix-выражения для простых случаев

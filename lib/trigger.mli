@@ -163,21 +163,25 @@ val severity : ('key, 'v, 'alert) spec -> severity
 
     Простой record-of-functions интерфейс к key-value хранилищу.
     Позволяет подключать любую реализацию (in-memory, RocksDB, mock
-    для тестов) через первоклассные значения, без functor'ов. *)
+    для тестов) через первоклассные значения, без functor'ов.
 
-type backend = {
+    {b Переезд:} с расширением persistence на другие операторы
+    ([Item.silence_age], [Pipe.process_keyed] и т.д.) интерфейс
+    backend'а вынесен в общий модуль [Persistence_backend]. Здесь
+    [backend] и [backend_of_memory] оставлены как алиасы для
+    backwards compatibility — существующий код продолжает работать. *)
+
+type backend = Persistence_backend.t = {
   get    : string -> bytes option;
   set    : string -> bytes -> unit;
   delete : string -> unit;
   keys   : unit -> string list;
 }
-(** Минимальный key-value интерфейс. Ключи — strings, значения —
-    bytes. Trigger использует только [get]/[set]/[keys]; [delete]
-    для будущей admin-функциональности. *)
+(** Минимальный key-value интерфейс — алиас [Persistence_backend.t]. *)
 
 val backend_of_memory : (string, bytes) Hashtbl.t -> backend
-(** Удобный конструктор: обёртка над [State_backend_memory] (Hashtbl).
-    Используется в тестах. *)
+(** Удобный конструктор: обёртка над [Hashtbl.t]. Алиас для
+    [Persistence_backend.of_memory]. *)
 
 (** {1 Основной оператор} *)
 
