@@ -345,3 +345,15 @@
  (libraries miniflink ex07_location_lib ex09_complex_trigger_lib)
  (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
  (modules test_trigger_persistence_e2e))
+
+(test
+ (name test_replayable_source)
+ (libraries miniflink)
+ (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
+ (modules test_replayable_source))
+
+(test
+ (name test_replayable_integration)
+ (libraries miniflink ex07_location_lib ex09_complex_trigger_lib)
+ (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
+ (modules test_replayable_integration))
