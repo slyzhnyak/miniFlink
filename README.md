@@ -558,21 +558,18 @@ Baseline для регрессий теперь даёт `bench/bench_ex07.ml` (
 - [ ] **Broadcast state.** Состояние, реплицируемое на всех воркеров
   (правила/конфиг, видимые всем). На single-node проще чем в
   распределённом. Низкая-средняя сложность.
-- [ ] **Durable-таймеры и persistent state для всех stateful операторов
-  (переживающие рестарт).** Сейчас таймеры и keyed-state живут в памяти
-  и сбрасываются при перезапуске. Это касается **четырёх** операторов:
+- [ ] **Durable-таймеры и persistent state для оставшихся stateful
+  операторов (переживающие рестарт).** Триггеры уже сделаны (см.
+  отдельный закрытый пункт в Приоритете 7 ниже). Остаются три
+  оператора:
   - `Pipe.process_keyed` — self-timers и per-key state. Для рестарта
     есть паттерн пере-регистрации из снапшота (`set_event_timer_for`,
     покрыт тестом), но он требует кода в каждом пайплайне.
   - `Pipe.window_agg_keyed` — содержимое окон в зоне `allowed_lateness`.
     На рестарте retract'ы от опоздавших пакетов перестают эмититься,
     inconsistent state с downstream.
-  - `lib/trigger.ml` (новое в этой сессии) — состояния
-    `Pending_problem`/`Pending_ok` + debounce таймеры + `last_event_ts`.
-    Триггер в `Pending_problem` после рестарта забывает свой
-    `since`-момент и начинает debounce заново.
-  - `lib/item.ml` `silence_age` (новое) — `last_seen` per key + tick
-    таймеры. После рестарта silence обнуляется ложно.
+  - `lib/item.ml` `silence_age` — `last_seen` per key + tick таймеры.
+    После рестарта silence обнуляется ложно.
 
   Полноценное решение: таймеры и keyed-state снапшотятся вместе в
   checkpoint и восстанавливаются при recovery автоматически. Важно
@@ -580,8 +577,11 @@ Baseline для регрессий теперь даёт `bench/bench_ex07.ml` (
   обнаружиться после рестарта без ручной пере-регистрации) и
   безопасности (активный газовый алерт не должен теряться при
   рестарте сервера). Средняя сложность: сериализация TimerSet +
-  state-таблиц + интеграция с checkpoint_parallel; для Trigger и
-  silence_age — отдельные сериализаторы своих состояний.
+  state-таблиц + интеграция с checkpoint_parallel. Подход уже
+  проверен на `Trigger` (см. `docs/trigger-persistence.md`) —
+  можно использовать ту же схему для оставшихся операторов:
+  record-of-functions backend + JSON-сериализация + восстановление
+  на старте.
 
 - [ ] **Kafka EOS: транзакции в C-слое.** `kafka_rdkafka.ml` имеет
   заглушки `begin_txn`/`commit_txn` (через flush); для полного
@@ -635,6 +635,26 @@ evolution уже частично покрывают).
 - [x] **Пример ex08_triggers с собственным domain и доказательством
   ортогональности.** ex07 не тронут, оба подхода (FSM и triggers)
   работают на одном Mock_source параллельно.
+- [x] **Persistence триггеров (переживают рестарт).**
+  `Trigger.of_stream` и `Trigger.combine` принимают опциональный
+  `?backend:Trigger.backend` (record-of-functions get/set/delete/keys).
+  Триггер с подключённым backend'ом сериализует свой per-key state
+  machine (Ok/Pending_problem/Problem/Pending_ok), `last_event_ts`,
+  и timers в JSON и записывает в backend при каждом transition'е.
+  На старте `of_stream` восстанавливает state из backend по префиксу
+  `trigger:{name}:` — pending debounce-таймеры пересоздаются из
+  `fire_at` в state'е. Также добавлен `lib/replayable_source` —
+  Kafka-like source со `?offset` параметром в `read_from`, позволяет
+  начать чтение с произвольной позиции после рестарта.
+  Покрытие: 3 unit-теста на snapshot, 2 на restore, end-to-end на
+  Demo_source, integration test trigger+replayable_source (полная
+  имитация crash+restart с offset commit). Детали реализации,
+  формат backend-ключей и ограничения — в
+  `docs/trigger-persistence.md`. Practical guide в
+  `docs/triggers-cookbook.md`. Из четырёх stateful операторов
+  закрыт первый; остальные три (process_keyed, window_agg_keyed,
+  silence_age) — см. отдельный открытый пункт «Durable таймеры»
+  в Приоритете 6.
 - [ ] **Refresh внутри Problem-состояния (опциональный).** Сейчас
   триггер sticky: один Data на Problem, retract+Recovery на выход.
   Для случаев типа «обновить алерт при изменении ppm >20% или
