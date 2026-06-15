@@ -30,25 +30,19 @@ let severity_name = function
   | Disaster -> "DISASTER"
 
 (* ────────────────────────────────────────────────────────────────────
-   Backend для persistence
+   Backend для persistence — алиас на общий Persistence_backend.t
    ──────────────────────────────────────────────────────────────────── *)
 
-type backend = {
+type backend = Persistence_backend.t = {
   get    : string -> bytes option;
   set    : string -> bytes -> unit;
   delete : string -> unit;
   keys   : unit -> string list;
 }
 
-(* Обёртка над State_backend_memory (Hashtbl) — для тестов и
-   простых случаев. *)
-let backend_of_memory (tbl : (string, bytes) Hashtbl.t) : backend =
-  {
-    get    = (fun k   -> Hashtbl.find_opt tbl k);
-    set    = (fun k v -> Hashtbl.replace tbl k v);
-    delete = (fun k   -> Hashtbl.remove tbl k);
-    keys   = (fun ()  -> Hashtbl.fold (fun k _ a -> k :: a) tbl []);
-  }
+(* Обёртка над state_backend_memory (Hashtbl) — для тестов и
+   простых случаев. Алиас для Persistence_backend.of_memory. *)
+let backend_of_memory = Persistence_backend.of_memory
 
 (* ────────────────────────────────────────────────────────────────────
    Условие
