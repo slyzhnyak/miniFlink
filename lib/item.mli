@@ -15,6 +15,10 @@
     триггеру не на что реагировать. *)
 
 val silence_age :
+  ?backend:Persistence_backend.t ->
+  ?backend_name:string ->
+  ?serialize_key:('key -> Yojson.Safe.t) ->
+  ?deserialize_key:(Yojson.Safe.t -> 'key) ->
   by:('event -> 'key) ->
   tick:Time.t ->
   'event Mf_event.t Stream.t ->
@@ -36,4 +40,20 @@ val silence_age :
     больше tick → реже эмиссии, но grub'ее реакция).
 
     [Retract] в upstream игнорируется. [Watermark] прокидываются
-    после обработки накопленных таймеров. *)
+    после обработки накопленных таймеров.
+
+    {b [?backend]} — если передан, silence_age сохраняет и
+    восстанавливает per-key state ([last_seen_ts] + pending timer)
+    через [Persistence_backend]. На старте читает все ключи с
+    префиксом ["item:silence_age:{backend_name}:"] и восстанавливает
+    state.
+
+    Требует параметры [?backend_name], [?serialize_key],
+    [?deserialize_key]. Если backend подключён, а хотя бы один из
+    них отсутствует — [Invalid_argument]. [backend_name] нужен для
+    namespace'инга когда на одном backend'е живут несколько
+    silence_age-instance'ов (например, отдельные для пакетов и
+    газовых пакетов).
+
+    Без backend'а — поведение как раньше (state в памяти, теряется
+    при завершении процесса). *)
