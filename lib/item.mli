@@ -19,6 +19,7 @@ val silence_age :
   ?backend_name:string ->
   ?serialize_key:('key -> Yojson.Safe.t) ->
   ?deserialize_key:(Yojson.Safe.t -> 'key) ->
+  ?persistence:'key Persistence_backend.persist ->
   by:('event -> 'key) ->
   tick:Time.t ->
   'event Mf_event.t Stream.t ->
@@ -54,6 +55,12 @@ val silence_age :
     namespace'инга когда на одном backend'е живут несколько
     silence_age-instance'ов (например, отдельные для пакетов и
     газовых пакетов).
+
+    {b [?persistence]} — современная альтернатива четырём параметрам
+    выше: единый bundle {!Persistence_backend.persist} с теми же
+    четырьмя полями ([backend], [name], [serialize], [deserialize]).
+    Эквивалентно по семантике, короче по записи. Нельзя смешивать
+    с [?backend] стилем — это [Invalid_argument].
 
     Без backend'а — поведение как раньше (state в памяти, теряется
     при завершении процесса). *)

@@ -75,6 +75,47 @@ val update_table :
   ('k, 'a) Hashtbl.t -> key:('a -> 'k) ->
   'a Mf_event.t Stream.t -> 'a Mf_event.t Stream.t
 
+(** {2 Multi-stream join по ключу}
+
+    Объединение нескольких потоков одного типа в один поток
+    «snapshot последних значений по ключу для каждого источника».
+    Часто встречающийся паттерн: «когда новое значение по любому
+    каналу — пересчитай условие на основе всех текущих значений
+    этого ключа». *)
+
+val keyed_join :
+  (module Keyed.S with type t = 'a) ->
+  'a Mf_event.t Stream.t list ->
+  (string * 'a option list) Mf_event.t Stream.t
+(** [keyed_join (module K) streams] объединяет [streams] (все одного
+    типа ['a]) в один поток, где для каждого нового [Data]-события
+    эмитится [(key, options)] — где [options] — список длины
+    [List.length streams] с {b последними} значениями по каждому
+    входному потоку для этого ключа ([None] если этот поток ещё не
+    присылал данных для этого ключа).
+
+    Семантика:
+    - Watermarks объединяются через {!Mf_event.union} (min входов).
+    - [Retract] в входных потоках игнорируется.
+    - Каждое [Data] триггерит emit; стрим эмитит даже когда
+      [options] содержит [None]'ы — пользователь сам решает использовать
+      или нет (например, проверяет что все [Some] перед обработкой).
+    - Список [options] сохраняет порядок входных потоков; пользователь
+      сам мапит позиции.
+
+    Типичный use case — multi-sensor pipeline:
+    {[
+      let voltage = packets |> Pipe.map (fun p -> (p.lamp, p.voltage)) in
+      let co      = gas_packets |> Pipe.map (fun g -> (g.lamp, g.co_ppm)) in
+      let rssi    = packets |> Pipe.map (fun p -> (p.lamp, p.avg_rssi)) in
+      let joined  = Pipe.keyed_join (module By_lamp) [voltage; co; rssi] in
+      (* joined: (string * (string * float) option list) Mf_event.t Stream.t *)
+    ]}
+
+    Замещает повторяющийся boilerplate: tagged-union типы + union
+    + process_keyed со всеми case-analysis для трёх каналов
+    превращаются в одну строку. *)
+
 (** {2 Окна по времени} *)
 
 (** Спецификация временного окна. *)
@@ -143,6 +184,7 @@ val window_fold :
   ?backend_name:string ->
   ?serialize_acc:('acc -> Yojson.Safe.t) ->
   ?deserialize_acc:(Yojson.Safe.t -> 'acc) ->
+  ?persistence:'acc Persistence_backend.persist ->
   win_spec ->
   init:(unit -> 'acc) ->
   add:('acc -> 'a -> 'acc) ->
@@ -274,6 +316,41 @@ val sink : ('a -> unit) -> 'a Mf_event.t Stream.t -> unit
 (** Собрать [Data]-значения потока в список. *)
 val collect : 'a Mf_event.t Stream.t -> 'a list
 
+(** {3 Удобные потребители ({!Mf_event.t})}
+
+    Шорткаты для типичных операций над потоком событий. Все они дренят
+    поток до [None]; различаются тем что делать с каждым {!Mf_event.Data}.
+    [Retract]/[Watermark] {b игнорируются} (за исключением [iter_events]).
+
+    Замещают повторяющийся boilerplate вида
+    {[
+      let rec loop () = match stream () with
+        | None -> ()
+        | Some (Mf_event.Data (v, _)) -> handle v; loop ()
+        | Some _ -> loop ()
+      in loop ()
+    ]}
+    на один вызов [Pipe.iter_data handle stream]. *)
+
+val iter_data : ('a -> unit) -> 'a Mf_event.t Stream.t -> unit
+(** Алиас {!sink}. Имя [iter_data] симметрично с другими [_data]-helpers
+    ниже — выбор имени дело вкуса. *)
+
+val fold_data :
+  init:'b -> f:('b -> 'a -> 'b) -> 'a Mf_event.t Stream.t -> 'b
+(** Свернуть [Data]-значения потока. Например, подсчёт суммы:
+    {[
+      Pipe.fold_data ~init:0.0 ~f:(fun acc v -> acc +. v) stream
+    ]} *)
+
+val count_data : 'a Mf_event.t Stream.t -> int
+(** Сколько [Data]-событий в потоке. *)
+
+val iter_events : ('a Mf_event.t -> unit) -> 'a Mf_event.t Stream.t -> unit
+(** Как {!iter_data}, но callback вызывается на {b каждое} событие —
+    включая [Retract] и [Watermark]. Используется в тестах и логировании
+    когда важна полная картина потока. *)
+
 val materialize :
   by:('a -> Time.t -> 'k) -> 'a Mf_event.t Stream.t -> ('k * 'a) list
 (** Свернуть поток с retract'ами в финальную таблицу записей. [by v ts]
@@ -324,6 +401,7 @@ val process_keyed :
   ?backend_name:string ->
   ?serialize_state:('st -> Yojson.Safe.t) ->
   ?deserialize_state:(Yojson.Safe.t -> 'st) ->
+  ?persistence:'st Persistence_backend.persist ->
   init:(unit -> 'st) ->
   on_event:('out ctx -> string -> 'st -> 'a -> unit) ->
   on_timer:('out ctx -> string -> 'st -> Time.t -> timer_kind -> unit) ->

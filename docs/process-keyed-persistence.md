@@ -36,6 +36,7 @@ val process_keyed :
   ?backend_name:string ->
   ?serialize_state:('st -> Yojson.Safe.t) ->
   ?deserialize_state:(Yojson.Safe.t -> 'st) ->
+  ?persistence:'st Persistence_backend.persist ->
   init:(unit -> 'st) ->
   on_event:('out ctx -> string -> 'st -> 'a -> unit) ->
   on_timer:('out ctx -> string -> 'st -> Time.t -> timer_kind -> unit) ->
@@ -52,6 +53,22 @@ val process_keyed :
 Ключ всегда `string` (через `Keyed.S.key`), поэтому сериализатор
 ключа **не** нужен — это упрощение по сравнению с Trigger где было
 три параметризованных типа.
+
+### Modern alternative: `?persistence` bundle
+
+```ocaml
+let pst : my_state Persistence_backend.persist = {
+  backend; name = "connectivity_fsm";
+  serialize = state_to_json;
+  deserialize = state_of_json;
+} in
+events |> Pipe.process_keyed (module K) ~persistence:pst
+  ~init ~on_event ~on_timer
+```
+
+Эквивалентно четырём раздельным параметрам, удобнее для passing
+вокруг (один record как переменная). Подробнее в
+`docs/expressiveness.md`.
 
 ## Формат backend-записи
 

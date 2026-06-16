@@ -25,6 +25,7 @@ val silence_age :
   ?backend_name:string ->
   ?serialize_key:('key -> Yojson.Safe.t) ->
   ?deserialize_key:(Yojson.Safe.t -> 'key) ->
+  ?persistence:'key Persistence_backend.persist ->
   by:('event -> 'key) ->
   tick:Time.t ->
   'event Mf_event.t Stream.t ->
@@ -36,6 +37,23 @@ val silence_age :
 - `?serialize_key` / `?deserialize_key` — сериализация ключа
 
 Иначе `Invalid_argument`.
+
+### Modern alternative: `?persistence` bundle
+
+Те же четыре параметра можно передать как один `Persistence_backend.persist`
+record:
+
+```ocaml
+let pst : string Persistence_backend.persist = {
+  backend; name = "no_packets";
+  serialize = (fun k -> `String k);
+  deserialize = (fun j -> Yojson.Safe.Util.to_string j);
+} in
+events |> Item.silence_age ~persistence:pst ~by ~tick
+```
+
+Эквивалентно по семантике. Нельзя смешивать с `?backend` стилем —
+`Invalid_argument`. Подробнее в `docs/expressiveness.md`.
 
 ## Формат backend-записи
 

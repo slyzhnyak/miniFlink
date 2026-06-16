@@ -909,6 +909,16 @@ API-документация генерируется через odoc:
 построением конвейера. Тот же справочник единым файлом —
 [docs/miniflink_api.pdf](docs/miniflink_api.pdf) (41 стр., все модули).
 
+Тематические документы:
+- [docs/expressiveness.md](docs/expressiveness.md) — улучшения выразительности
+  API: `Pipe.iter_data` family, `Pipe.keyed_join` (multi-stream join по ключу),
+  `Persistence_backend.persist` bundle для упрощения persistence-параметров
+- [docs/trigger-persistence.md](docs/trigger-persistence.md),
+  [docs/silence-age-persistence.md](docs/silence-age-persistence.md),
+  [docs/process-keyed-persistence.md](docs/process-keyed-persistence.md),
+  [docs/window-fold-persistence.md](docs/window-fold-persistence.md) —
+  reference по persistence четырёх stateful операторов
+
 ## Связанные материалы
 
 - [Техническая статья (PDF)](docs/miniflink_article.pdf)

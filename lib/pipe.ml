@@ -53,6 +53,64 @@ let update_table (tbl : ('k, 'a) Hashtbl.t) ~(key : 'a -> 'k)
      | _ -> ());
     ev) upstream
 
+(* ────────────────────────────────────────────────────────────────────
+   keyed_join: multi-stream join по ключу с emit'ом snapshot'а
+   последних значений каждого источника.
+
+   Реализация: каждый входной stream тегаем индексом, объединяем через
+   Mf_event.union, состояние хранит `'a option array`, обновляем по
+   индексу при каждом Data, эмитим Array.to_list. process_keyed нам
+   не нужен — простой fold через Stream.scan_state нет; делаем
+   вручную state-машину на closure'ах. *)
+let keyed_join
+    (type a)
+    (module K : Keyed.S with type t = a)
+    (streams : a Mf_event.t Stream.t list)
+    : (string * a option list) Mf_event.t Stream.t =
+  let n = List.length streams in
+  if n = 0 then Stream.empty
+  else begin
+    (* Тегаем каждый stream его индексом 0..n-1. Index несём через
+       map_value: значение становится (index, original_value). *)
+    let tagged = List.mapi (fun i s ->
+      Stream.map (Mf_event.map_value (fun v -> (i, v))) s
+    ) streams in
+    (* Объединяем все через попарный Mf_event.union (fold справа). *)
+    let unioned = match tagged with
+      | [] -> assert false
+      | [s] -> s
+      | first :: rest ->
+        List.fold_left Mf_event.union first rest
+    in
+    (* Состояние: per-key array длиной n с последними значениями. *)
+    let states : (string, a option array) Hashtbl.t = Hashtbl.create 64 in
+    let get_or_init k =
+      match Hashtbl.find_opt states k with
+      | Some arr -> arr
+      | None ->
+        let arr = Array.make n None in
+        Hashtbl.replace states k arr;
+        arr
+    in
+    let out_q : (string * a option list) Mf_event.t Queue.t = Queue.create () in
+    let rec next () =
+      if not (Queue.is_empty out_q) then Some (Queue.pop out_q)
+      else match unioned () with
+        | None -> None
+        | Some (Mf_event.Data ((idx, v), ts)) ->
+          let key = K.key v in
+          let arr = get_or_init key in
+          arr.(idx) <- Some v;
+          Queue.push (Mf_event.data (key, Array.to_list arr) ts) out_q;
+          next ()
+        | Some (Mf_event.Watermark wm) ->
+          Some (Mf_event.wm wm)
+        | Some (Mf_event.Retract _) ->
+          (* Retract в input игнорируется — см. документацию *)
+          next ()
+    in next
+  end
+
 (* ── Окна вынесены в Window; переэкспорт для стабильного Pipe.* API ── *)
 type win_spec = Window.win_spec
 let tumbling = Window.tumbling
@@ -218,6 +276,21 @@ let sink f stream =
 let collect stream =
   List.rev (Stream.fold (fun acc -> function
     | Mf_event.Data (v,_) -> v :: acc | _ -> acc) [] stream)
+
+(* Удобные потребители для типичных паттернов "пройти поток и сделать X
+   с каждым Data". Все основаны на Stream.iter/fold; пишутся ради
+   читабельности пользовательского кода и тестов. *)
+let iter_data = sink
+
+let fold_data ~init ~f stream =
+  Stream.fold (fun acc -> function
+    | Mf_event.Data (v, _) -> f acc v
+    | _ -> acc) init stream
+
+let count_data stream =
+  fold_data ~init:0 ~f:(fun n _ -> n + 1) stream
+
+let iter_events f stream = Stream.iter f stream
 
 (* materialize: свернуть поток с retract'ами в финальную таблицу записей.
    [by v ts] задаёт идентичность записи (например (ключ, конец окна));

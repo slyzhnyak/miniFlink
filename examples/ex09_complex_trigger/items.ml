@@ -58,33 +58,12 @@ let avg_rssi_item
        | Some avg -> [(lamp, avg)]
        | None -> [])
 
-(** Tagged union — какой из трёх items обновился. *)
-type update =
-  | U_voltage of string * float
-  | U_co      of string * float
-  | U_rssi    of string * float
-
-(** Извлечение ключа для process_keyed. *)
-module By_update : Keyed.S with type t = update = struct
-  type t = update
-  let key = function
-    | U_voltage (l, _) | U_co (l, _) | U_rssi (l, _) -> l
+(** Per-station Keyed.S для join'а — все три stream'а имеют тип
+    [(string * float)] и ключуются по station name. *)
+module By_lamp : Keyed.S with type t = (string * float) = struct
+  type t = string * float
+  let key (l, _) = l
 end
-
-(** Per-key state — последние видимые значения каждой компоненты. *)
-type combined_state = {
-  mutable co_ppm      : float;
-  mutable voltage     : float;
-  mutable avg_rssi    : float;
-  mutable has_co      : bool;
-  mutable has_voltage : bool;
-  mutable has_rssi    : bool;
-}
-
-let make_state () = {
-  co_ppm = 0.; voltage = 4.0; avg_rssi = 0.;
-  has_co = false; has_voltage = false; has_rssi = false;
-}
 
 (** Главный derived item: объединяет три потока в combined-record.
 
@@ -93,34 +72,36 @@ let make_state () = {
     флагами has_co/has_voltage/has_rssi). Триггер дальше решает
     считать ли triplet валидным.
 
-    Тонкость с watermarks: Mf_event.union берёт минимум входных
-    watermark'ов. Если какой-то поток сильно отстаёт, downstream
-    блокируется. В демо это норма; в проде понадобится idle-watermark
-    для замолчавших источников. *)
+    Реализация через {!Pipe.keyed_join}: оператор сам ведёт per-key
+    snapshot последних значений, эмитя на каждое обновление в любом
+    канале. Порядок входов: voltage, co, rssi — это позиции в
+    output [option list].
+
+    Тонкость с watermarks: keyed_join использует {!Mf_event.union}
+    которая берёт минимум входных watermark'ов. Если какой-то поток
+    сильно отстаёт, downstream блокируется. В демо это норма; в
+    проде понадобится idle-watermark для замолчавших источников. *)
 let combined_item
     ~(voltage : (string * float) Mf_event.t Stream.t)
     ~(co      : (string * float) Mf_event.t Stream.t)
     ~(rssi    : (string * float) Mf_event.t Stream.t)
   : (string * Domain.combined) Mf_event.t Stream.t =
-  let s_v = voltage |> Pipe.map (fun (l, v) -> U_voltage (l, v)) in
-  let s_c = co      |> Pipe.map (fun (l, v) -> U_co      (l, v)) in
-  let s_r = rssi    |> Pipe.map (fun (l, v) -> U_rssi    (l, v)) in
-  let unioned = Mf_event.union s_v (Mf_event.union s_c s_r) in
-  unioned
-  |> Pipe.process_keyed (module By_update)
-       ~init:make_state
-       ~on_event:(fun ctx key st update ->
-         (match update with
-          | U_voltage (_, v) -> st.voltage  <- v; st.has_voltage <- true
-          | U_co      (_, v) -> st.co_ppm   <- v; st.has_co      <- true
-          | U_rssi    (_, v) -> st.avg_rssi <- v; st.has_rssi    <- true);
-         let snapshot : Domain.combined = {
-           co_ppm      = st.co_ppm;
-           voltage     = st.voltage;
-           avg_rssi    = st.avg_rssi;
-           has_co      = st.has_co;
-           has_voltage = st.has_voltage;
-           has_rssi    = st.has_rssi;
-         } in
-         ctx.emit (key, snapshot))
-       ~on_timer:(fun _ _ _ _ _ -> ())  (* без таймеров *)
+  Pipe.keyed_join (module By_lamp) [voltage; co; rssi]
+  |> Pipe.map (fun (lamp, opts) ->
+    let v_opt, c_opt, r_opt = match opts with
+      | [a; b; c] -> a, b, c
+      | _ -> assert false  (* keyed_join сохраняет порядок и длину *)
+    in
+    let voltage_val   = match v_opt with Some (_, v) -> v | None -> 4.0 in
+    let co_ppm_val    = match c_opt with Some (_, v) -> v | None -> 0.0 in
+    let avg_rssi_val  = match r_opt with Some (_, v) -> v | None -> 0.0 in
+    let combined : Domain.combined = {
+      co_ppm      = co_ppm_val;
+      voltage     = voltage_val;
+      avg_rssi    = avg_rssi_val;
+      has_co      = c_opt <> None;
+      has_voltage = v_opt <> None;
+      has_rssi    = r_opt <> None;
+    } in
+    (lamp, combined))
+

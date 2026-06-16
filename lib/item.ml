@@ -54,10 +54,32 @@ let silence_age
     ?(backend_name : string option)
     ?(serialize_key : (k -> Yojson.Safe.t) option)
     ?(deserialize_key : (Yojson.Safe.t -> k) option)
+    ?(persistence : k Persistence_backend.persist option)
     ~(by : ev -> k)
     ~(tick : Time.t)
     (source : ev Mf_event.t Stream.t)
   : (k * Time.t) Mf_event.t Stream.t =
+
+  (* Нормализация двух API'шек persistence в единое представление.
+     Конфликт (оба заданы) — Invalid_argument. *)
+  let old_style_any =
+    backend <> None || backend_name <> None
+    || serialize_key <> None || deserialize_key <> None in
+  if persistence <> None && old_style_any then
+    invalid_arg
+      "Item.silence_age: cannot mix ?persistence with \
+       individual ?backend/?backend_name/?serialize_key/?deserialize_key — \
+       use one style or the other";
+  let backend, backend_name, serialize_key, deserialize_key =
+    match persistence with
+    | Some p ->
+      (Some p.Persistence_backend.backend,
+       Some p.Persistence_backend.name,
+       Some p.Persistence_backend.serialize,
+       Some p.Persistence_backend.deserialize)
+    | None ->
+      (backend, backend_name, serialize_key, deserialize_key)
+  in
 
   (* Если backend подключён — обязательны name + сериализаторы. *)
   (match backend with
