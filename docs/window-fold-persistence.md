@@ -38,6 +38,7 @@ val window_fold :
   ?backend_name:string ->
   ?serialize_acc:('acc -> Yojson.Safe.t) ->
   ?deserialize_acc:(Yojson.Safe.t -> 'acc) ->
+  ?persistence:'acc Persistence_backend.persist ->
   win_spec ->
   init:(unit -> 'acc) ->
   add:('acc -> 'a -> 'acc) ->
@@ -49,6 +50,23 @@ val window_fold :
 - `?serialize_acc` / `?deserialize_acc` — для пользовательского `'acc`
 
 Ключ всегда `string` (через `Keyed.S.key`).
+
+### Modern alternative: `?persistence` bundle
+
+```ocaml
+let pst : float Persistence_backend.persist = {
+  backend; name = "voltage_sum";
+  serialize = (fun f -> `Float f);
+  deserialize = (function `Float f -> f | _ -> failwith "bad");
+} in
+voltage_events |> Pipe.window_fold (module K) ~persistence:pst
+  (Pipe.sliding (Time.minutes 5) (Time.seconds 30))
+  ~init:(fun () -> 0.0)
+  ~add:(fun acc (_, v) -> acc +. v)
+```
+
+Эквивалентно четырём раздельным параметрам. Подробнее в
+`docs/expressiveness.md`.
 
 ## Формат backend-записи
 
