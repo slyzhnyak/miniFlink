@@ -1,0 +1,4 @@
+(executable
+ (name ex10_keyed_join)
+ (libraries miniflink)
+ (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70)))
