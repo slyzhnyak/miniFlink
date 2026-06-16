@@ -102,20 +102,38 @@ let prepare_events () =
 
 (* ── Пайплайны (без и с persistence per operator) ──────────── *)
 
-(* Тип состояния для FSM connectivity-like (process_keyed). *)
-type fsm = {
-  mutable last_seen : Time.t;
-  mutable timer_at  : Time.t;
+(* Combined FSM state: реалистичный minePASS use case — FSM держит
+   последние значения voltage/co/rssi per шахтёра и срабатывает на
+   критическом сочетании. Используется на выходе keyed_join'а.
+
+   Это даёт более точную картину process_keyed overhead с
+   нетривиальным state (4 поля + критичность). *)
+type combined_fsm = {
+  mutable voltage : float;
+  mutable co      : float;
+  mutable rssi    : float;
+  mutable critical_since : Time.t;  (* 0 = не критично *)
 }
 
-let fsm_to_json s =
-  `Assoc [("last_seen", `Int s.last_seen); ("timer_at", `Int s.timer_at)]
+let combined_to_json s =
+  `Assoc [
+    ("voltage", `Float s.voltage);
+    ("co", `Float s.co);
+    ("rssi", `Float s.rssi);
+    ("critical_since", `Int s.critical_since);
+  ]
 
-let fsm_of_json = function
+let combined_of_json = function
   | `Assoc kv ->
-    { last_seen = Yojson.Safe.Util.to_int (List.assoc "last_seen" kv);
-      timer_at  = Yojson.Safe.Util.to_int (List.assoc "timer_at" kv) }
-  | _ -> failwith "bad fsm"
+    let f n = match List.assoc n kv with
+      | `Float f -> f | `Int i -> float i | _ -> 0.0 in
+    { voltage = f "voltage";
+      co = f "co";
+      rssi = f "rssi";
+      critical_since =
+        (match List.assoc "critical_since" kv with
+         | `Int i -> i | _ -> 0); }
+  | _ -> failwith "bad combined"
 
 (* Алерты — общий тип для всех триггеров. *)
 type alert =
@@ -193,16 +211,24 @@ let mk_co_trigger ?backend () =
                         then Some alert_of_json else None)
     ()
 
-(* Pipeline:
-   - voltage trigger
-   - silence_age + no_packets trigger (упрощённо просто эмитим silence)
-   - CO trigger
-   - FSM через process_keyed
+(* Pipeline (РЕАЛИСТИЧНЫЙ minePASS):
+   - voltage trigger (low_voltage)
+   - CO trigger (high_co)
+   - silence_age на packets
+   - keyed_join [voltage; co; rssi] → combined FSM через process_keyed
+     (главный stateful operator — реагирует на одновременное сочетание
+      voltage<3.5 И co>50 И rssi<-75)
    - window_fold для voltage trends *)
 let run_pipeline ?trigger_bk ?silence_bk ?process_bk ?window_bk
     (packets : Domain.packet Mf_event.t list)
     (gas : Domain.gas_packet Mf_event.t list)
   : int =
+  (* Module для keyed-join — values имеют тип (string * float). *)
+  let module By_lamp : Keyed.S with type t = string * float = struct
+    type t = string * float
+    let key (k, _) = k
+  end in
+
   let voltage_stream =
     packets |> Stream.of_list
     |> Pipe.event_time ~lateness:(Time.seconds 1)
@@ -213,6 +239,16 @@ let run_pipeline ?trigger_bk ?silence_bk ?process_bk ?window_bk
     |> Pipe.event_time ~lateness:(Time.seconds 1)
     |> Pipe.map (fun (g : Domain.gas_packet) ->
         (g.g_lamp, Option.value g.g_co ~default:0.0)) in
+
+  let rssi_stream =
+    packets |> Stream.of_list
+    |> Pipe.event_time ~lateness:(Time.seconds 1)
+    |> Pipe.map (fun (p : Domain.packet) ->
+        let n = List.length p.readings in
+        let avg = if n = 0 then -100.0
+                  else List.fold_left (fun s (_, r) -> s +. r) 0.0 p.readings
+                       /. float n in
+        (p.lamp, avg)) in
 
   let packet_keyed =
     packets |> Stream.of_list
@@ -241,28 +277,60 @@ let run_pipeline ?trigger_bk ?silence_bk ?process_bk ?window_bk
          ~by:(fun (p : Domain.packet) -> p.lamp)
          ~tick:(Time.seconds 30) in
 
-  let module Packet_keyed : Keyed.S with type t = Domain.packet = struct
-    type t = Domain.packet
-    let key (p : Domain.packet) = p.lamp
+  (* ── РЕАЛИСТИЧНЫЙ COMBINED FSM ────────────────────────────────
+     keyed_join объединяет три potoka в snapshot
+     (lamp, [voltage_opt; co_opt; rssi_opt]).
+     process_keyed держит combined_fsm state per шахтёра, обновляет
+     поля по приходящим значениям, эмитит evacuation alert когда
+     достигается критическое сочетание. *)
+  let combined_stream =
+    Pipe.keyed_join (module By_lamp)
+      [voltage_stream; co_stream; rssi_stream] in
+
+  let module Combined_keyed
+    : Keyed.S with type t = string * (string * float) option list = struct
+    type t = string * (string * float) option list
+    let key (k, _) = k
   end in
 
-  let fsm_stream =
-    packets |> Stream.of_list
-    |> Pipe.event_time ~lateness:(Time.seconds 1)
-    |> Pipe.process_keyed (module Packet_keyed)
+  let evacuation_alerts =
+    combined_stream
+    |> Pipe.process_keyed (module Combined_keyed)
          ?backend:process_bk
-         ?backend_name:(if process_bk <> None then Some "bench_fsm" else None)
-         ?serialize_state:(if process_bk <> None then Some fsm_to_json else None)
-         ?deserialize_state:(if process_bk <> None then Some fsm_of_json else None)
-         ~init:(fun () -> { last_seen = 0; timer_at = 0 })
-         ~on_event:(fun ctx _key st (p : Domain.packet) ->
-           if st.timer_at > 0 then ctx.cancel_event_timer st.timer_at;
-           st.last_seen <- p.ts;
-           st.timer_at  <- p.ts + Time.seconds 60;
-           ctx.set_event_timer st.timer_at)
-         ~on_timer:(fun ctx key st t _kind ->
-           ctx.emit (A_no_packets (key, t));
-           st.timer_at <- 0) in
+         ?backend_name:(if process_bk <> None
+                        then Some "bench_combined_fsm" else None)
+         ?serialize_state:(if process_bk <> None
+                           then Some combined_to_json else None)
+         ?deserialize_state:(if process_bk <> None
+                             then Some combined_of_json else None)
+         ~init:(fun () ->
+           { voltage = 4.0; co = 0.0; rssi = -50.0; critical_since = 0 })
+         ~on_event:(fun ctx key st (_k, opts) ->
+           (* Обновляем state по тому что пришло *)
+           (match opts with
+            | [v_opt; c_opt; r_opt] ->
+              (match v_opt with Some (_, v) -> st.voltage <- v | None -> ());
+              (match c_opt with Some (_, c) -> st.co <- c | None -> ());
+              (match r_opt with Some (_, r) -> st.rssi <- r | None -> ())
+            | _ -> ());
+           (* Проверяем критическое сочетание *)
+           let is_critical =
+             st.voltage < 3.5 && st.co > 50.0 && st.rssi < -75.0 in
+           let now =
+             match opts with
+             | [Some (_, _); _; _]
+             | [_; Some (_, _); _]
+             | [_; _; Some (_, _)] ->
+               (* берём ts из любого Some — все они одного watermark *)
+               0  (* упрощённо; реально передаётся через ctx *)
+             | _ -> 0 in
+           ignore now;
+           if is_critical && st.critical_since = 0 then begin
+             st.critical_since <- 1;  (* флаг, чтоб не дублировать *)
+             ctx.emit (A_no_packets (key, st.critical_since))
+           end else if not is_critical && st.critical_since > 0 then
+             st.critical_since <- 0)
+         ~on_timer:(fun _ _ _ _ _ -> ()) in
 
   let module Voltage_keyed : Keyed.S with type t = string * float = struct
     type t = string * float
@@ -287,7 +355,7 @@ let run_pipeline ?trigger_bk ?silence_bk ?process_bk ?window_bk
   Pipe.iter_data (fun _ -> incr n) voltage_alerts;
   Pipe.iter_data (fun _ -> incr n) co_alerts;
   Pipe.iter_data (fun _ -> incr n) silence_stream;
-  Pipe.iter_data (fun _ -> incr n) fsm_stream;
+  Pipe.iter_data (fun _ -> incr n) evacuation_alerts;
   Pipe.iter_data (fun _ -> incr n) voltage_sum;
   !n
 
