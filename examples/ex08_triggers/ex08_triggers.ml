@@ -131,16 +131,10 @@ let () =
   section "Алерты (через триггерную систему):";
   let total = ref 0 in
   let retracts = ref 0 in
-  let rec loop () =
-    match all_alerts () with
-    | None -> ()
-    | Some ev ->
-      (match ev with
-       | Mf_event.Data _ -> incr total
-       | Mf_event.Retract _ -> incr retracts
-       | Mf_event.Watermark _ -> ());
-      print_event ev;
-      loop ()
-  in
-  loop ();
+  all_alerts |> Pipe.iter_events (fun ev ->
+    (match ev with
+     | Mf_event.Data _ -> incr total
+     | Mf_event.Retract _ -> incr retracts
+     | Mf_event.Watermark _ -> ());
+    print_event ev);
   Printf.printf "\nИтого: %d алертов (%d retracts)\n" !total !retracts
