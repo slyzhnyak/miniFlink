@@ -75,6 +75,47 @@ val update_table :
   ('k, 'a) Hashtbl.t -> key:('a -> 'k) ->
   'a Mf_event.t Stream.t -> 'a Mf_event.t Stream.t
 
+(** {2 Multi-stream join по ключу}
+
+    Объединение нескольких потоков одного типа в один поток
+    «snapshot последних значений по ключу для каждого источника».
+    Часто встречающийся паттерн: «когда новое значение по любому
+    каналу — пересчитай условие на основе всех текущих значений
+    этого ключа». *)
+
+val keyed_join :
+  (module Keyed.S with type t = 'a) ->
+  'a Mf_event.t Stream.t list ->
+  (string * 'a option list) Mf_event.t Stream.t
+(** [keyed_join (module K) streams] объединяет [streams] (все одного
+    типа ['a]) в один поток, где для каждого нового [Data]-события
+    эмитится [(key, options)] — где [options] — список длины
+    [List.length streams] с {b последними} значениями по каждому
+    входному потоку для этого ключа ([None] если этот поток ещё не
+    присылал данных для этого ключа).
+
+    Семантика:
+    - Watermarks объединяются через {!Mf_event.union} (min входов).
+    - [Retract] в входных потоках игнорируется.
+    - Каждое [Data] триггерит emit; стрим эмитит даже когда
+      [options] содержит [None]'ы — пользователь сам решает использовать
+      или нет (например, проверяет что все [Some] перед обработкой).
+    - Список [options] сохраняет порядок входных потоков; пользователь
+      сам мапит позиции.
+
+    Типичный use case — multi-sensor pipeline:
+    {[
+      let voltage = packets |> Pipe.map (fun p -> (p.lamp, p.voltage)) in
+      let co      = gas_packets |> Pipe.map (fun g -> (g.lamp, g.co_ppm)) in
+      let rssi    = packets |> Pipe.map (fun p -> (p.lamp, p.avg_rssi)) in
+      let joined  = Pipe.keyed_join (module By_lamp) [voltage; co; rssi] in
+      (* joined: (string * (string * float) option list) Mf_event.t Stream.t *)
+    ]}
+
+    Замещает повторяющийся boilerplate: tagged-union типы + union
+    + process_keyed со всеми case-analysis для трёх каналов
+    превращаются в одну строку. *)
+
 (** {2 Окна по времени} *)
 
 (** Спецификация временного окна. *)
