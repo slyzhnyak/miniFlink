@@ -90,14 +90,21 @@ let backend_size (cb : counted_backend) : int =
 
 (* ── Подготовка events ─────────────────────────────────────── *)
 
-(* Mock_source даёт packet stream + gas stream. Материализуем оба в
-   списки чтобы можно было прогнать пайплайн многократно. *)
+(* Mock_source даёт packet stream + gas stream + таблицу beacon'ов
+   для триангуляции. Материализуем events в списки чтобы можно было
+   прогнать пайплайн многократно. *)
+
+let find_beacon_ref : (string -> (float * float * int) option) ref =
+  ref (fun _ -> None)
+
 let prepare_events () =
   let module Src = Mock_source.Large_mine.Make (struct
     let config = bench_config
   end) in
   let packets = Src.read () |> Stream.to_list in
   let gas = Src.read_gas () |> Stream.to_list in
+  let beacons = Mock_source.Large_mine.beacons_table bench_config in
+  find_beacon_ref := (fun b -> Hashtbl.find_opt beacons b);
   (packets, gas)
 
 (* ── Пайплайны (без и с persistence per operator) ──────────── *)
@@ -211,18 +218,44 @@ let mk_co_trigger ?backend () =
                         then Some alert_of_json else None)
     ()
 
-(* Pipeline (РЕАЛИСТИЧНЫЙ minePASS):
-   - voltage trigger (low_voltage)
-   - CO trigger (high_co)
-   - silence_age на packets
-   - keyed_join [voltage; co; rssi] → combined FSM через process_keyed
-     (главный stateful operator — реагирует на одновременное сочетание
-      voltage<3.5 И co>50 И rssi<-75)
-   - window_fold для voltage trends *)
+(* Pipeline (РЕАЛИСТИЧНЫЙ minePASS с триангуляцией и enriched gas):
+
+   ┌─→ voltage_stream ──→ Trigger (low_voltage) ──→ voltage_alerts
+   │                  ╲
+   │                   ╲→ window_fold (voltage sum tumbling 1min)
+   │
+   ├─→ silence_age ──→ silence_stream
+   │
+   ├─→ Pipelines.median_rssi ──→ location_stream (с triangulated позицией)
+   │                                │
+   │                                ↓
+   ├──── rssi raw ────────────→ Pipelines.gas_alerts → enriched gas_alerts
+   gas─→──────────────────────→     (gas + location)    (с координатами)
+   │
+   └─→ keyed_join [voltage; co; rssi] ──→ process_keyed (combined FSM)
+                                              ↓
+                                       evacuation alerts
+
+   Замечания о persistence:
+   - Trigger, silence_age, process_keyed, window_fold подключены к
+     backend через ?backend параметры
+   - median_rssi внутри использует window_agg_keyed (Agg.t existential
+     acc) — persistence НЕ поддерживается напрямую (требует Agg.t
+     refactor; задокументировано как TODO в expressiveness branch)
+   - gas_alerts использует manual Hashtbl для enrichment state —
+     тоже без persistence (нестандартная retract семантика)
+
+   То есть в production minePASS реально persisted получаются 4 из 6
+   stateful компонентов. Этот benchmark показывает overhead на этих 4. *)
 let run_pipeline ?trigger_bk ?silence_bk ?process_bk ?window_bk
+    ?find_beacon
     (packets : Domain.packet Mf_event.t list)
     (gas : Domain.gas_packet Mf_event.t list)
   : int =
+  let open Ex07_location_lib in
+  let find_beacon = match find_beacon with
+    | Some f -> f
+    | None -> !find_beacon_ref in
   (* Module для keyed-join — values имеют тип (string * float). *)
   let module By_lamp : Keyed.S with type t = string * float = struct
     type t = string * float
@@ -277,12 +310,24 @@ let run_pipeline ?trigger_bk ?silence_bk ?process_bk ?window_bk
          ~by:(fun (p : Domain.packet) -> p.lamp)
          ~tick:(Time.seconds 30) in
 
-  (* ── РЕАЛИСТИЧНЫЙ COMBINED FSM ────────────────────────────────
-     keyed_join объединяет три potoka в snapshot
-     (lamp, [voltage_opt; co_opt; rssi_opt]).
-     process_keyed держит combined_fsm state per шахтёра, обновляет
-     поля по приходящим значениям, эмитит evacuation alert когда
-     достигается критическое сочетание. *)
+  (* ── ТРИАНГУЛЯЦИЯ + ENRICHED GAS ALERTS ─────────────────────
+     Используем готовые ex07 pipelines.
+     Эти операторы (window_agg_keyed + gas_alerts manual hashtbl)
+     persistence не поддерживают — это документированное ограничение. *)
+  let packets_for_loc = packets |> Stream.of_list in
+  let location_stream =
+    Pipelines.median_rssi ~find_beacon packets_for_loc in
+
+  let packets_for_rssi = packets |> Stream.of_list in
+  let gas_for_enrich = gas |> Stream.of_list in
+  let enriched_gas_alerts =
+    Pipelines.gas_alerts ~find_beacon
+      ~rssi:packets_for_rssi
+      ~locations:location_stream
+      ~gas:gas_for_enrich
+      () in
+
+  (* ── COMBINED FSM ──────────────────────────────────────────── *)
   let combined_stream =
     Pipe.keyed_join (module By_lamp)
       [voltage_stream; co_stream; rssi_stream] in
@@ -306,27 +351,16 @@ let run_pipeline ?trigger_bk ?silence_bk ?process_bk ?window_bk
          ~init:(fun () ->
            { voltage = 4.0; co = 0.0; rssi = -50.0; critical_since = 0 })
          ~on_event:(fun ctx key st (_k, opts) ->
-           (* Обновляем state по тому что пришло *)
            (match opts with
             | [v_opt; c_opt; r_opt] ->
               (match v_opt with Some (_, v) -> st.voltage <- v | None -> ());
               (match c_opt with Some (_, c) -> st.co <- c | None -> ());
               (match r_opt with Some (_, r) -> st.rssi <- r | None -> ())
             | _ -> ());
-           (* Проверяем критическое сочетание *)
            let is_critical =
              st.voltage < 3.5 && st.co > 50.0 && st.rssi < -75.0 in
-           let now =
-             match opts with
-             | [Some (_, _); _; _]
-             | [_; Some (_, _); _]
-             | [_; _; Some (_, _)] ->
-               (* берём ts из любого Some — все они одного watermark *)
-               0  (* упрощённо; реально передаётся через ctx *)
-             | _ -> 0 in
-           ignore now;
            if is_critical && st.critical_since = 0 then begin
-             st.critical_since <- 1;  (* флаг, чтоб не дублировать *)
+             st.critical_since <- 1;
              ctx.emit (A_no_packets (key, st.critical_since))
            end else if not is_critical && st.critical_since > 0 then
              st.critical_since <- 0)
@@ -357,6 +391,7 @@ let run_pipeline ?trigger_bk ?silence_bk ?process_bk ?window_bk
   Pipe.iter_data (fun _ -> incr n) silence_stream;
   Pipe.iter_data (fun _ -> incr n) evacuation_alerts;
   Pipe.iter_data (fun _ -> incr n) voltage_sum;
+  Pipe.iter_data (fun _ -> incr n) enriched_gas_alerts;
   !n
 
 (* ── Замер: один прогон ────────────────────────────────────── *)

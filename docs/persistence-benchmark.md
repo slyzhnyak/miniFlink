@@ -1,34 +1,56 @@
 # Persistence overhead benchmark
 
-Замер накладных расходов persistence для всех четырёх stateful
-операторов в реалистичном пайплайне с **fusion** voltage/CO/RSSI
-каналов через `Pipe.keyed_join` — production-like minePASS workload.
+Замер накладных расходов persistence в **полном** production-like
+minePASS workload, включающий:
+- voltage trigger (low_voltage)
+- CO trigger (high_co)
+- silence_age tracking
+- **Триангуляция позиций** через RSSI window_agg_keyed
+- **Enriched gas alerts** (газ + координаты из триангуляции)
+- Combined FSM (voltage+CO+RSSI через `Pipe.keyed_join`)
+- window_fold для voltage trends
+
+Это полная картина production minePASS — газовые алерты обогащаются
+**координатами** шахтёра из real-time триангуляции, evacuation
+alerts срабатывают на критическом сочетании voltage/CO/RSSI.
 
 ## Структура pipeline
 
 ```
-                                              ┌→ voltage_alerts
-packets ──→ voltage_stream ──→ Trigger ───────┤
-                                              └→ window_fold (sum)
+                    ┌→ Trigger ──→ voltage_alerts
+voltage ─→─────────┤
+                    └→ window_fold ──→ voltage_sum
 
-gas    ──→ co_stream ──→ Trigger ─→ co_alerts
+co     ─→ Trigger ──→ co_alerts
 
-packets ──→ silence_age ──→ silence stream
+silence ─→ silence_age ──→ silence_stream
 
-packets ──→ voltage ─┐
-gas     ──→ co ──────┼─→ keyed_join ─→ process_keyed (combined FSM)
-packets ──→ rssi ────┘                      ↓
-                                       evacuation alerts
+packets ─→ median_rssi (window_agg_keyed) ─→ location_stream
+                                                    ↓
+packets,gas,locations ─→ gas_alerts ─→ enriched_gas_alerts (with coords)
+
+voltage ─┐
+co ──────┼─→ keyed_join ─→ process_keyed (combined FSM)
+rssi ────┘                          ↓
+                              evacuation_alerts
 ```
 
-Combined FSM — **главный stateful operator** в этом workload. Он
-объединяет три канала через `keyed_join`, держит per-key state с
-4 полями (voltage, co, rssi, critical_since), эмитит alert на
-**критическом сочетании** (voltage<3.5 И co>50 И rssi<-75).
+## Важно: что persisted и что нет
 
-Это и есть реалистичный minePASS use case: evacuation alert не
-по одному параметру, а по комбинации трёх независимых каналов
-от разных датчиков.
+**С persistence:**
+- ✓ Trigger (snapshot on transitions)
+- ✓ silence_age (snapshot per event + tick)
+- ✓ process_keyed (snapshot per on_event/on_timer)
+- ✓ window_fold (snapshot on watermark)
+
+**Без persistence в текущей реализации:**
+- ✗ window_agg_keyed (в `median_rssi`) — использует `Agg.t` с
+  existential acc, persistence требует refactor `Agg.t`
+- ✗ gas_alerts enrichment — manual Hashtbl с custom retract семантикой
+
+То есть **2 из 6 stateful компонентов** в production minePASS пока
+без persistence. Это документировано как known limitation в expressiveness
+branch. Refactor `Agg.t` — отдельный TODO.
 
 ## Конфигурации
 
@@ -41,8 +63,8 @@ Combined FSM — **главный stateful operator** в этом workload. Он
 Запуск:
 ```bash
 SCALE=small  ./_build/default/bench/bench_persistence.exe  # ~5s
-SCALE=medium ./_build/default/bench/bench_persistence.exe  # ~20s
-SCALE=large  ./_build/default/bench/bench_persistence.exe  # ~5min
+SCALE=medium ./_build/default/bench/bench_persistence.exe  # ~30s
+SCALE=large  ./_build/default/bench/bench_persistence.exe  # ~10min
 ```
 
 ## Результаты — Medium scale (рекомендуемый для отчётов)
@@ -51,108 +73,113 @@ SCALE=large  ./_build/default/bench/bench_persistence.exe  # ~5min
 
 | Scenario | Median (s) | Overhead vs A | Throughput (ev/s) | Backend records | Backend bytes |
 |---|---|---|---|---|---|
-| **A.** Baseline (no persistence) | 0.47 | — | **127K** | — | — |
-| **B.** Trigger only persisted | 0.49 | **+3%** | 123K | 204 | 234 KB |
-| **C.** silence_age only persisted | 0.54 | **+15%** | 111K | 512 | 3,275 KB |
-| **D.** process_keyed only persisted | 0.64 | **+36%** | 94K | 512 | 6,218 KB |
-| **E.** window_fold only persisted | 0.48 | **+2%** | 125K | 0* | 0 KB* |
-| **F.** **All operators persisted** | 0.68 | **+45%** | **88K** | 1,228 | 9,728 KB |
+| **A.** Baseline (no persistence) | 2.77 | — | **22K** | — | — |
+| **B.** Trigger only persisted | 2.79 | **+1%** | 22K | 204 | 234 KB |
+| **C.** silence_age only persisted | 2.75 | ~0% | 22K | 512 | 3,275 KB |
+| **D.** process_keyed only persisted | 2.94 | **+6%** | 20K | 512 | 6,218 KB |
+| **E.** window_fold only persisted | 2.73 | ~0% | 22K | 0* | 0 KB* |
+| **F.** **All four persisted** | 2.93 | **+6%** | **20K** | 1,228 | 9,728 KB |
 
 *window_fold snapshot пишется только на Watermark; в этом workload
-Mock_source эмитит мало watermarks (только на границах фаз)*
+Mock_source эмитит мало watermarks*
 
 ### Recovery (Scenario G)
 
-Phase 1 (33,363 events) фильтрует state в backend. Phase 2 (33,364
-events) с тем же backend начинает с **restore_all** на старте каждого
-оператора.
+Phase 1 (33,363 events) фильтрует state в backend. Phase 2 (33,364 events)
+с тем же backend'ом начинает с **restore_all**.
 
 | Phase | Wall-time | State после |
 |---|---|---|
-| Phase 1 | 0.34 s | 1,184 records / 4.8 MB |
-| Phase 2 (with restore) | 0.35 s | — |
+| Phase 1 | 1.64 s | 1,184 records / 4.8 MB |
+| Phase 2 (with restore) | 1.61 s | — |
 
-**Restore overhead: ~3%.** Backend читается один раз на старте каждого
-оператора, парсится JSON, восстанавливается hashtable.
+**Restore overhead: ~0%** (фактически phase 2 чуть быстрее — noise).
+
+## Где время — triangulation доминирует
+
+Baseline pipeline тратит **2.77s на 67K events**. Allocation
+**5 GB**. Это **на порядок дороже** чем без triangulation
+(там было 0.47s, 3 GB).
+
+Причина — `Pipelines.median_rssi`:
+- Каждый пакет имеет до 5 readings → 5 events после flat_map
+- Sliding(60s, 5s) window → каждое reading попадает в **12 окон**
+- 67K packets × 5 readings × 12 окон = **4M window slots**
+- В каждом slot `Agg.group_by` + `median` + `top_k_by 2`
+
+Это **реальный** production cost minePASS — большинство время в RSSI
+aggregation и triangulation, persistence overhead становится **маленьким**
+относительно.
 
 ## Ключевые insights
 
-### 1. Trigger persistence почти бесплатна (+3%)
+### 1. С triangulation persistence overhead падает до ~6%
 
-Snapshot пишется **только на state-transitions**. За 30-минутный
-прогон с 5% gas alerts + debounce 1-2 минуты — это **1,921 sets**
-на 67K events = **0.03 sets per event**.
+Без triangulation было +45% overhead. С ней — +6%. Причина проста:
+triangulation **дороже** чем все 4 persistent operators вместе.
 
-### 2. window_fold persistence бесплатна (+2%) в этом workload
+Это **хорошая новость**: в реальном production где cycle dominated
+by triangulation, persistence добавляет marginal cost.
 
-Snapshot на каждый Watermark. В Mock_source watermarks редки —
-zero фактических записей. В production с regular watermarks
-overhead будет выше (оценочно 5-10%).
+### 2. process_keyed (+6%) — главный contributor persistence
 
-### 3. silence_age — +15% при высоком write rate
+Те же 58,807 snapshots с **combined FSM** state (4 поля). Но
+по сравнению с triangulation cost — пренебрежимо мало.
 
-**61,464 writes** (one per event + tick) добавляют +70 ms. JSON-
-сериализация маленьких записей (last_seen + fire_at) быстрая.
+### 3. Recovery практически бесплатна
 
-### 4. process_keyed — главный contributor (+36%)
+restore_all — one-shot на старте. На 1,184 records занимает
+~20 ms из 1.6 секунд. Это **~1.3% overhead** от phase time.
 
-**58,807 writes** — snapshot после каждого on_event с **combined
-FSM state** (4 поля: voltage, co, rssi, critical_since). State
-крупнее значит JSON сериализация дороже.
+### 4. Triangulation pipeline (median_rssi) не persisted
 
-Это **не оптимизированный** API: пользователь не может пометить
-«state не изменился». Watermark-based batched snapshot был бы
-заметно быстрее, но требует API изменений.
+`window_agg_keyed` с `Agg.t` — главный stateful operator с **наибольшим**
+state size (окно содержит **все** readings за 60 sec для каждого
+ключа). После restart этот state теряется.
 
-### 5. Full persistence overhead (+45%)
+Что это значит для production:
+- Triggers (voltage, CO) — **переживают** restart ✓
+- Silence detection — **переживает** restart ✓
+- Combined FSM evacuation — **переживает** restart ✓
+- Voltage trends (window_fold) — **переживают** restart ✓
+- **Triangulation** — **теряется** на restart, требует ~60 sec
+  warmup до первой полной позиции после restart ✗
+- **Gas enrichment** — теряется, требует первой successful triangulation ✗
 
-F (все 4 оператора с shared backend) показал **+45%**, что чуть
-меньше арифметической суммы individual costs (3+15+36+2 = 56%).
-Это потому что backend writes amortize fixed costs (hash lookup
-в memory backend).
-
-### 6. Combined pipeline vs параллельные потоки
-
-Сравнение с первой версией benchmark (где silence/FSM/window
-работали на **отдельных** копиях packet stream):
-
-| Метрика | Parallel pipelines | Combined (этот бенч) |
-|---|---|---|
-| A baseline | 0.54s | 0.47s |
-| F all persisted | 0.82s (+51%) | 0.68s (+45%) |
-| process_keyed backend | 4.9 MB | 6.2 MB |
-
-Combined pipeline на **15% быстрее baseline** (один проход вместо
-дублирования) и **на 6% меньше overhead** при full persistence.
-Это **правильнее** соответствует production minePASS deployment.
+Workaround в production: первые 60 sec после restart считать
+**warmup phase** где gas alerts не enriched координатами.
 
 ## Throughput vs production load
 
-Production minePASS: **4,096 шахтёров × event каждые 15с = 273 events/sec**.
+Production minePASS: **4,096 шахтёров × event/15s = 273 events/sec**.
 
-Worst-case throughput (F. All persisted, medium scale): **88K events/sec**.
+Worst-case throughput (F. All persisted, medium scale): **20K events/sec**.
 
-**Margin = 320x.** Запас производительности на 2 порядка от типичной
-production нагрузки. Даже с disk-backed RocksDB при 100× slowdown
-margin остаётся **3×**.
+**Margin = 73×.** Меньше чем без triangulation (320×), но всё равно
+достаточно для production deployment.
+
+Memory pressure: 5 GB / run при 67K events. Это **главный** scaling
+issue — для large scale (950K events × 16 horizons × 256 miners)
+ожидается ~70 GB allocation, что требует careful GC tuning.
+
+## Сравнение версий benchmark
+
+| Workload | Baseline | F all persist | Memory | Где время |
+|---|---|---|---|---|
+| Без triangulation (v1) | 0.54s | 0.82s (+51%) | 3 GB | persistence |
+| С triangulation (v2) | 2.77s | 2.93s (+6%) | 5 GB | **triangulation** |
+
+V2 — **правильная** production-like модель. Persistence overhead
+теперь **пренебрежимо мал** относительно core compute cost.
 
 ## Известные ограничения
 
-1. **In-memory backend** — реальный disk-backed backend будет медленнее
-   из-за fsync/IO. Этот benchmark показывает **верхнюю границу**.
-
-2. **Watermark frequency** — Mock_source эмитит мало watermarks. На
-   реальном Kafka source window_fold overhead будет 5-10%.
-
-3. **Single-threaded** — `parallel` API не задействован. С multi-core
-   throughput будет другим.
-
-4. **Memory pressure** — medium scale аллоцирует ~3 GB / run. На large
-   scale ожидается ~40 GB allocation что может доминировать over
-   persistence cost.
+1. **In-memory backend** — disk-backed RocksDB будет медленнее
+2. **Watermark frequency** — Mock_source эмитит мало watermarks
+3. **Single-threaded** — `parallel` API не задействован
+4. **Memory pressure** — на large scale ~70 GB allocation
+5. **Triangulation не persisted** — known limitation Agg.t
 
 ## Воспроизводимость
 
 Все цифры в этом документе — `medium`, MacBook Pro M3 (12-core, 36GB).
-На других машинах absolute numbers будут отличаться; относительные
-overhead'ы (vs A column) стабильны.
