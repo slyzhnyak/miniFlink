@@ -274,6 +274,41 @@ val sink : ('a -> unit) -> 'a Mf_event.t Stream.t -> unit
 (** Собрать [Data]-значения потока в список. *)
 val collect : 'a Mf_event.t Stream.t -> 'a list
 
+(** {3 Удобные потребители ({!Mf_event.t})}
+
+    Шорткаты для типичных операций над потоком событий. Все они дренят
+    поток до [None]; различаются тем что делать с каждым {!Mf_event.Data}.
+    [Retract]/[Watermark] {b игнорируются} (за исключением [iter_events]).
+
+    Замещают повторяющийся boilerplate вида
+    {[
+      let rec loop () = match stream () with
+        | None -> ()
+        | Some (Mf_event.Data (v, _)) -> handle v; loop ()
+        | Some _ -> loop ()
+      in loop ()
+    ]}
+    на один вызов [Pipe.iter_data handle stream]. *)
+
+val iter_data : ('a -> unit) -> 'a Mf_event.t Stream.t -> unit
+(** Алиас {!sink}. Имя [iter_data] симметрично с другими [_data]-helpers
+    ниже — выбор имени дело вкуса. *)
+
+val fold_data :
+  init:'b -> f:('b -> 'a -> 'b) -> 'a Mf_event.t Stream.t -> 'b
+(** Свернуть [Data]-значения потока. Например, подсчёт суммы:
+    {[
+      Pipe.fold_data ~init:0.0 ~f:(fun acc v -> acc +. v) stream
+    ]} *)
+
+val count_data : 'a Mf_event.t Stream.t -> int
+(** Сколько [Data]-событий в потоке. *)
+
+val iter_events : ('a Mf_event.t -> unit) -> 'a Mf_event.t Stream.t -> unit
+(** Как {!iter_data}, но callback вызывается на {b каждое} событие —
+    включая [Retract] и [Watermark]. Используется в тестах и логировании
+    когда важна полная картина потока. *)
+
 val materialize :
   by:('a -> Time.t -> 'k) -> 'a Mf_event.t Stream.t -> ('k * 'a) list
 (** Свернуть поток с retract'ами в финальную таблицу записей. [by v ts]

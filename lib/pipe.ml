@@ -219,6 +219,21 @@ let collect stream =
   List.rev (Stream.fold (fun acc -> function
     | Mf_event.Data (v,_) -> v :: acc | _ -> acc) [] stream)
 
+(* Удобные потребители для типичных паттернов "пройти поток и сделать X
+   с каждым Data". Все основаны на Stream.iter/fold; пишутся ради
+   читабельности пользовательского кода и тестов. *)
+let iter_data = sink
+
+let fold_data ~init ~f stream =
+  Stream.fold (fun acc -> function
+    | Mf_event.Data (v, _) -> f acc v
+    | _ -> acc) init stream
+
+let count_data stream =
+  fold_data ~init:0 ~f:(fun n _ -> n + 1) stream
+
+let iter_events f stream = Stream.iter f stream
+
 (* materialize: свернуть поток с retract'ами в финальную таблицу записей.
    [by v ts] задаёт идентичность записи (например (ключ, конец окна));
    Data кладёт/заменяет запись, Retract убирает. Возвращает финальные
