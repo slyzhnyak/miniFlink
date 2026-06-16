@@ -226,11 +226,31 @@ let window_fold
     ?(backend_name : string option)
     ?(serialize_acc : (acc -> Yojson.Safe.t) option)
     ?(deserialize_acc : (Yojson.Safe.t -> acc) option)
+    ?(persistence : acc Persistence_backend.persist option)
     (spec : win_spec)
     ~(init : unit -> acc)
     ~(add  : acc -> a -> acc)
     (upstream : a Mf_event.t Stream.t)
     : (string * acc) Mf_event.t Stream.t =
+
+  (* Нормализация ?persistence ↔ старые параметры. *)
+  let old_style_any =
+    backend <> None || backend_name <> None
+    || serialize_acc <> None || deserialize_acc <> None in
+  if persistence <> None && old_style_any then
+    invalid_arg
+      "Window.window_fold: cannot mix ?persistence with \
+       individual ?backend/?backend_name/?serialize_acc/?deserialize_acc";
+  let backend, backend_name, serialize_acc, deserialize_acc =
+    match persistence with
+    | Some p ->
+      (Some p.Persistence_backend.backend,
+       Some p.Persistence_backend.name,
+       Some p.Persistence_backend.serialize,
+       Some p.Persistence_backend.deserialize)
+    | None ->
+      (backend, backend_name, serialize_acc, deserialize_acc)
+  in
 
   (* Если backend подключён — обязательны name + сериализаторы. *)
   (match backend with

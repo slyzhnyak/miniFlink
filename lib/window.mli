@@ -29,6 +29,7 @@ val window_fold :
   ?backend_name:string ->
   ?serialize_acc:('acc -> Yojson.Safe.t) ->
   ?deserialize_acc:(Yojson.Safe.t -> 'acc) ->
+  ?persistence:'acc Persistence_backend.persist ->
   win_spec ->
   init:(unit -> 'acc) -> add:('acc -> 'a -> 'acc) ->
   'a Mf_event.t Stream.t -> (string * 'acc) Mf_event.t Stream.t

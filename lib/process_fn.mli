@@ -85,6 +85,7 @@ val process_keyed :
   ?backend_name:string ->
   ?serialize_state:('st -> Yojson.Safe.t) ->
   ?deserialize_state:(Yojson.Safe.t -> 'st) ->
+  ?persistence:'st Persistence_backend.persist ->
   init:(unit -> 'st) ->
   on_event:('out ctx -> string -> 'st -> 'a -> unit) ->
   on_timer:('out ctx -> string -> 'st -> Time.t -> timer_kind -> unit) ->
@@ -100,19 +101,23 @@ val process_keyed :
     типа [st]. Если backend подключён, а параметры отсутствуют —
     [Invalid_argument].
 
+    {b [?persistence]} — современная альтернатива четырём параметрам
+    выше: единый bundle {!Persistence_backend.persist}. Эквивалентно
+    по семантике. Нельзя смешивать с [?backend] стилем —
+    [Invalid_argument].
+
     Backend-ключ: ["process_keyed:{backend_name}:{key}"].
     Значение (JSON):
     {[
       {
         "state":     <serialized 'st>,
-        "ev_timers": [t1, t2, ...],   // event-time таймеры этого ключа
-        "pt_timers": [t1, t2, ...]    // processing-time таймеры этого ключа
+        "ev_timers": [t1, t2, ...],
+        "pt_timers": [t1, t2, ...]
       }
     ]}
 
     {b Ограничения:} Snapshot пишется {b после каждого} [on_event] и
-    [on_timer], даже если пользователь не менял state — это безопасно,
-    но не оптимально. Watermark-based snapshot — TODO.
+    [on_timer]. Watermark-based snapshot — TODO.
 
     Без backend'а — поведение как раньше (state и timers в памяти,
     теряются при завершении процесса). *)

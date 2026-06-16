@@ -184,6 +184,7 @@ val window_fold :
   ?backend_name:string ->
   ?serialize_acc:('acc -> Yojson.Safe.t) ->
   ?deserialize_acc:(Yojson.Safe.t -> 'acc) ->
+  ?persistence:'acc Persistence_backend.persist ->
   win_spec ->
   init:(unit -> 'acc) ->
   add:('acc -> 'a -> 'acc) ->
@@ -400,6 +401,7 @@ val process_keyed :
   ?backend_name:string ->
   ?serialize_state:('st -> Yojson.Safe.t) ->
   ?deserialize_state:(Yojson.Safe.t -> 'st) ->
+  ?persistence:'st Persistence_backend.persist ->
   init:(unit -> 'st) ->
   on_event:('out ctx -> string -> 'st -> 'a -> unit) ->
   on_timer:('out ctx -> string -> 'st -> Time.t -> timer_kind -> unit) ->

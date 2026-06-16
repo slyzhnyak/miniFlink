@@ -13,3 +13,10 @@ let of_memory (tbl : (string, bytes) Hashtbl.t) : t = {
   delete = (fun k   -> Hashtbl.remove tbl k);
   keys   = (fun ()  -> Hashtbl.fold (fun k _ a -> k :: a) tbl []);
 }
+
+type 'v persist = {
+  backend     : t;
+  name        : string;
+  serialize   : 'v -> Yojson.Safe.t;
+  deserialize : Yojson.Safe.t -> 'v;
+}

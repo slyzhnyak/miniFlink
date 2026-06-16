@@ -53,11 +53,31 @@ let process_keyed
     ?(backend_name : string option)
     ?(serialize_state : (st -> Yojson.Safe.t) option)
     ?(deserialize_state : (Yojson.Safe.t -> st) option)
+    ?(persistence : st Persistence_backend.persist option)
     ~(init : unit -> st)
     ~(on_event : out ctx -> string -> st -> a -> unit)
     ~(on_timer : out ctx -> string -> st -> Time.t -> timer_kind -> unit)
     (upstream : a Mf_event.t Stream.t)
     : out Mf_event.t Stream.t =
+
+  (* Нормализация ?persistence ↔ старые параметры. *)
+  let old_style_any =
+    backend <> None || backend_name <> None
+    || serialize_state <> None || deserialize_state <> None in
+  if persistence <> None && old_style_any then
+    invalid_arg
+      "Process_fn.process_keyed: cannot mix ?persistence with \
+       individual ?backend/?backend_name/?serialize_state/?deserialize_state";
+  let backend, backend_name, serialize_state, deserialize_state =
+    match persistence with
+    | Some p ->
+      (Some p.Persistence_backend.backend,
+       Some p.Persistence_backend.name,
+       Some p.Persistence_backend.serialize,
+       Some p.Persistence_backend.deserialize)
+    | None ->
+      (backend, backend_name, serialize_state, deserialize_state)
+  in
 
   (* Если backend подключён — обязательны name + сериализаторы. *)
   (match backend with
