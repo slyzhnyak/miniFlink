@@ -145,6 +145,67 @@ let create
 let name     s = s.s_name
 let severity s = s.s_severity
 
+(* ── Record-based config alternative API ───────────────────────────
+   Backwards-compat: оригинальный Trigger.create остаётся; of_config
+   просто разворачивает record в вызов create. *)
+
+type ('key, 'v, 'alert) serdes_config = {
+  serialize_key     : 'key -> Yojson.Safe.t;
+  deserialize_key   : Yojson.Safe.t -> 'key;
+  serialize_value   : 'v -> Yojson.Safe.t;
+  deserialize_value : Yojson.Safe.t -> 'v;
+  serialize_alert   : 'alert -> Yojson.Safe.t;
+  deserialize_alert : Yojson.Safe.t -> 'alert;
+}
+
+type ('key, 'v, 'alert) config = {
+  name             : string;
+  condition        : 'v condition;
+  produce_alert    : key:'key -> value:'v -> ts:Time.t -> 'alert;
+  produce_recovery : key:'key -> ts:Time.t -> 'alert;
+  problem_for      : Time.t;
+  recovery_for     : Time.t;
+  severity         : severity;
+  serdes           : ('key, 'v, 'alert) serdes_config option;
+}
+
+let default_config ~name ~condition ~produce_alert ~produce_recovery = {
+  name; condition; produce_alert; produce_recovery;
+  problem_for  = 0;
+  recovery_for = 0;
+  severity     = Warning;
+  serdes       = None;
+}
+
+let of_config (cfg : ('key, 'v, 'alert) config) : ('key, 'v, 'alert) spec =
+  match cfg.serdes with
+  | None ->
+    create
+      ~name:cfg.name
+      ~condition:cfg.condition
+      ~problem_for:cfg.problem_for
+      ~recovery_for:cfg.recovery_for
+      ~severity:cfg.severity
+      ~produce_alert:cfg.produce_alert
+      ~produce_recovery:cfg.produce_recovery
+      ()
+  | Some s ->
+    create
+      ~name:cfg.name
+      ~condition:cfg.condition
+      ~problem_for:cfg.problem_for
+      ~recovery_for:cfg.recovery_for
+      ~severity:cfg.severity
+      ~produce_alert:cfg.produce_alert
+      ~produce_recovery:cfg.produce_recovery
+      ~serialize_key:s.serialize_key
+      ~deserialize_key:s.deserialize_key
+      ~serialize_value:s.serialize_value
+      ~deserialize_value:s.deserialize_value
+      ~serialize_alert:s.serialize_alert
+      ~deserialize_alert:s.deserialize_alert
+      ()
+
 (* ────────────────────────────────────────────────────────────────────
    Внутреннее состояние per-key
 
