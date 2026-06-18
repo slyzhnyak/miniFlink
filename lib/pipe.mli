@@ -460,3 +460,9 @@ val process_keyed :
   on_event:('out ctx -> string -> 'st -> 'a -> unit) ->
   on_timer:('out ctx -> string -> 'st -> Time.t -> timer_kind -> unit) ->
   'a Mf_event.t Stream.t -> 'out Mf_event.t Stream.t
+
+(** Record-based альтернатива {!process_keyed} (10 параметров → 1 record).
+    Подробнее см. {!Process_fn.process_keyed_spec}. *)
+val process_keyed_spec :
+  ('a, 'st, 'out) Process_fn.spec ->
+  'a Mf_event.t Stream.t -> 'out Mf_event.t Stream.t

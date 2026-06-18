@@ -363,3 +363,4 @@ type 'out ctx = 'out Process_fn.ctx = {
   cancel_processing_timers: unit -> unit;
 }
 let process_keyed = Process_fn.process_keyed
+let process_keyed_spec = Process_fn.process_keyed_spec

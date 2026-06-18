@@ -277,3 +277,31 @@ let process_keyed
           pull ()
         | Some (Mf_event.Retract _) -> pull ()
     in pull ()
+
+(* ── Record-based spec API — backwards-compat wrapper ──────────────── *)
+
+type ('a, 'st, 'out) spec = {
+  keyed       : (module Keyed.S with type t = 'a);
+  init        : unit -> 'st;
+  on_event    : 'out ctx -> string -> 'st -> 'a -> unit;
+  on_timer    : 'out ctx -> string -> 'st -> Time.t -> timer_kind -> unit;
+  now_ms      : (unit -> int) option;
+  on_stat     : (stat -> unit) option;
+  persistence : 'st Persistence_backend.persist option;
+}
+
+let default_spec ~keyed ~init ~on_event ~on_timer = {
+  keyed; init; on_event; on_timer;
+  now_ms = None; on_stat = None; persistence = None;
+}
+
+let process_keyed_spec (spec : ('a, 'st, 'out) spec)
+    (upstream : 'a Mf_event.t Stream.t) : 'out Mf_event.t Stream.t =
+  process_keyed spec.keyed
+    ?now_ms:spec.now_ms
+    ?on_stat:spec.on_stat
+    ?persistence:spec.persistence
+    ~init:spec.init
+    ~on_event:spec.on_event
+    ~on_timer:spec.on_timer
+    upstream
