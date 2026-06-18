@@ -417,3 +417,21 @@
  (libraries miniflink)
  (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
  (modules test_persistence_bundle))
+
+(test
+ (name test_supervisor_race)
+ (libraries miniflink threads.posix)
+ (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
+ (modules test_supervisor_race))
+
+(test
+ (name test_trigger_combine_lazy)
+ (libraries miniflink)
+ (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
+ (modules test_trigger_combine_lazy))
+
+(test
+ (name test_table_ttl_eviction)
+ (libraries miniflink)
+ (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
+ (modules test_table_ttl_eviction))

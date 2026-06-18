@@ -50,11 +50,25 @@ let of_stream_ttl ~key ~ttl (src : 'a Mf_event.t Stream.t) =
     end
   in
   let pump () =
+    (* Дренируем входной поток до None или Retract, продвигая
+       max_ts по Data И по Watermark. Раньше pump останавливался
+       на первом Watermark (через wildcard `_ -> ()`), не используя
+       его для продвижения max_ts → eviction не работал когда в
+       потоке были Watermark между Data. *)
     let rec go () = match src () with
       | Some (Mf_event.Data (v, t)) ->
         if t > !max_ts then max_ts := t;
-        Hashtbl.replace h (key v) (v, t); go ()
-      | _ -> ()
+        Hashtbl.replace h (key v) (v, t);
+        go ()
+      | Some (Mf_event.Watermark wm) ->
+        if wm > !max_ts then max_ts := wm;
+        go ()
+      | Some (Mf_event.Retract _) ->
+        (* Retract на enrichment-table семантически неоднозначен —
+           что значит «отменить добавление сущности в таблицу»?
+           Оставляем текущее поведение: останавливаемся, как раньше. *)
+        ()
+      | None -> ()
     in go (); evict ()
   in
   fun k ->

@@ -609,20 +609,26 @@ let combine
     (specs : (k, v, a) spec list)
     (source : (k * v) Mf_event.t Stream.t)
   : a Mf_event.t Stream.t =
-  (* Простой подход: каждый триггер получает свою копию (через
-     материализацию в список и обратно), затем сливаем через
-     Mf_event.union. Это требует материализации, но для разумного
-     числа триггеров (<10) приемлемо.
+  (* Multi-trigger pattern: каждый триггер получает свою копию
+     source через Stream.split (lazy buffered fan-out), затем
+     результаты сливаются через Mf_event.union.
+
+     Stream.split НЕ материализует source — он буферизует только
+     те events которые уже прочитаны одной копией но ещё не
+     прочитаны другой. Это даёт O(buffer_size) памяти вместо
+     O(total_stream_size), и работает на бесконечных источниках.
 
      Если backend подключён — передаётся каждому триггеру; они
      различаются по [name] и не интерферируют в backend по ключам. *)
-  let source_list = Stream.to_list source in
   match specs with
   | [] -> Stream.empty
-  | [s] -> of_stream ?backend s (Stream.of_list source_list)
-  | first :: rest ->
-    let first_stream = of_stream ?backend first (Stream.of_list source_list) in
-    List.fold_left
-      (fun acc s ->
-         Mf_event.union acc (of_stream ?backend s (Stream.of_list source_list)))
-      first_stream rest
+  | [s] -> of_stream ?backend s source
+  | _ ->
+    let copies = Stream.split (List.length specs) source in
+    let trigger_streams = List.map2
+      (fun spec copy -> of_stream ?backend spec copy)
+      specs copies in
+    match trigger_streams with
+    | [] -> Stream.empty  (* unreachable: specs non-empty *)
+    | first :: rest ->
+      List.fold_left Mf_event.union first rest
