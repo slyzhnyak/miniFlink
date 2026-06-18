@@ -111,6 +111,25 @@ let keyed_join
     in next
   end
 
+(* keyed_join_map: helper над keyed_join. Применяет f к каждому
+   snapshot'у, эмитит результат только если f вернула Some. *)
+let keyed_join_map
+    (type a) (type b)
+    (module K : Keyed.S with type t = a)
+    ~(f : string -> a option list -> b option)
+    (streams : a Mf_event.t Stream.t list)
+    : b Mf_event.t Stream.t =
+  let joined = keyed_join (module K) streams in
+  let rec next () = match joined () with
+    | None -> None
+    | Some (Mf_event.Data ((key, opts), ts)) ->
+      (match f key opts with
+       | Some v -> Some (Mf_event.data v ts)
+       | None -> next ())
+    | Some (Mf_event.Watermark wm) -> Some (Mf_event.wm wm)
+    | Some (Mf_event.Retract _) -> next ()
+  in next
+
 (* ── Окна вынесены в Window; переэкспорт для стабильного Pipe.* API ── *)
 type win_spec = Window.win_spec
 let tumbling = Window.tumbling

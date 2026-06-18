@@ -116,6 +116,32 @@ val keyed_join :
     + process_keyed со всеми case-analysis для трёх каналов
     превращаются в одну строку. *)
 
+val keyed_join_map :
+  (module Keyed.S with type t = 'a) ->
+  f:(string -> 'a option list -> 'b option) ->
+  'a Mf_event.t Stream.t list ->
+  'b Mf_event.t Stream.t
+(** Как {!keyed_join}, но применяет [f] к каждому snapshot'у и
+    эмитит {b только} те результаты для которых [f] вернул [Some].
+
+    Удобно когда downstream нужно либо unwrap'нутые значения когда
+    все [Some], либо ничего:
+    {[
+      let evacuation_alerts =
+        Pipe.keyed_join_map (module By_lamp)
+          ~f:(fun lamp opts ->
+            match opts with
+            | [Some (_, v); Some (_, c); Some (_, r)]
+              when v < 3.5 && c > 50.0 && r < -75.0 ->
+              Some (lamp, v, c, r)
+            | _ -> None)
+          [voltage; co; rssi]
+    ]}
+
+    Эквивалентно {!keyed_join} с последующим [Pipe.filter_map],
+    но обходится одним проходом и без промежуточного [option list]
+    в downstream. *)
+
 (** {2 Окна по времени} *)
 
 (** Спецификация временного окна. *)
