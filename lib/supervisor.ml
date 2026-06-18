@@ -69,6 +69,7 @@ let run_one (spec : pipeline_spec) : status =
    пробрасывается. *)
 let supervise_result (specs : pipeline_spec list) : (string * status) list =
   let results = Array.make (List.length specs) ("", `Ok) in
+  let results_mu = Mutex.create () in
   let crit : (string * exn) option ref = ref None in
   let crit_mu = Mutex.create () in
   let threads = List.mapi (fun i spec ->
@@ -81,7 +82,13 @@ let supervise_result (specs : pipeline_spec list) : (string * status) list =
           Mutex.unlock crit_mu;
           `Failed
       in
-      results.(i) <- (spec.label, st)
+      (* Запись в общий массив из N потоков обязана быть под mutex'ом.
+         На OCaml 4 с Thread конкурентная запись в разные ячейки
+         может работать «как повезёт» из-за GIL, но это data race
+         по модели памяти. На OCaml 5 с Domain — UB. *)
+      Mutex.lock results_mu;
+      results.(i) <- (spec.label, st);
+      Mutex.unlock results_mu
     ) ()
   ) specs in
   List.iter Thread.join threads;
