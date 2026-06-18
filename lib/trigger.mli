@@ -159,6 +159,73 @@ val create :
 val name     : ('key, 'v, 'alert) spec -> string
 val severity : ('key, 'v, 'alert) spec -> severity
 
+(** {2 Record-based конструктор}
+
+    Альтернатива {!create} с 13 параметрами. Удобен для:
+    - {b Trigger templates:} зафиксировать общую часть в переменной
+      и override'ить пару полей через [with]
+    - {b Group serdes:} 6 сериализаторов идут в один subrecord
+      {!serdes_config} как опциональный bundle
+
+    Пример template'а:
+    {[
+      let base = Trigger.default_config
+        ~name:"voltage_template"
+        ~condition:(Trigger.less_than 0.0)
+        ~produce_alert:(fun ~key ~value ~ts -> Low (key, value, ts))
+        ~produce_recovery:(fun ~key ~ts -> Recovery (key, ts))
+
+      let low_voltage = Trigger.of_config {
+        base with
+          name = "low_voltage";
+          condition = Trigger.less_than 3.5;
+          problem_for = Time.minutes 2;
+      }
+
+      let critical_voltage = Trigger.of_config {
+        base with
+          name = "critical_voltage";
+          condition = Trigger.less_than 3.0;
+          severity = High;
+      }
+    ]} *)
+
+type ('key, 'v, 'alert) serdes_config = {
+  serialize_key     : 'key -> Yojson.Safe.t;
+  deserialize_key   : Yojson.Safe.t -> 'key;
+  serialize_value   : 'v -> Yojson.Safe.t;
+  deserialize_value : Yojson.Safe.t -> 'v;
+  serialize_alert   : 'alert -> Yojson.Safe.t;
+  deserialize_alert : Yojson.Safe.t -> 'alert;
+}
+(** Bundle всех шести (де)сериализаторов нужных для persistence. *)
+
+type ('key, 'v, 'alert) config = {
+  name             : string;
+  condition        : 'v condition;
+  produce_alert    : key:'key -> value:'v -> ts:Time.t -> 'alert;
+  produce_recovery : key:'key -> ts:Time.t -> 'alert;
+  problem_for      : Time.t;
+  recovery_for     : Time.t;
+  severity         : severity;
+  serdes           : ('key, 'v, 'alert) serdes_config option;
+}
+(** Полный config для одного триггера. *)
+
+val default_config :
+  name:string ->
+  condition:'v condition ->
+  produce_alert:(key:'key -> value:'v -> ts:Time.t -> 'alert) ->
+  produce_recovery:(key:'key -> ts:Time.t -> 'alert) ->
+  ('key, 'v, 'alert) config
+(** Минимальный config с обязательными полями. Defaults:
+    [problem_for = 0], [recovery_for = 0], [severity = Warning],
+    [serdes = None]. *)
+
+val of_config : ('key, 'v, 'alert) config -> ('key, 'v, 'alert) spec
+(** Сконструировать spec из config'а. Эквивалентно {!create} с
+    соответствующими параметрами. *)
+
 (** {1 Backend для persistence}
 
     Простой record-of-functions интерфейс к key-value хранилищу.

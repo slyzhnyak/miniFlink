@@ -111,6 +111,25 @@ let keyed_join
     in next
   end
 
+(* keyed_join_map: helper над keyed_join. Применяет f к каждому
+   snapshot'у, эмитит результат только если f вернула Some. *)
+let keyed_join_map
+    (type a) (type b)
+    (module K : Keyed.S with type t = a)
+    ~(f : string -> a option list -> b option)
+    (streams : a Mf_event.t Stream.t list)
+    : b Mf_event.t Stream.t =
+  let joined = keyed_join (module K) streams in
+  let rec next () = match joined () with
+    | None -> None
+    | Some (Mf_event.Data ((key, opts), ts)) ->
+      (match f key opts with
+       | Some v -> Some (Mf_event.data v ts)
+       | None -> next ())
+    | Some (Mf_event.Watermark wm) -> Some (Mf_event.wm wm)
+    | Some (Mf_event.Retract _) -> next ()
+  in next
+
 (* ── Окна вынесены в Window; переэкспорт для стабильного Pipe.* API ── *)
 type win_spec = Window.win_spec
 let tumbling = Window.tumbling
@@ -292,6 +311,12 @@ let count_data stream =
 
 let iter_events f stream = Stream.iter f stream
 
+(* Non-terminal observer: применяет side-effect к каждому event и
+   пропускает его дальше без изменений. label игнорируется самой
+   функцией но может использоваться в closure callback'а. *)
+let inspect ?label:_ f stream =
+  Stream.map (fun ev -> f ev; ev) stream
+
 (* materialize: свернуть поток с retract'ами в финальную таблицу записей.
    [by v ts] задаёт идентичность записи (например (ключ, конец окна));
    Data кладёт/заменяет запись, Retract убирает. Возвращает финальные
@@ -338,3 +363,4 @@ type 'out ctx = 'out Process_fn.ctx = {
   cancel_processing_timers: unit -> unit;
 }
 let process_keyed = Process_fn.process_keyed
+let process_keyed_spec = Process_fn.process_keyed_spec

@@ -74,3 +74,18 @@ let of_stream_ttl ~key ~ttl (src : 'a Mf_event.t Stream.t) =
   fun k ->
     pump ();
     match Hashtbl.find_opt h k with Some (v,_) -> Some v | None -> None
+
+(* build: eagerly прогоняет источник до конца, строит статический
+   snapshot. Никакой ленивости — это намеренно: использование
+   для предзагрузки конфигов где нужна детерминированная
+   готовность таблицы перед main pipeline'ом. *)
+let build ~key (src : 'a Mf_event.t Stream.t) =
+  let h = Hashtbl.create 64 in
+  let rec go () = match src () with
+    | Some (Mf_event.Data (v, _)) ->
+      Hashtbl.replace h (key v) v; go ()
+    | Some (Mf_event.Watermark _) | Some (Mf_event.Retract _) -> go ()
+    | None -> ()
+  in
+  go ();
+  fun k -> Hashtbl.find_opt h k

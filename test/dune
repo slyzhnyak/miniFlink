@@ -435,3 +435,33 @@
  (libraries miniflink)
  (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
  (modules test_table_ttl_eviction))
+
+(test
+ (name test_inspect)
+ (libraries miniflink)
+ (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
+ (modules test_inspect))
+
+(test
+ (name test_table_build)
+ (libraries miniflink)
+ (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
+ (modules test_table_build))
+
+(test
+ (name test_keyed_join_map)
+ (libraries miniflink)
+ (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
+ (modules test_keyed_join_map))
+
+(test
+ (name test_trigger_config)
+ (libraries miniflink)
+ (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
+ (modules test_trigger_config))
+
+(test
+ (name test_process_keyed_spec)
+ (libraries miniflink)
+ (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
+ (modules test_process_keyed_spec))

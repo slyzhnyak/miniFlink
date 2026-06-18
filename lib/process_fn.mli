@@ -121,3 +121,55 @@ val process_keyed :
 
     Без backend'а — поведение как раньше (state и timers в памяти,
     теряются при завершении процесса). *)
+
+(** {2 Record-based конструктор}
+
+    Альтернатива {!process_keyed} с 10 параметрами. Главная польза —
+    {b template pattern:} сохранить базовый spec в переменной и
+    override'ить конкретные поля через [with], не дублируя 8 общих
+    параметров каждый раз.
+
+    Пример:
+    {[
+      let base : (Domain.packet, my_state, my_alert) Process_fn.spec = {
+        keyed = (module ByLamp);
+        init = (fun () -> {...});
+        on_event = (fun ctx key st pkt -> ...);
+        on_timer = (fun ctx key st t kind -> ...);
+        now_ms = None;
+        on_stat = None;
+        persistence = None;
+      }
+
+      let persisted_voltage = Pipe.process_keyed_spec
+        { base with persistence = Some voltage_persist }
+
+      let persisted_co = Pipe.process_keyed_spec
+        { base with
+            persistence = Some co_persist;
+            on_event = my_co_handler  (* overrides *) }
+    ]} *)
+
+type ('a, 'st, 'out) spec = {
+  keyed       : (module Keyed.S with type t = 'a);
+  init        : unit -> 'st;
+  on_event    : 'out ctx -> string -> 'st -> 'a -> unit;
+  on_timer    : 'out ctx -> string -> 'st -> Time.t -> timer_kind -> unit;
+  now_ms      : (unit -> int) option;
+  on_stat     : (stat -> unit) option;
+  persistence : 'st Persistence_backend.persist option;
+}
+
+val default_spec :
+  keyed:(module Keyed.S with type t = 'a) ->
+  init:(unit -> 'st) ->
+  on_event:('out ctx -> string -> 'st -> 'a -> unit) ->
+  on_timer:('out ctx -> string -> 'st -> Time.t -> timer_kind -> unit) ->
+  ('a, 'st, 'out) spec
+(** Минимальный spec с обязательными полями. Defaults для
+    [now_ms], [on_stat], [persistence] — все [None]. *)
+
+val process_keyed_spec :
+  ('a, 'st, 'out) spec ->
+  'a Mf_event.t Stream.t -> 'out Mf_event.t Stream.t
+(** Эквивалентно {!process_keyed} с соответствующими параметрами. *)

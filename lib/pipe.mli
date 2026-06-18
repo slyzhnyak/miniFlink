@@ -116,6 +116,32 @@ val keyed_join :
     + process_keyed со всеми case-analysis для трёх каналов
     превращаются в одну строку. *)
 
+val keyed_join_map :
+  (module Keyed.S with type t = 'a) ->
+  f:(string -> 'a option list -> 'b option) ->
+  'a Mf_event.t Stream.t list ->
+  'b Mf_event.t Stream.t
+(** Как {!keyed_join}, но применяет [f] к каждому snapshot'у и
+    эмитит {b только} те результаты для которых [f] вернул [Some].
+
+    Удобно когда downstream нужно либо unwrap'нутые значения когда
+    все [Some], либо ничего:
+    {[
+      let evacuation_alerts =
+        Pipe.keyed_join_map (module By_lamp)
+          ~f:(fun lamp opts ->
+            match opts with
+            | [Some (_, v); Some (_, c); Some (_, r)]
+              when v < 3.5 && c > 50.0 && r < -75.0 ->
+              Some (lamp, v, c, r)
+            | _ -> None)
+          [voltage; co; rssi]
+    ]}
+
+    Эквивалентно {!keyed_join} с последующим [Pipe.filter_map],
+    но обходится одним проходом и без промежуточного [option list]
+    в downstream. *)
+
 (** {2 Окна по времени} *)
 
 (** Спецификация временного окна. *)
@@ -351,6 +377,34 @@ val iter_events : ('a Mf_event.t -> unit) -> 'a Mf_event.t Stream.t -> unit
     включая [Retract] и [Watermark]. Используется в тестах и логировании
     когда важна полная картина потока. *)
 
+val inspect :
+  ?label:string ->
+  ('a Mf_event.t -> unit) ->
+  'a Mf_event.t Stream.t -> 'a Mf_event.t Stream.t
+(** [inspect ?label f stream] вызывает [f] на каждое событие
+    (включая [Watermark] и [Retract]) и {b пропускает} event дальше
+    без изменений. В отличие от {!iter_events}, [inspect] —
+    {b не-терминальный}: возвращает stream, который можно
+    использовать в дальнейшем pipeline.
+
+    Используется для отладки: log в середине pipeline, метрики,
+    counter'ы — без необходимости разбирать pipe-цепочку.
+
+    {[
+      source
+      |> Pipe.event_time ~lateness:1000
+      |> Pipe.inspect ~label:"after_event_time" (fun ev ->
+           match ev with
+           | Mf_event.Data (v, ts) ->
+             Printf.eprintf "[after_event_time] ts=%d\n" ts
+           | _ -> ())
+      |> Pipe.window (module K) (Pipe.tumbling 10_000)
+    ]}
+
+    [label] — опциональный человекочитаемый ID для логов; сама
+    функция [inspect] его не использует, но callback может его
+    видеть через closure. *)
+
 val materialize :
   by:('a -> Time.t -> 'k) -> 'a Mf_event.t Stream.t -> ('k * 'a) list
 (** Свернуть поток с retract'ами в финальную таблицу записей. [by v ts]
@@ -405,4 +459,10 @@ val process_keyed :
   init:(unit -> 'st) ->
   on_event:('out ctx -> string -> 'st -> 'a -> unit) ->
   on_timer:('out ctx -> string -> 'st -> Time.t -> timer_kind -> unit) ->
+  'a Mf_event.t Stream.t -> 'out Mf_event.t Stream.t
+
+(** Record-based альтернатива {!process_keyed} (10 параметров → 1 record).
+    Подробнее см. {!Process_fn.process_keyed_spec}. *)
+val process_keyed_spec :
+  ('a, 'st, 'out) Process_fn.spec ->
   'a Mf_event.t Stream.t -> 'out Mf_event.t Stream.t
