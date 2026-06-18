@@ -108,13 +108,37 @@ val keyed_join :
       (а не вернётся к [Some 1]). Если нужна история и rollback —
       это другой use case, не покрывается {!keyed_join}.
 
+      {b ИЗВЕСТНОЕ ОГРАНИЧЕНИЕ — flicker через None:}
+      Когда upstream window эмитит атомарную пару
+      [Retract(old)] + [Data(new)] (late event correction),
+      keyed_join эмитит {b два} последовательных snapshot'а:
+      сначала с [None] в слоте (после retract), затем с
+      [Some new] (после data). Downstream видит transient [None].
+
+      Это {b архитектурное} ограничение: в нашей системе [Retract]
+      и [Data] — раздельные [Mf_event.t] события, без понятия
+      "atomic update". Если downstream чувствителен к промежуточному
+      None (например, эмитит side-effect при first-None или
+      переходит state), это может вызвать ложное срабатывание.
+
+      Workaround: убедитесь что downstream дренит снапшоты пачкой
+      и принимает решения только при стабильном состоянии (например,
+      через {!keyed_join_map} с проверкой "все Some"). Полное
+      решение требует расширения {!Mf_event.t} вариантом
+      [Update(old, new)] — большой refactor, отложен.
+
+      В minePASS workload это ограничение в реальности не
+      проявляется: streams подаваемые в keyed_join — выход
+      {!Pipe.map} от raw packets, которые не генерируют retract'ы.
+
       Типичные применения retract'а здесь:
       - Window upstream эмитит [Retract + Data] парой для late
         event correction — промежуточный snapshot с [None]
-        transient, downstream сразу видит новый Data.
+        transient, см. ограничение выше про flicker.
       - Standalone retract (TTL eviction, alert revocation) —
         slot остаётся [None] до прихода нового [Data] или
-        пересчитанного значения.
+        пересчитанного значения. Здесь None — правильное
+        конечное состояние.
     - Каждое [Data] триггерит emit; стрим эмитит даже когда
       [options] содержит [None]'ы — пользователь сам решает использовать
       или нет (например, проверяет что все [Some] перед обработкой).
