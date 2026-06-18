@@ -19,27 +19,31 @@ type pending_timer = {
 }
 
 module Timers = struct
-  type t = { mutable list : pending_timer list }
-  let create () = { list = [] }
-  let insert tm pt =
-    let rec ins acc = function
-      | [] -> List.rev (pt :: acc)
-      | h :: tl when h.pt_fire_at > pt.pt_fire_at ->
-        List.rev_append acc (pt :: h :: tl)
-      | h :: tl -> ins (h :: acc) tl
-    in
-    tm.list <- ins [] tm.list
+  (* Hashtbl<key_str, fire_at>: O(1) insert/remove_key.
+     pop_due — O(n) скан по всем pending, но он вызывается только
+     на Watermark (редко) в отличие от insert/remove_key которые
+     срабатывают на каждое Data-событие. Это даёт on average
+     O(1) per event vs O(n) у списка. *)
+  type t = (string, Time.t) Hashtbl.t
+  let create () : t = Hashtbl.create 64
 
-  let pop_due tm ~wm =
-    let rec loop acc = function
-      | [] -> tm.list <- []; List.rev acc
-      | h :: tl when h.pt_fire_at <= wm -> loop (h :: acc) tl
-      | rest -> tm.list <- rest; List.rev acc
-    in
-    loop [] tm.list
+  let insert (tm : t) pt =
+    Hashtbl.replace tm pt.pt_key_str pt.pt_fire_at
 
-  let remove_key tm ~key_str =
-    tm.list <- List.filter (fun pt -> pt.pt_key_str <> key_str) tm.list
+  let pop_due (tm : t) ~wm =
+    (* Собираем все due и удаляем из таблицы. Используем
+       Hashtbl.fold чтобы пройти один раз. Сортируем result по
+       fire_at чтобы on_timer вызывался в правильном порядке. *)
+    let due = Hashtbl.fold (fun ks fire_at acc ->
+      if fire_at <= wm then
+        { pt_fire_at = fire_at; pt_key_str = ks } :: acc
+      else acc) tm []
+    in
+    List.iter (fun pt -> Hashtbl.remove tm pt.pt_key_str) due;
+    List.sort (fun a b -> compare a.pt_fire_at b.pt_fire_at) due
+
+  let remove_key (tm : t) ~key_str =
+    Hashtbl.remove tm key_str
 end
 
 (* Сериализация ключа через Hashtbl.hash. См. ту же стратегию в

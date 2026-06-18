@@ -66,3 +66,15 @@
  (libraries miniflink ex07_location_lib unix)
  (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
  (modules bench_persistence))
+
+(executable
+ (name bench_components)
+ (libraries miniflink ex07_location_lib unix)
+ (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
+ (modules bench_components))
+
+(executable
+ (name bench_triangulation)
+ (libraries miniflink ex07_location_lib unix)
+ (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
+ (modules bench_triangulation))
