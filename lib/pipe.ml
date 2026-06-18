@@ -105,8 +105,28 @@ let keyed_join
           next ()
         | Some (Mf_event.Watermark wm) ->
           Some (Mf_event.wm wm)
-        | Some (Mf_event.Retract _) ->
-          (* Retract в input игнорируется — см. документацию *)
+        | Some (Mf_event.Retract ((idx, v), ts)) ->
+          (* Retract обнуляет slot [idx] для ключа [K.key v] ТОЛЬКО
+             если текущее значение в слоте эквивалентно retracted
+             (OCaml structural равенство [=]). Это правильное
+             поведение для случая когда retract отзывает последний
+             Data; если после Data(v=10) пришёл Data(v=20), а потом
+             Retract(v=10) — slot уже содержит v=20, retract
+             игнорируется как stale (более новое значение
+             перезаписало старое до retract'а).
+
+             Эмитим новый snapshot после retract'а — downstream
+             узнаёт об изменении. *)
+          let key = K.key v in
+          (match Hashtbl.find_opt states key with
+           | Some arr when arr.(idx) = Some v ->
+             arr.(idx) <- None;
+             Queue.push
+               (Mf_event.data (key, Array.to_list arr) ts) out_q
+           | _ ->
+             (* slot уже None или содержит другое значение — stale
+                retract, игнорируем *)
+             ());
           next ()
     in next
   end
