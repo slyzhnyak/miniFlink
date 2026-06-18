@@ -114,18 +114,37 @@ let () =
   let joined = Pipe.keyed_join (module By_key) [] in
   check "empty join" (joined () = None);
 
-  (* ── 6. Stream с Retract игнорируется ───────────────────── *)
-  Printf.printf "\n-- 6. Retract is ignored\n";
+  (* ── 6. Stream с Retract клирит slot и эмитит snapshot ─── *)
+  Printf.printf "\n-- 6. Retract clears slot, emits new snapshot\n";
   let s1 = [
     Mf_event.data ("K", 1.0) 0;
-    Mf_event.retract ("K", 1.0) 100;   (* должен игнорироваться *)
+    Mf_event.retract ("K", 1.0) 100;   (* должен очистить slot *)
     Mf_event.data ("K", 5.0) 200;
   ] |> Stream.of_list in
   let joined = Pipe.keyed_join (module By_key) [s1] in
   let result = collect_data joined in
-  Printf.printf "  got %d emissions (expect 2, retract ignored)\n"
+  Printf.printf "  got %d emissions (expect 3: Data, retract→snapshot, Data)\n"
     (List.length result);
-  check "retract ignored: 2 Data emissions"
+  check "3 emissions (data + retract emits None snapshot + data)"
+    (List.length result = 3);
+  (* Проверим что промежуточный snapshot пуст *)
+  (match result with
+   | [(_, [Some _]); (_, [None]); (_, [Some _])] ->
+     pass "snapshot sequence: Some → None → Some"
+   | _ -> fail "wrong snapshot sequence");
+
+  (* ── 6b. Stale retract игнорируется ─────────────────── *)
+  Printf.printf "\n-- 6b. Stale retract is ignored\n";
+  let s1 = [
+    Mf_event.data ("K", 1.0) 0;
+    Mf_event.data ("K", 2.0) 100;       (* slot теперь = Some 2.0 *)
+    Mf_event.retract ("K", 1.0) 150;    (* stale — не равно current *)
+  ] |> Stream.of_list in
+  let joined = Pipe.keyed_join (module By_key) [s1] in
+  let result = collect_data joined in
+  Printf.printf "  got %d emissions (expect 2, stale retract ignored)\n"
+    (List.length result);
+  check "stale retract ignored: 2 emissions"
     (List.length result = 2);
 
   (* ── 7. Watermark проходит через ──────────────────────── *)

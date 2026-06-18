@@ -96,7 +96,25 @@ val keyed_join :
 
     Семантика:
     - Watermarks объединяются через {!Mf_event.union} (min входов).
-    - [Retract] в входных потоках игнорируется.
+    - {b [Retract] в input потоке клирит соответствующий slot}
+      ({b до} [None]) и эмитит новый snapshot. Слот обнуляется
+      только если retracted значение совпадает с текущим в слоте
+      (OCaml structural равенство [=]); stale retract'ы (когда
+      более новый [Data] уже перезаписал слот) игнорируются.
+
+      {b ВАЖНО: нет stack semantics.} keyed_join хранит только
+      {b последнее} значение per source. Если поток был
+      [Data(v=1), Data(v=2), Retract(v=2)], slot обнулится в [None]
+      (а не вернётся к [Some 1]). Если нужна история и rollback —
+      это другой use case, не покрывается {!keyed_join}.
+
+      Типичные применения retract'а здесь:
+      - Window upstream эмитит [Retract + Data] парой для late
+        event correction — промежуточный snapshot с [None]
+        transient, downstream сразу видит новый Data.
+      - Standalone retract (TTL eviction, alert revocation) —
+        slot остаётся [None] до прихода нового [Data] или
+        пересчитанного значения.
     - Каждое [Data] триггерит emit; стрим эмитит даже когда
       [options] содержит [None]'ы — пользователь сам решает использовать
       или нет (например, проверяет что все [Some] перед обработкой).
