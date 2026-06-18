@@ -51,3 +51,26 @@ val of_stream :
     пространстве ключей. *)
 val of_stream_ttl :
   key:('a -> 'k) -> ttl:int -> 'a Mf_event.t Stream.t -> ('k, 'a) t
+
+(** [build ~key source] — eagerly прогоняет [source] до конца,
+    собирая последнее [Data]-значение по каждому ключу, и
+    возвращает {b статическую} таблицу с этим snapshot'ом.
+
+    В отличие от {!of_stream} — никакой блокировки на lookup'ах,
+    потому что весь источник вычитывается один раз во время вызова
+    [build]. {b Не использовать} на бесконечных источниках —
+    [build] заблокируется при вызове.
+
+    Заменяет уродский паттерн предзагрузки таблицы:
+    {[
+      (* раньше — 4 строки *)
+      let limits_tbl = Hashtbl.create 8 in
+      config_stream
+      |> Pipe.update_table limits_tbl ~key:(fun c -> c.cfg_id)
+      |> Stream.to_list |> ignore;   (* «собери и выбрось» *)
+      let limits = Table.of_hashtbl limits_tbl
+
+      (* теперь — 1 строка *)
+      let limits = Table.build ~key:(fun c -> c.cfg_id) config_stream
+    ]} *)
+val build : key:('a -> 'k) -> 'a Mf_event.t Stream.t -> ('k, 'a) t
