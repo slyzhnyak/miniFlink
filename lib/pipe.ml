@@ -292,6 +292,12 @@ let count_data stream =
 
 let iter_events f stream = Stream.iter f stream
 
+(* Non-terminal observer: применяет side-effect к каждому event и
+   пропускает его дальше без изменений. label игнорируется самой
+   функцией но может использоваться в closure callback'а. *)
+let inspect ?label:_ f stream =
+  Stream.map (fun ev -> f ev; ev) stream
+
 (* materialize: свернуть поток с retract'ами в финальную таблицу записей.
    [by v ts] задаёт идентичность записи (например (ключ, конец окна));
    Data кладёт/заменяет запись, Retract убирает. Возвращает финальные
