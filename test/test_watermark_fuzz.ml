@@ -44,7 +44,9 @@ let prop_no_loss =
       let tagged = List.map (function
         | Mf_event.Data (v, t) -> Mf_event.data (v, t) t
         | Mf_event.Watermark w -> Mf_event.wm w
-        | Mf_event.Retract (v,t) -> Mf_event.retract (v,t) t) events in
+        | Mf_event.Retract (v,t) -> Mf_event.retract (v,t) t
+        | Mf_event.Update { old; new_value = v; ts = t } ->
+          Mf_event.update (old, t) (v, t) t) events in
       let total_in = List.length
         (List.filter (function Mf_event.Data _ -> true | _ -> false) tagged) in
       let late = ref 0 in
@@ -56,7 +58,9 @@ let prop_no_loss =
         |> List.fold_left (fun acc -> function
            | Mf_event.Data ((_, vs), _) -> acc + List.length vs
            | Mf_event.Retract ((_, vs), _) -> acc - List.length vs
-           | _ -> acc) 0 in
+           | Mf_event.Update { old = (_, old_vs); new_value = (_, new_vs); _ } ->
+             acc - List.length old_vs + List.length new_vs
+           | Mf_event.Watermark _ -> acc) 0 in
       in_windows + !late = total_in)
 
 let () =

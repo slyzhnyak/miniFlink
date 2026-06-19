@@ -53,7 +53,8 @@ let () =
   |> Pipe.iter_events (function
     | Mf_event.Data _    -> incr data_count
     | Mf_event.Watermark _ -> incr wm_count
-    | Mf_event.Retract _ -> incr retract_count);
+    | Mf_event.Retract _ -> incr retract_count
+    | Mf_event.Update _ -> incr retract_count);
   check (Printf.sprintf "data=%d wm=%d retract=%d"
            !data_count !wm_count !retract_count)
     (!data_count = 3 && !wm_count = 2 && !retract_count = 1);

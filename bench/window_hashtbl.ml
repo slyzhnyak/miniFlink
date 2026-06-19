@@ -95,6 +95,7 @@ let window_hashtbl
         Queue.push (Mf_event.wm wm) out;
         pull ()
       | Some (Mf_event.Retract _) -> pull ()
+      | Some (Mf_event.Update _) -> pull ()
       | Some (Mf_event.Data (v,t)) ->
         let windows = sliding_assign ~size ~step t in
         List.iter (fun (s, stop) ->

@@ -18,6 +18,7 @@ let collect_data s =
   let rec drain () = match s () with
     | None -> ()
     | Some (Mf_event.Data (v, _)) -> acc := v :: !acc; drain ()
+    | Some (Mf_event.Update { new_value = v; _ }) -> acc := v :: !acc; drain ()
     | Some (Mf_event.Watermark _) | Some (Mf_event.Retract _) -> drain ()
   in drain ();
   List.rev !acc
@@ -74,7 +75,7 @@ let () =
   Pipe.iter_events (fun ev ->
     match ev with
     | Mf_event.Watermark _ -> incr wm_seen
-    | Mf_event.Data _ | Mf_event.Retract _ -> ()) stream;
+    | Mf_event.Data _ | Mf_event.Retract _ | Mf_event.Update _ -> ()) stream;
   check "watermark passed"
     (!wm_seen >= 1);
 
