@@ -161,6 +161,11 @@ let window
         Queue.push (Mf_event.wm wm) out;
         pull ()
       | Some (Mf_event.Retract _) -> pull ()
+      | Some (Mf_event.Update _) ->
+        (* Phase 1 fallback: Window не умеет retract на input,
+           аналогично Update игнорируется. Phase 2/3 добавит native
+           handling через retractable Agg.t. *)
+        pull ()
       | Some (Mf_event.Data (v,t)) ->
         saw_data := true;
         List.iter (fun (s, stop) ->
@@ -458,6 +463,11 @@ let window_fold
         Queue.push (Mf_event.wm wm) out;
         pull ()
       | Some (Mf_event.Retract _) -> pull ()
+      | Some (Mf_event.Update _) ->
+        (* Phase 1 fallback: Window не умеет retract на input,
+           аналогично Update игнорируется. Phase 2/3 добавит native
+           handling через retractable Agg.t. *)
+        pull ()
       | Some (Mf_event.Data (v,t)) ->
         List.iter (fun (s, stop) ->
           let mk = (K.key v, s, stop) in
@@ -550,6 +560,9 @@ let count_window
         (* retract входного типа в count-окне не транслируется
            (значение чужого типа) — пропускаем *)
         pull ()
+      | Some (Mf_event.Update _) ->
+        (* Update тоже не транслируется в count-окно (Phase 1 fallback) *)
+        pull ()
       | Some (Mf_event.Data (v, _)) ->
         push_value (K.key v) v;
         pull ()
@@ -618,6 +631,11 @@ let global_window
         if Queue.is_empty out then None else Some (Queue.pop out)
       | Some (Mf_event.Watermark wm) -> Some (Mf_event.wm wm)
       | Some (Mf_event.Retract _) -> pull ()
+      | Some (Mf_event.Update _) ->
+        (* Phase 1 fallback: Window не умеет retract на input,
+           аналогично Update игнорируется. Phase 2/3 добавит native
+           handling через retractable Agg.t. *)
+        pull ()
       | Some (Mf_event.Data (v, _)) ->
         let k = K.key v in
         Hashtbl.remove clean k;             (* новые данные → буфер «грязный» *)
@@ -722,6 +740,11 @@ let session_window
         Queue.push (Mf_event.wm wm) out;
         pull ()
       | Some (Mf_event.Retract _) -> pull ()
+      | Some (Mf_event.Update _) ->
+        (* Phase 1 fallback: Window не умеет retract на input,
+           аналогично Update игнорируется. Phase 2/3 добавит native
+           handling через retractable Agg.t. *)
+        pull ()
       | Some (Mf_event.Data (v, t)) ->
         add_event (K.key v) t v;
         pull ()
@@ -770,6 +793,11 @@ let window_instrumented
         Queue.push (Mf_event.wm wm) out;
         pull ()
       | Some (Mf_event.Retract _) -> pull ()
+      | Some (Mf_event.Update _) ->
+        (* Phase 1 fallback: Window не умеет retract на input,
+           аналогично Update игнорируется. Phase 2/3 добавит native
+           handling через retractable Agg.t. *)
+        pull ()
       | Some (Mf_event.Data (v,t)) ->
         List.iter (fun (s, stop) ->
           let mk = (K.key v, s, stop) in
