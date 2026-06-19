@@ -1,30 +1,45 @@
 (* Агрегатор с ЭКЗИСТЕНЦИАЛЬНЫМ аккумулятором: тип ('a,'r) t прячет
    внутренний 'acc через GADT, наружу видны только вход 'a и результат 'r.
    Это позволяет комбинировать агрегаты с разными аккумуляторами
-   (both: 'acc1 * 'acc2) единообразно. *)
+   (both: 'acc1 * 'acc2) единообразно.
+
+   Phase 2: добавлено optional поле [remove]. Если [Some f], агрегат
+   поддерживает отзыв ранее добавленного элемента — Window операторы
+   используют это для обработки Retract на input. Если [None] —
+   агрегат не retractable (например min_by, max_by, approx_median);
+   Window операторы тогда либо drop'ают Retract либо warning. *)
 type ('a, 'r) t =
   | Agg : {
       init   : unit -> 'acc;
       add    : 'acc -> 'a -> 'acc;
+      remove : ('acc -> 'a -> 'acc) option;
       finish : 'acc -> 'r;
     } -> ('a, 'r) t
 
 (* ── Готовые агрегаторы ───────────────────────────────────── *)
 
 let count =
-  Agg { init = (fun () -> 0); add = (fun n _ -> n + 1); finish = (fun n -> n) }
+  Agg { init = (fun () -> 0);
+        add = (fun n _ -> n + 1);
+        remove = Some (fun n _ -> n - 1);
+        finish = (fun n -> n) }
 
 let count_if pred =
   Agg { init = (fun () -> 0);
         add = (fun n x -> if pred x then n + 1 else n);
+        remove = Some (fun n x -> if pred x then n - 1 else n);
         finish = (fun n -> n) }
 
 let sum f =
-  Agg { init = (fun () -> 0.); add = (fun s x -> s +. f x); finish = (fun s -> s) }
+  Agg { init = (fun () -> 0.);
+        add = (fun s x -> s +. f x);
+        remove = Some (fun s x -> s -. f x);
+        finish = (fun s -> s) }
 
 let mean f =
   Agg { init = (fun () -> (0., 0));
         add = (fun (s, n) x -> (s +. f x, n + 1));
+        remove = Some (fun (s, n) x -> (s -. f x, n - 1));
         finish = (fun (s, n) -> if n = 0 then None else Some (s /. float_of_int n)) }
 
 let min_by f =
@@ -32,6 +47,7 @@ let min_by f =
         add = (fun acc x ->
           let v = f x in
           match acc with None -> Some v | Some m -> Some (Float.min m v));
+        remove = None;  (* нельзя retract: вычислить новый минимум без полного списка *)
         finish = (fun acc -> acc) }
 
 let max_by f =
@@ -39,6 +55,7 @@ let max_by f =
         add = (fun acc x ->
           let v = f x in
           match acc with None -> Some v | Some m -> Some (Float.max m v));
+        remove = None;
         finish = (fun acc -> acc) }
 
 let arg_min f =
@@ -47,6 +64,7 @@ let arg_min f =
           match acc with
           | None -> Some (x, f x)
           | Some (_, bv) as a -> if f x < bv then Some (x, f x) else a);
+        remove = None;
         finish = (function None -> None | Some (x, _) -> Some x) }
 
 let arg_max f =
@@ -55,24 +73,37 @@ let arg_max f =
           match acc with
           | None -> Some (x, f x)
           | Some (_, bv) as a -> if f x > bv then Some (x, f x) else a);
+        remove = None;
         finish = (function None -> None | Some (x, _) -> Some x) }
 
 let first =
   Agg { init = (fun () -> None);
         add = (fun acc x -> match acc with None -> Some x | s -> s);
+        remove = None;  (* теряем "первое" если retract первого — нужна история *)
         finish = (fun acc -> acc) }
 
 let last =
   Agg { init = (fun () -> None);
         add = (fun _ x -> Some x);
+        remove = None;  (* теряем "последнее" если retract последнего *)
         finish = (fun acc -> acc) }
 
 (* median: середина отсортированных значений (чётное n — среднее двух
    средних). Аккумулятор — список всех значений: median принципиально
-   не считается инкрементально, O(n) памяти на окно неизбежен. *)
+   не считается инкрементально, O(n) памяти на окно неизбежен.
+
+   Retract удаляет первое вхождение [f x] из списка. O(n). *)
 let median f =
   Agg { init = (fun () -> []);
         add = (fun acc x -> f x :: acc);
+        remove = Some (fun acc x ->
+          let v = f x in
+          (* Удалить первое вхождение v из списка *)
+          let rec del = function
+            | [] -> []  (* не найдено — игнорируем *)
+            | h :: tl when h = v -> tl
+            | h :: tl -> h :: del tl
+          in del acc);
         finish = (fun acc ->
           match List.sort compare acc with
           | [] -> None
@@ -219,16 +250,31 @@ let p2_get st : float option =
 let approx_median f =
   Agg { init = p2_make;
         add = (fun st x -> p2_add st (f x); st);
+        remove = None;  (* P² algorithm не поддерживает remove *)
         finish = p2_get }
 
 (* group_by: двухуровневая агрегация. Внутри одного окна группируем
    значения по подключу [key] и применяем [inner] к каждой группе;
    результат — список (подключ, inner_result). Память O(числа подключей)
-   на окно, потому что нужно держать аккумулятор inner для каждой группы. *)
+   на окно, потому что нужно держать аккумулятор inner для каждой группы.
+
+   Retract: если inner retractable, group_by retractable. Применяем
+   inner.remove к группе [key x]. Если inner None — group_by тоже None. *)
 let group_by (type a) (type r)
     ~(key : a -> string)
     ~(inner : (a, r) t) : (a, (string * r) list) t =
-  let Agg { init = inner_init; add = inner_add; finish = inner_finish } = inner in
+  let Agg { init = inner_init; add = inner_add;
+            remove = inner_remove; finish = inner_finish } = inner in
+  let remove_opt = match inner_remove with
+    | None -> None  (* если inner не retractable, group_by тоже *)
+    | Some inner_rem ->
+      Some (fun tbl x ->
+        let k = key x in
+        (match Hashtbl.find_opt tbl k with
+         | Some acc -> Hashtbl.replace tbl k (inner_rem acc x)
+         | None -> ());  (* нет такой группы — игнорируем *)
+        tbl)
+  in
   Agg {
     init = (fun () -> Hashtbl.create 8);
     add = (fun tbl x ->
@@ -237,6 +283,7 @@ let group_by (type a) (type r)
         | Some a -> a | None -> inner_init () in
       Hashtbl.replace tbl k (inner_add acc x);
       tbl);
+    remove = remove_opt;
     finish = (fun tbl ->
       Hashtbl.fold (fun k acc rest -> (k, inner_finish acc) :: rest) tbl []);
   }
@@ -260,6 +307,8 @@ let top_k_by k ~by =
   Agg {
     init = (fun () -> []);
     add = (fun acc x -> take_k (insert x (by x) acc));
+    remove = None;  (* top K не retractable: retract элемента не в top K
+                       — no-op, retract из top K — теряем "следующего" *)
     finish = (fun acc -> List.map fst acc);
   }
 
@@ -280,28 +329,50 @@ let bottom_k_by k ~by =
   Agg {
     init = (fun () -> []);
     add = (fun acc x -> take_k (insert x (by x) acc));
+    remove = None;
     finish = (fun acc -> List.map fst acc);
   }
 
 let to_list =
   Agg { init = (fun () -> []);
         add = (fun acc x -> x :: acc);
+        remove = Some (fun acc x ->
+          (* Удалить первое вхождение x *)
+          let rec del = function
+            | [] -> []
+            | h :: tl when h = x -> tl
+            | h :: tl -> h :: del tl
+          in del acc);
         finish = (fun acc -> List.rev acc) }
 
 (* ── Комбинирование ───────────────────────────────────────── *)
 
 let both (Agg a) (Agg b) =
+  let remove = match a.remove, b.remove with
+    | Some ra, Some rb ->
+      Some (fun (sa, sb) x -> (ra sa x, rb sb x))
+    | _ -> None  (* оба должны быть retractable *)
+  in
   Agg {
     init = (fun () -> (a.init (), b.init ()));
     add = (fun (sa, sb) x -> (a.add sa x, b.add sb x));
+    remove;
     finish = (fun (sa, sb) -> (a.finish sa, b.finish sb));
   }
 
 let map g (Agg a) =
-  Agg { init = a.init; add = a.add; finish = (fun s -> g (a.finish s)) }
+  Agg { init = a.init;
+        add = a.add;
+        remove = a.remove;
+        finish = (fun s -> g (a.finish s)) }
 
 let contramap g (Agg a) =
-  Agg { init = a.init; add = (fun s x -> a.add s (g x)); finish = a.finish }
+  Agg { init = a.init;
+        add = (fun s x -> a.add s (g x));
+        remove = (match a.remove with
+          | Some r -> Some (fun s x -> r s (g x))
+          | None -> None);
+        finish = a.finish }
 
 let ( let+ ) agg g = map g agg
 let ( and+ ) a b = both a b
@@ -318,3 +389,24 @@ type ('a, 'r, 'b) parts_k =
   { k : 'acc. (unit -> 'acc) -> ('acc -> 'a -> 'acc) -> ('acc -> 'r) -> 'b }
 
 let with_parts (Agg a) { k } = k a.init a.add a.finish
+
+(* Phase 2 API: retract'ы.
+
+   is_retractable: true если агрегат поддерживает remove (можно делать
+   retract в Window). Используется операторами для проверки перед
+   разрешением retract input.
+
+   with_parts2: расширенный CPS-деструктор с remove. Возвращает remove
+   через option — None для non-retractable агрегатов. *)
+
+let is_retractable (Agg a) = a.remove <> None
+
+type ('a, 'r, 'b) parts2_k = {
+  k2 : 'acc.
+    (unit -> 'acc) ->
+    ('acc -> 'a -> 'acc) ->
+    ('acc -> 'a -> 'acc) option ->
+    ('acc -> 'r) -> 'b
+}
+
+let with_parts2 (Agg a) { k2 } = k2 a.init a.add a.remove a.finish

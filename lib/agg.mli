@@ -155,3 +155,34 @@ type ('a, 'r, 'b) parts_k =
   { k : 'acc. (unit -> 'acc) -> ('acc -> 'a -> 'acc) -> ('acc -> 'r) -> 'b }
 
 val with_parts : ('a, 'r) t -> ('a, 'r, 'b) parts_k -> 'b
+
+(** {2 Retract support (Phase 2)} *)
+
+(** Поддерживает ли агрегат отзыв (remove) ранее добавленного элемента.
+
+    Retractable:
+    - {!count}, {!count_if}, {!sum}, {!mean}: O(1)
+    - {!median}, {!to_list}: O(n) — удалить из списка
+    - {!group_by}: если inner retractable
+    - {!both}, {!map}, {!contramap}: если базовый retractable
+
+    Не retractable (требуется полное знание окна):
+    - {!min_by}, {!max_by}, {!arg_min}, {!arg_max}: после удаления
+      текущего min/max нужно знать всех остальных
+    - {!first}, {!last}: теряют идентификацию при удалении из середины
+    - {!approx_median}: P² algorithm не поддерживает remove
+    - {!top_k_by}, {!bottom_k_by}: храним только top K, не знаем
+      "следующего" после retract из top *)
+val is_retractable : ('a, 'r) t -> bool
+
+(** Расширенный CPS-деструктор: передаёт также [remove] (опционально).
+    Используется операторами Window для интеграции с {!Mf_event.Retract}. *)
+type ('a, 'r, 'b) parts2_k = {
+  k2 : 'acc.
+    (unit -> 'acc) ->
+    ('acc -> 'a -> 'acc) ->
+    ('acc -> 'a -> 'acc) option ->
+    ('acc -> 'r) -> 'b
+}
+
+val with_parts2 : ('a, 'r) t -> ('a, 'r, 'b) parts2_k -> 'b
