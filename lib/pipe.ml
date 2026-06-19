@@ -11,12 +11,24 @@
 
 let emap  f = Stream.map   (Mf_event.map_value f)
 let efilt p = Stream.filter (function
-  | Mf_event.Data (v,_)  -> p v
-  | _                 -> true)
+  | Mf_event.Data (v, _) -> p v
+  | Mf_event.Update { new_value = v; _ } -> p v
+  | Mf_event.Watermark _ | Mf_event.Retract _ -> true)
 let eflatmap f = Stream.flat_map (function
   | Mf_event.Watermark _ as w -> [w]
-  | Mf_event.Retract (v,t) -> List.map (fun w -> Mf_event.retract w t) (f v)
-  | Mf_event.Data    (v,t) -> List.map (fun w -> Mf_event.data    w t) (f v))
+  | Mf_event.Retract (v, t) -> List.map (fun w -> Mf_event.retract w t) (f v)
+  | Mf_event.Data    (v, t) -> List.map (fun w -> Mf_event.data    w t) (f v)
+  | Mf_event.Update { old; new_value; ts } ->
+    (* flat_map переключает 1 событие на N. Для Update это значит
+       N синхронизированных Update'ов: каждое значение из f(old)
+       спарено с соответствующим из f(new_value). Если списки разной
+       длины — только общая часть. *)
+    let olds = f old in
+    let news = f new_value in
+    let rec zip xs ys = match xs, ys with
+      | x :: xt, y :: yt -> Mf_event.update x y ts :: zip xt yt
+      | _ -> []
+    in zip olds news)
 
 (* ── Enrich ───────────────────────────────────────────────── *)
 
@@ -50,7 +62,12 @@ let update_table (tbl : ('k, 'a) Hashtbl.t) ~(key : 'a -> 'k)
   Stream.map (fun ev ->
     (match ev with
      | Mf_event.Data (v, _) -> Hashtbl.replace tbl (key v) v
-     | _ -> ());
+     | Mf_event.Update { new_value = v; _ } ->
+       (* Update заменяет old → new в таблице. Если key функция
+          даёт разные ключи для old и new — будет inconsistency,
+          но редкий случай. *)
+       Hashtbl.replace tbl (key v) v
+     | Mf_event.Watermark _ | Mf_event.Retract _ -> ());
     ev) upstream
 
 (* ────────────────────────────────────────────────────────────────────
@@ -128,6 +145,54 @@ let keyed_join
                 retract, игнорируем *)
              ());
           next ()
+        | Some (Mf_event.Update { old = (old_idx, old_v);
+                                   new_value = (new_idx, new_v); ts }) ->
+          (* АТОМАРНАЯ коррекция: ОДИН snapshot эмитится с применённым
+             изменением. Это ключевое преимущество Update vs пары
+             Retract+Data — нет промежуточного None flicker'а.
+
+             Семантика: slot[old_idx] был Some old_v, теперь
+             slot[new_idx] = Some new_v. Если old_idx = new_idx
+             (тот же канал обновился) — простая замена. Если разные —
+             значение "перешло" между каналами (редкий случай, но
+             корректно).
+
+             Stale Update'ы (когда slot[old_idx] не равен Some old_v)
+             trate'ятся как простое применение new_value, как если
+             бы пришёл Data. *)
+          let old_key = K.key old_v in
+          let new_key = K.key new_v in
+          if old_key = new_key then begin
+            let arr = get_or_init new_key in
+            (match arr.(old_idx) with
+             | Some v when v = old_v ->
+               (* old match'нулся; применяем атомарно — один snapshot *)
+               if old_idx <> new_idx then arr.(old_idx) <- None;
+               arr.(new_idx) <- Some new_v;
+               Queue.push (Mf_event.data
+                            (new_key, Array.to_list arr) ts) out_q
+             | _ ->
+               (* stale — old уже не там; применяем только new *)
+               arr.(new_idx) <- Some new_v;
+               Queue.push (Mf_event.data
+                            (new_key, Array.to_list arr) ts) out_q)
+          end else begin
+            (* Update переносит значение между разными ключами —
+               редкий cross-key случай. Декомпозируем на clear
+               на старом ключе + set на новом. Два snapshot'а,
+               потому что они касаются разных entries в state. *)
+            (match Hashtbl.find_opt states old_key with
+             | Some old_arr when old_arr.(old_idx) = Some old_v ->
+               old_arr.(old_idx) <- None;
+               Queue.push (Mf_event.data
+                            (old_key, Array.to_list old_arr) ts) out_q
+             | _ -> ());
+            let new_arr = get_or_init new_key in
+            new_arr.(new_idx) <- Some new_v;
+            Queue.push (Mf_event.data
+                         (new_key, Array.to_list new_arr) ts) out_q
+          end;
+          next ()
     in next
   end
 
@@ -147,7 +212,11 @@ let keyed_join_map
        | Some v -> Some (Mf_event.data v ts)
        | None -> next ())
     | Some (Mf_event.Watermark wm) -> Some (Mf_event.wm wm)
-    | Some (Mf_event.Retract _) -> next ()
+    | Some (Mf_event.Retract _) | Some (Mf_event.Update _) ->
+      (* keyed_join по контракту эмитит только Data snapshot'ы для
+         коррекций (см. native Update handling выше). Эти ветки
+         defensive — skip. *)
+      next ()
   in next
 
 (* ── Окна вынесены в Window; переэкспорт для стабильного Pipe.* API ── *)
@@ -249,9 +318,17 @@ let dedup
     | Mf_event.Retract _ -> true
     | Mf_event.Data (v, t) ->
       let k = K.key v ^ ":" ^ rule v in
-      match Hashtbl.find_opt seen k with
-      | Some last when t - last <= cooldown -> false
-      | _ -> Hashtbl.replace seen k t; true
+      (match Hashtbl.find_opt seen k with
+       | Some last when t - last <= cooldown -> false
+       | _ -> Hashtbl.replace seen k t; true)
+    | Mf_event.Update { new_value = v; ts = t; _ } ->
+      (* Update — это коррекция, обычно она НЕ должна быть отброшена
+         dedup'ом, потому что несёт обновление существующего значения.
+         Пропускаем, но обновляем last_seen чтобы последующие Data на
+         том же ключе видели cooldown относительно Update. *)
+      let k = K.key v ^ ":" ^ rule v in
+      Hashtbl.replace seen k t;
+      true
   ) upstream
 
 (* ── Map / Filter / FlatMap ───────────────────────────────── *)
@@ -281,6 +358,10 @@ let safe_map ~on_error f upstream =
     | Mf_event.Data (v, t) ->
       (try [Mf_event.data (f v) t]
        with e -> on_error e; [])
+    | Mf_event.Update { old; new_value; ts } ->
+      (* Применяем f к обоим; если хоть один взорвётся — drop. *)
+      (try [Mf_event.update (f old) (f new_value) ts]
+       with e -> on_error e; [])
     | Mf_event.Watermark wm -> [Mf_event.wm wm]
     | Mf_event.Retract (_, _) -> [])   (* retract входного типа не транслируется *)
     upstream
@@ -290,6 +371,9 @@ let safe_map ~on_error f upstream =
 let safe_filter ~on_error p upstream =
   Stream.flat_map (function
     | Mf_event.Data (v, _) as ev ->
+      (try if p v then [ev] else []
+       with e -> on_error e; [])
+    | Mf_event.Update { new_value = v; _ } as ev ->
       (try if p v then [ev] else []
        with e -> on_error e; [])
     | Mf_event.Watermark _ | Mf_event.Retract _ as ev -> [ev])
@@ -303,6 +387,16 @@ let safe_flat_map ~on_error f upstream =
     | Mf_event.Data (v, t) ->
       (try List.map (fun out -> Mf_event.data out t) (f v)
        with e -> on_error e; [])
+    | Mf_event.Update { old; new_value; ts } ->
+      (* Для Update: применяем f к old и new, zip результаты. *)
+      (try
+        let olds = f old in
+        let news = f new_value in
+        let rec zip xs ys = match xs, ys with
+          | x :: xt, y :: yt -> Mf_event.update x y ts :: zip xt yt
+          | _ -> []
+        in zip olds news
+       with e -> on_error e; [])
     | Mf_event.Watermark wm -> [Mf_event.wm wm]
     | Mf_event.Retract (_, _) -> [])
     upstream
@@ -310,11 +404,16 @@ let safe_flat_map ~on_error f upstream =
 (* ── Sink helpers ─────────────────────────────────────────── *)
 
 let sink f stream =
-  Stream.iter (function Mf_event.Data (v,_) -> f v | _ -> ()) stream
+  Stream.iter (function
+    | Mf_event.Data (v, _) -> f v
+    | Mf_event.Update { new_value = v; _ } -> f v
+    | Mf_event.Watermark _ | Mf_event.Retract _ -> ()) stream
 
 let collect stream =
   List.rev (Stream.fold (fun acc -> function
-    | Mf_event.Data (v,_) -> v :: acc | _ -> acc) [] stream)
+    | Mf_event.Data (v, _) -> v :: acc
+    | Mf_event.Update { new_value = v; _ } -> v :: acc
+    | Mf_event.Watermark _ | Mf_event.Retract _ -> acc) [] stream)
 
 (* Удобные потребители для типичных паттернов "пройти поток и сделать X
    с каждым Data". Все основаны на Stream.iter/fold; пишутся ради
@@ -324,7 +423,8 @@ let iter_data = sink
 let fold_data ~init ~f stream =
   Stream.fold (fun acc -> function
     | Mf_event.Data (v, _) -> f acc v
-    | _ -> acc) init stream
+    | Mf_event.Update { new_value = v; _ } -> f acc v
+    | Mf_event.Watermark _ | Mf_event.Retract _ -> acc) init stream
 
 let count_data stream =
   fold_data ~init:0 ~f:(fun n _ -> n + 1) stream
@@ -348,7 +448,18 @@ let materialize ~(by : 'a -> Time.t -> 'k) (stream : 'a Mf_event.t Stream.t)
   Stream.fold (fun () -> function
     | Mf_event.Data (v, ts)    -> Hashtbl.replace tbl (by v ts) v
     | Mf_event.Retract (v, ts) -> Hashtbl.remove tbl (by v ts)
-    | _ -> ()) () stream;
+    | Mf_event.Update { old; new_value; ts } ->
+      (* Атомарно: remove old, put new. Если by даёт одинаковые
+         ключи — просто replace. *)
+      let old_k = by old ts in
+      let new_k = by new_value ts in
+      if old_k = new_k then
+        Hashtbl.replace tbl new_k new_value
+      else begin
+        Hashtbl.remove tbl old_k;
+        Hashtbl.replace tbl new_k new_value
+      end
+    | Mf_event.Watermark _ -> ()) () stream;
   Hashtbl.fold (fun k v acc -> (k, v) :: acc) tbl []
 
 (* ── Shorthand: seconds / minutes в операторах ───────────── *)
@@ -356,12 +467,16 @@ let materialize ~(by : 'a -> Time.t -> 'k) (stream : 'a Mf_event.t Stream.t)
 (* ── Instrumented operators ──────────────────────────────── *)
 (* Версии операторов с метриками — используются в runtime *)
 
-(** Обернуть stream: вызывать f() на каждом Data событии *)
+(** Обернуть stream: вызывать f() на каждом Data или Update событии
+    (т.е. на каждом несущем "новое" значение). *)
 let with_counter f upstream =
   fun () ->
     match upstream () with
-    | Some (Mf_event.Data _ as ev) -> f (); Some ev
-    | other -> other
+    | Some (Mf_event.Data _ as ev)
+    | Some (Mf_event.Update _ as ev) -> f (); Some ev
+    | Some (Mf_event.Watermark _ as ev)
+    | Some (Mf_event.Retract _ as ev) -> Some ev
+    | None -> None
 
 
 (** window с histogram для latency закрытия окна (переэкспорт из Window) *)

@@ -29,9 +29,15 @@ let of_stream ~key (src : 'a Mf_event.t Stream.t) =
   let h = Hashtbl.create 64 in
   let pump () =
     let rec go () = match src () with
-      | Some (Mf_event.Data (v,_)) ->
+      | Some (Mf_event.Data (v, _)) ->
         Hashtbl.replace h (key v) v; go ()
-      | _ -> ()
+      | Some (Mf_event.Update { new_value = v; _ }) ->
+        (* Update заменяет old → new; таблица хранит current value,
+           так что просто пишем new_value. *)
+        Hashtbl.replace h (key v) v; go ()
+      | Some (Mf_event.Watermark _)
+      | Some (Mf_event.Retract _)
+      | None -> ()
     in go ()
   in
   fun k -> pump (); Hashtbl.find_opt h k
@@ -50,13 +56,12 @@ let of_stream_ttl ~key ~ttl (src : 'a Mf_event.t Stream.t) =
     end
   in
   let pump () =
-    (* Дренируем входной поток до None или Retract, продвигая
-       max_ts по Data И по Watermark. Раньше pump останавливался
-       на первом Watermark (через wildcard `_ -> ()`), не используя
-       его для продвижения max_ts → eviction не работал когда в
-       потоке были Watermark между Data. *)
     let rec go () = match src () with
       | Some (Mf_event.Data (v, t)) ->
+        if t > !max_ts then max_ts := t;
+        Hashtbl.replace h (key v) (v, t);
+        go ()
+      | Some (Mf_event.Update { new_value = v; ts = t; _ }) ->
         if t > !max_ts then max_ts := t;
         Hashtbl.replace h (key v) (v, t);
         go ()
@@ -75,14 +80,12 @@ let of_stream_ttl ~key ~ttl (src : 'a Mf_event.t Stream.t) =
     pump ();
     match Hashtbl.find_opt h k with Some (v,_) -> Some v | None -> None
 
-(* build: eagerly прогоняет источник до конца, строит статический
-   snapshot. Никакой ленивости — это намеренно: использование
-   для предзагрузки конфигов где нужна детерминированная
-   готовность таблицы перед main pipeline'ом. *)
 let build ~key (src : 'a Mf_event.t Stream.t) =
   let h = Hashtbl.create 64 in
   let rec go () = match src () with
     | Some (Mf_event.Data (v, _)) ->
+      Hashtbl.replace h (key v) v; go ()
+    | Some (Mf_event.Update { new_value = v; _ }) ->
       Hashtbl.replace h (key v) v; go ()
     | Some (Mf_event.Watermark _) | Some (Mf_event.Retract _) -> go ()
     | None -> ()
