@@ -219,12 +219,16 @@ let test_q8 () =
        | Some (Mf_event.Data (p,t)) -> Some (Mf_event.data (Per p) t)
        | Some (Mf_event.Watermark w) -> Some (Mf_event.wm w)
        | Some (Mf_event.Retract (p,t)) -> Some (Mf_event.retract (Per p) t)
+       | Some (Mf_event.Update { old = po; new_value = pn; ts = t }) ->
+         Some (Mf_event.update (Per po) (Per pn) t)
        | None -> None) in
   let aus = Mf_event.of_list ~ts:(fun a -> a.a_ts) auctions |> fun s ->
     (fun () -> match s () with
        | Some (Mf_event.Data (a,t)) -> Some (Mf_event.data (Auc a) t)
        | Some (Mf_event.Watermark w) -> Some (Mf_event.wm w)
        | Some (Mf_event.Retract (a,t)) -> Some (Mf_event.retract (Auc a) t)
+       | Some (Mf_event.Update { old = ao; new_value = an; ts = t }) ->
+         Some (Mf_event.update (Auc ao) (Auc an) t)
        | None -> None) in
   (* окно по person id: выводим person'ов, у кого в окне есть и Per, и Auc *)
   let joined =

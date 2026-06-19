@@ -252,6 +252,12 @@ let silence_age
         (* Retract в upstream — игнорируем; нас интересует
            только когда было ПОСЛЕДНЕЕ событие. *)
         next ()
+      | Some (Mf_event.Update { new_value = v; ts; _ }) ->
+        (* Update — атомарная коррекция; для silence_age важно
+           "когда было ПОСЛЕДНЕЕ событие". Update обновляет это
+           timestamp, применяем on_data на new_value. *)
+        on_data v ts;
+        next ()
       | Some (Mf_event.Data (v, ts)) ->
         on_data v ts;
         next ()

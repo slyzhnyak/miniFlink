@@ -654,6 +654,13 @@ let of_stream
         (* Retract в upstream item-потоке игнорируем — триггер
            реагирует только на свежие Data. *)
         next ()
+      | Some (Mf_event.Update { new_value = (key, value); ts; _ }) ->
+        (* Update — атомарная коррекция. Триггер тогда reactes на
+           new value: если new value пересекает порог — triggers fire
+           normally. Это correct behavior для debounce/recovery:
+           Update появляется как 'свежее значение' после коррекции. *)
+        on_data key value ts;
+        next ()
       | Some (Mf_event.Data ((key, value), ts)) ->
         on_data key value ts;
         next ()

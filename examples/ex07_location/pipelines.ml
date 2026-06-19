@@ -151,6 +151,10 @@ let median_rssi
            Some (Mf_event.Data (build_loc lamp top2 wend, wend))
          | Some (Mf_event.Retract ((lamp, top2), wend)) ->
            Some (Mf_event.Retract (build_loc lamp top2 wend, wend))
+         | Some (Mf_event.Update { old = (l1, t1); new_value = (l2, t2); ts }) ->
+           let old_loc = build_loc l1 t1 ts in
+           let new_loc = build_loc l2 t2 ts in
+           Some (Mf_event.update old_loc new_loc ts)
          | Some (Mf_event.Watermark wm) -> Some (Mf_event.Watermark wm)
        in out)
 
@@ -588,6 +592,10 @@ let gas_alerts
         Some (Mf_event.Watermark wm)
       | Some (Mf_event.Retract _) ->
         (* Retract из upstream — пропускаем (нам нужны только Data) *)
+        next ()
+      | Some (Mf_event.Update { new_value = input; _ }) ->
+        (* Update — атомарная коррекция; обрабатываем new_value как Data *)
+        process_input input;
         next ()
       | Some (Mf_event.Data (input, _ts)) ->
         process_input input;

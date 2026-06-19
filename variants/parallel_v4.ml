@@ -70,9 +70,10 @@ let run_parallel
          let out  = pipeline src in
          Stream.iter (fun ev ->
            (match ev with
-            | Mf_event.Data _    -> st.emitted <- st.emitted + 1
+            | Mf_event.Data _      -> st.emitted <- st.emitted + 1
+            | Mf_event.Update _    -> st.emitted <- st.emitted + 1
             | Mf_event.Watermark _ -> st.wm_seen <- st.wm_seen + 1
-            | Mf_event.Retract _ -> ());
+            | Mf_event.Retract _   -> ());
            Channel.push out_chans.(i) ev
          ) out
        with e ->
@@ -93,9 +94,12 @@ let run_parallel
       let rec loop () =
         match Channel.pop out_chans.(i) with
         | None -> ()                       (* канал закрыт и пуст *)
-        | Some (Mf_event.Data (v,_)) ->
+        | Some (Mf_event.Data (v, _)) ->
           Mutex.lock mu_sink; sink v; Mutex.unlock mu_sink; loop ()
-        | Some _ -> loop ()                (* watermark/retract *)
+        | Some (Mf_event.Update { new_value = v; _ }) ->
+          Mutex.lock mu_sink; sink v; Mutex.unlock mu_sink; loop ()
+        | Some (Mf_event.Watermark _) | Some (Mf_event.Retract _) ->
+          loop ()
       in loop ()
     ) ()
   ) in
@@ -116,6 +120,14 @@ let run_parallel
     | Mf_event.Retract (v, _) ->
       (* Ретракции: шардируем по ключу как Data *)
       let shard = hash_key (key_of v) workers in
+      Channel.push in_chans.(shard) ev
+    | Mf_event.Update { new_value = v; _ } ->
+      (* Update — шардируем по ключу new_value. Если key функция
+         даёт разные ключи для old и new — будет cross-shard
+         transfer (редкий случай); для обычного use case oba ключа
+         одинаковы и Update остаётся на том же shard. *)
+      let shard = hash_key (key_of v) workers in
+      stats.(shard).processed <- stats.(shard).processed + 1;
       Channel.push in_chans.(shard) ev
   ) source;
 
@@ -198,6 +210,10 @@ let run_parallel_simple
     | Mf_event.Retract (v,_) ->
       let shard = hash_key (key_of v) workers in
       if not failed.(shard) then ignore (Channel.try_push in_chans.(shard) ev)
+    | Mf_event.Update { new_value = v; _ } ->
+      let shard = hash_key (key_of v) workers in
+      if not failed.(shard) then ignore (Channel.try_push in_chans.(shard) ev);
+      report_depth ()
   ) source;
 
   Array.iter Channel.close in_chans;

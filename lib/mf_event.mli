@@ -1,16 +1,26 @@
-(** События потока: данные, watermark, retract.
+(** События потока: данные, watermark, retract, update.
 
     Каждое значение несёт свой event-time. Watermark — граница, после
-    которой события раньше неё уже не придут (позволяет закрывать окна
-    детерминированно). Retract отменяет ранее выданный результат
-    (для поздних данных). *)
+    которой события раньше неё уже не придут. Retract отменяет ранее
+    выданный результат (для поздних данных). Update — атомарная
+    коррекция: одно событие со старым и новым значением, обрабатывается
+    downstream без промежуточного состояния. *)
 
 (** Событие с полезной нагрузкой ['a]. Конструкторы открыты — операторы
-    сопоставляются с ними напрямую. *)
+    сопоставляются с ними напрямую.
+
+    {b Update vs Retract+Data:} логически [Update {old; new_value; ts}]
+    эквивалентен паре [Retract old; Data new_value], но downstream
+    видит Update как {b одно} событие — нет промежуточного состояния
+    "после retract, до new data". Это критично для snapshot-based
+    операторов (например, {!Pipe.keyed_join}) где промежуточный
+    [None] в слоте вызывал бы ложные срабатывания. *)
 type 'a t =
   | Data      of 'a * Time.t  (** значение + его event-time *)
   | Watermark of Time.t       (** граница: события раньше уже пришли *)
   | Retract   of 'a * Time.t  (** отмена ранее выданного результата *)
+  | Update    of { old : 'a; new_value : 'a; ts : Time.t }
+    (** атомарная коррекция: [old] заменяется на [new_value] *)
 
 (** [data v ts] — событие-данные со значением [v] на event-time [ts]. *)
 val data : 'a -> Time.t -> 'a t
@@ -18,10 +28,16 @@ val data : 'a -> Time.t -> 'a t
 (** [retract v ts] — отмена ранее выданного [v]. *)
 val retract : 'a -> Time.t -> 'a t
 
+(** [update old new_v ts] — атомарная замена [old] на [new_v]. *)
+val update : 'a -> 'a -> Time.t -> 'a t
+
 (** [wm ts] — watermark на момент [ts]. *)
 val wm : Time.t -> 'a t
 
-(** Значение события ([Data]/[Retract]) или [None] для watermark. *)
+(** "Текущее" значение события или [None] для watermark.
+    Для [Data]/[Retract] — само значение. Для [Update] — [new_value]
+    (старое уже заменено). Если нужно [old] из [Update] — match
+    explicitly. *)
 val value : 'a t -> 'a option
 
 (** Event-time события (для любого вида). *)
@@ -31,7 +47,7 @@ val ts : 'a t -> Time.t
 val is_data : 'a t -> bool
 
 (** Применить функцию к значению, сохранив вид и время; watermark — без
-    изменений. *)
+    изменений. Для [Update] применяется к обоим — [old] и [new_value]. *)
 val map_value : ('a -> 'b) -> 'a t -> 'b t
 
 (** [with_watermarks_ext ~latency ?interval src] вставляет watermarks

@@ -34,7 +34,8 @@ let () =
         match ev with
         | Mf_event.Data _ -> incr seen_data
         | Mf_event.Watermark _ -> incr seen_wm
-        | Mf_event.Retract _ -> incr seen_retract) in
+        | Mf_event.Retract _ -> incr seen_retract
+        | Mf_event.Update _ -> incr seen_retract) in
   (* Дренируем *)
   let _ = Pipe.collect inspected in
   check (Printf.sprintf "data=%d wm=%d retract=%d (expect 3,1,1)"
@@ -57,6 +58,7 @@ let () =
     |> Pipe.inspect (fun ev ->
         match ev with
         | Mf_event.Data (v, _) -> trace := v :: !trace
+        | Mf_event.Update { new_value = v; _ } -> trace := v :: !trace
         | Mf_event.Watermark _ | Mf_event.Retract _ -> ())
     |> Pipe.collect in
   let in_order = List.rev !trace in

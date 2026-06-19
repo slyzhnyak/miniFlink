@@ -1,26 +1,43 @@
-(** Событие потока: данные, watermark или отмена.
+(** События потока: данные, watermark, retract, update.
 
-    Все три конструктора текут по одному потоку и обрабатываются
-    операторами через pattern matching — единообразно и с проверкой
-    полноты компилятором. *)
+    Update — атомарная коррекция (old → new) как одно событие. В
+    отличие от пары [Retract old; Data new_value], downstream видит
+    Update как atomic transition — нет промежуточного состояния
+    "после retract, до new data", избегая flicker'а в snapshot-based
+    операторах вроде {!Pipe.keyed_join}. *)
 
 (** Событие со значением ['a]. *)
 type 'a t =
   | Data      of 'a * Time.t  (** значение + его event-time *)
   | Watermark of Time.t       (** граница: события раньше уже пришли *)
   | Retract   of 'a * Time.t  (** отмена ранее выданного результата *)
+  | Update    of { old : 'a; new_value : 'a; ts : Time.t }
+    (** атомарная коррекция: [old] заменяется на [new_value] *)
 
 let data    v ts = Data    (v, ts)
 let retract v ts = Retract (v, ts)
 let wm        ts = Watermark ts
+let update old_v new_v ts = Update { old = old_v; new_value = new_v; ts }
 
-let value  = function Data (v,_) | Retract (v,_) -> Some v | _ -> None
-let ts     = function Data (_,t) | Retract (_,t) | Watermark t -> t
-let is_data = function Data _ -> true | _ -> false
+let value = function
+  | Data    (v, _) | Retract (v, _) -> Some v
+  | Update  { new_value = v; _ }    -> Some v
+  | Watermark _                     -> None
+
+let ts = function
+  | Data    (_, t) | Retract (_, t) -> t
+  | Update  { ts = t; _ }           -> t
+  | Watermark t                     -> t
+
+let is_data = function
+  | Data _ -> true
+  | Watermark _ | Retract _ | Update _ -> false
 
 let map_value f = function
-  | Data    (v,t) -> Data    (f v, t)
-  | Retract (v,t) -> Retract (f v, t)
+  | Data    (v, t) -> Data    (f v, t)
+  | Retract (v, t) -> Retract (f v, t)
+  | Update { old; new_value; ts } ->
+    Update { old = f old; new_value = f new_value; ts }
   | Watermark _ as w -> w
 
 (* ── Watermark стратегия ──────────────────────────────────────
@@ -83,6 +100,13 @@ let with_watermarks_ext ~latency ?(interval = 0) (src : 'a t Stream.t)
         maybe_emit ()
       end;
       Some ev
+    | Some (Update { ts = t; _ } as ev) ->
+      (* Update тоже несёт event-time; продвигаем max_seen. *)
+      if t > !max_seen then begin
+        max_seen := t;
+        maybe_emit ()
+      end;
+      Some ev
 
 (* Совместимость: старая сигнатура (watermark на каждый новый максимум) *)
 (** [with_watermarks ~latency src] — то же что
@@ -137,7 +161,11 @@ let with_idle_watermarks
         last_activity_wall := now_ms ();
         if t > !max_seen then max_seen := t;
         Some ev
-      | Some (Some ev) ->            (* watermark/retract прозрачно *)
+      | Some (Some (Update { ts = t; _ } as ev)) ->
+        last_activity_wall := now_ms ();
+        if t > !max_seen then max_seen := t;
+        Some ev
+      | Some (Some (Watermark _ | Retract _ as ev)) ->
         last_activity_wall := now_ms ();
         Some ev
       | Some None ->
@@ -210,14 +238,20 @@ let union (a : 'v t Stream.t) (b : 'v t Stream.t) : 'v t Stream.t =
           let m = min !wm_a !wm_b in
           if m > !emitted_wm then (emitted_wm := m; Some (Watermark m))
           else step ()
-      (* данные с обеих сторон — эмитим меньший по времени *)
-      | Some ea, Some eb ->
+      (* данные/retract/update с обеих сторон — эмитим меньший по времени.
+         Update сравнивается по своему ts (см. Mf_event.ts). *)
+      | Some (Data _ | Retract _ | Update _ as ea),
+        Some (Data _ | Retract _ | Update _ as eb) ->
         if ts ea <= ts eb then (pa := None; Some ea)
         else (pb := None; Some eb)
-      | Some ea, None when !b_done -> pa := None; Some ea
-      | None, Some eb when !a_done -> pb := None; Some eb
+      | Some (Data _ | Retract _ | Update _ as ea), None when !b_done ->
+        pa := None; Some ea
+      | None, Some (Data _ | Retract _ | Update _ as eb) when !a_done ->
+        pb := None; Some eb
       | None, None when !a_done && !b_done -> None
-      | _ -> step ()   (* один пуст, другой ещё нет — докрутить *)
+      | Some _, None | None, Some _ | None, None ->
+        (* один пуст, другой ещё нет — рекурсивно докрутим *)
+        step ()
     in step ()
 
 let pp_ts t = Printf.sprintf "%d.%03ds" (t/1000) (t mod 1000)

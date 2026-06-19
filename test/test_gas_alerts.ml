@@ -42,7 +42,7 @@ let run_pipeline
 
 (** Отфильтровать только Data + Retract (отбросить Watermark). *)
 let data_retract_only = List.filter (function
-  | Mf_event.Data _ | Mf_event.Retract _ -> true
+  | Mf_event.Data _ | Mf_event.Retract _ | Mf_event.Update _ -> true
   | Mf_event.Watermark _ -> false)
 
 (* Хелперы для краткости *)

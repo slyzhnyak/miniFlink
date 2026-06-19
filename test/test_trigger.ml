@@ -49,7 +49,7 @@ let run_trigger_ev spec events =
   List.rev !acc
 
 let only_data_retract evs = List.filter (function
-  | Mf_event.Data _ | Mf_event.Retract _ -> true
+  | Mf_event.Data _ | Mf_event.Retract _ | Mf_event.Update _ -> true
   | Mf_event.Watermark _ -> false) evs
 
 (* Простой триггер above 5.0 без гистерезиса, без debounce *)

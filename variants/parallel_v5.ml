@@ -97,6 +97,12 @@ let run_parallel_simple
       let shard = hash_key (key_of v) workers in
       if not failed.(shard) then
         ignore (Channel.try_push in_chans.(shard) ev)
+    | Mf_event.Update { new_value = v; _ } ->
+      (* Update шардируем по ключу new_value, как Data. *)
+      let shard = hash_key (key_of v) workers in
+      if not failed.(shard) then
+        ignore (Channel.try_push in_chans.(shard) ev);
+      report_depth ()
   ) source;
 
   Array.iter Channel.close in_chans;

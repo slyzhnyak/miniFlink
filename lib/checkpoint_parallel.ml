@@ -386,7 +386,15 @@ let run_exactly_once
             (R2) и retract-семантика в EO-пути расходилась бы с обычным
             Pipe-путём *)
          let shard = hash_key (key_of v) workers in
-         send_to shard in_chans.(shard) (Event ev));
+         send_to shard in_chans.(shard) (Event ev)
+       | Mf_event.Update { new_value = v; _ } ->
+         (* Update шардируем по ключу new_value, как Data *)
+         let shard = hash_key (key_of v) workers in
+         send_to shard in_chans.(shard) (Event ev);
+         incr since_checkpoint;
+         if !since_checkpoint >= checkpoint_every then begin
+           inject_barrier (); since_checkpoint := 0
+         end);
       drive ()
   in
   drive ();

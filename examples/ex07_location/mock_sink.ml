@@ -140,6 +140,9 @@ let publish_gas_alert (ev : gas_alert Mf_event.t) : unit =
   | Mf_event.Retract _ ->
     (* Retract'ы свернуты в материализованной финальной картине ниже. *)
     ()
+  | Mf_event.Update _ ->
+    (* Update'ы тоже свернуты в финальной картине. *)
+    ()
   | Mf_event.Watermark _ -> ()
 
 (** Сгруппировать алерты по lamp+gas, применяя retract'ы. Печатаем
