@@ -89,6 +89,10 @@ let temporal_join
     | Some (Mf_event.Watermark w) -> if w > !wm_upd then wm_upd := w
     | Some (Mf_event.Data (u, _)) ->
       put_version tbl ~key:(key_upd u) ~valid_from:(valid_from u) u
+    | Some (Mf_event.Update { new_value = u; _ }) ->
+      (* Update — заменяет old → new; для versioned tbl пишем
+         new_value как новую версию. *)
+      put_version tbl ~key:(key_upd u) ~valid_from:(valid_from u) u
     | Some (Mf_event.Retract _) -> ()
   in
 
@@ -129,6 +133,10 @@ let temporal_join
       | None -> main_done := true; step_main ()
       | Some (Mf_event.Watermark w) -> Some (Mf_event.wm w)  (* пробрасываем wm основного *)
       | Some (Mf_event.Retract (v, t)) -> Some (Mf_event.retract v t)
+      | Some (Mf_event.Update { old; new_value; ts }) ->
+        (* Update — атомарная коррекция. Пробрасываем как есть;
+           downstream enrich применит обогащение к both old и new. *)
+        Some (Mf_event.update old new_value ts)
       | Some (Mf_event.Data (ev, t)) ->
         Queue.push (ev, t) buffer;
         flush_ready ();
