@@ -49,6 +49,10 @@ let print_event (ev : Ex08_triggers_lib.Domain.alert Mf_event.t) =
   | Mf_event.Data (a, _) -> print_alert a
   | Mf_event.Retract (a, _) ->
     Printf.printf "  ↺ retract: %s\n" (Ex08_triggers_lib.Domain.alert_lamp a)
+  | Mf_event.Update { old; new_value; _ } ->
+    Printf.printf "  ↻ update: %s → %s\n"
+      (Ex08_triggers_lib.Domain.alert_lamp old)
+      (Ex08_triggers_lib.Domain.alert_lamp new_value)
   | Mf_event.Watermark _ -> ()
 
 let () =
@@ -135,6 +139,7 @@ let () =
     (match ev with
      | Mf_event.Data _ -> incr total
      | Mf_event.Retract _ -> incr retracts
+     | Mf_event.Update _ -> incr total
      | Mf_event.Watermark _ -> ());
     print_event ev);
   Printf.printf "\nИтого: %d алертов (%d retracts)\n" !total !retracts
