@@ -232,6 +232,7 @@ let window_fold
     ?(serialize_acc : (acc -> Yojson.Safe.t) option)
     ?(deserialize_acc : (Yojson.Safe.t -> acc) option)
     ?(persistence : acc Persistence_backend.persist option)
+    ?(remove : (acc -> a -> acc) option)
     (spec : win_spec)
     ~(init : unit -> acc)
     ~(add  : acc -> a -> acc)
@@ -462,13 +463,34 @@ let window_fold
         persist_all ();
         Queue.push (Mf_event.wm wm) out;
         pull ()
-      | Some (Mf_event.Retract _) -> pull ()
+      | Some (Mf_event.Retract (v, t)) ->
+        (* Phase 2: если remove передан, применяем его к окнам куда
+           попадает (K.key v, t). Без remove — drop (backwards compat). *)
+        (match remove with
+         | None -> pull ()
+         | Some rem ->
+           List.iter (fun (s, stop) ->
+             let mk = (K.key v, s, stop) in
+             match Hashtbl.find_opt tbl mk with
+             | None -> ()  (* окна нет — retract на пустой стейт игнорируется *)
+             | Some (FOpen (acc, nonempty)) ->
+               Hashtbl.replace tbl mk (FOpen (rem acc v, nonempty))
+             | Some (FFired (acc, _nonempty)) ->
+               (* late retract: применяем remove к сохранённому acc,
+                  пере-эмитим как Retract(old) + Data(new) (Phase 3
+                  заменит это на Update) *)
+               let new_acc = rem acc v in
+               emit_retract (K.key v) stop acc;
+               emit_data (K.key v) stop new_acc;
+               Hashtbl.replace tbl mk (FFired (new_acc, true))
+           ) (assign spec t);
+           pull ())
       | Some (Mf_event.Update _) ->
-        (* Phase 1 fallback: Window не умеет retract на input,
-           аналогично Update игнорируется. Phase 2/3 добавит native
-           handling через retractable Agg.t. *)
+        (* Phase 1 fallback: Update раскладывается на Retract+Data
+           но window_fold его пока обрабатывает только если remove
+           есть. Phase 3 даст native handling. *)
         pull ()
-      | Some (Mf_event.Data (v,t)) ->
+      | Some (Mf_event.Data (v, t)) ->
         List.iter (fun (s, stop) ->
           let mk = (K.key v, s, stop) in
           match Hashtbl.find_opt tbl mk with
