@@ -88,6 +88,11 @@ let merge_partitioned
               p.last_activity <- now_ms ();
               progressed := true;
               Queue.push ev out
+            | Some (Mf_event.Update _ as ev) ->
+              (* Update — атомарная коррекция, передаётся прозрачно. *)
+              p.last_activity <- now_ms ();
+              progressed := true;
+              Queue.push ev out
         ) parts;
         if not (Queue.is_empty out) then Some (Queue.pop out)
         else if !progressed then step ()
