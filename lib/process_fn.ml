@@ -276,6 +276,17 @@ let process_keyed
           Queue.push (Mf_event.wm wm) out_q;
           pull ()
         | Some (Mf_event.Retract _) -> pull ()
+        | Some (Mf_event.Update { new_value = v; ts; _ }) ->
+          (* Phase 1 conservative: применяем Update как Data на
+             new_value. Native handling (отдельный callback видящий
+             both old/new) появится в Phase 3. Сейчас state эволюционирует
+             через on_event на new_value — correct для FSM-style
+             processors которые читают current value. *)
+          let key = K.key v in
+          on_event (ctx_for key ~emit_ts:ts) key (state_of key) v;
+          persist_key key;
+          fire_due pt_timers Processing_time (now_ms ());
+          pull ()
     in pull ()
 
 (* ── Record-based spec API — backwards-compat wrapper ──────────────── *)
