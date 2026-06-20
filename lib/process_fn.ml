@@ -54,6 +54,7 @@ let process_keyed
     ?(serialize_state : (st -> Yojson.Safe.t) option)
     ?(deserialize_state : (Yojson.Safe.t -> st) option)
     ?(persistence : st Persistence_backend.persist option)
+    ?(on_update : (out ctx -> string -> st -> old:a -> new_value:a -> unit) option)
     ~(init : unit -> st)
     ~(on_event : out ctx -> string -> st -> a -> unit)
     ~(on_timer : out ctx -> string -> st -> Time.t -> timer_kind -> unit)
@@ -276,14 +277,17 @@ let process_keyed
           Queue.push (Mf_event.wm wm) out_q;
           pull ()
         | Some (Mf_event.Retract _) -> pull ()
-        | Some (Mf_event.Update { new_value = v; ts; _ }) ->
-          (* Phase 1 conservative: применяем Update как Data на
-             new_value. Native handling (отдельный callback видящий
-             both old/new) появится в Phase 3. Сейчас state эволюционирует
-             через on_event на new_value — correct для FSM-style
-             processors которые читают current value. *)
-          let key = K.key v in
-          on_event (ctx_for key ~emit_ts:ts) key (state_of key) v;
+        | Some (Mf_event.Update { old; new_value; ts }) ->
+          (* Phase 3.3: если ?on_update передан — atomic native handling.
+             Иначе Phase 1 conservative fallback: обработать Update
+             как Data на new_value. Оба пути обновляют state через
+             колбэк пользователя. *)
+          let key = K.key new_value in
+          let ctx = ctx_for key ~emit_ts:ts in
+          let st = state_of key in
+          (match on_update with
+           | Some cb -> cb ctx key st ~old ~new_value
+           | None -> on_event ctx key st new_value);
           persist_key key;
           fire_due pt_timers Processing_time (now_ms ());
           pull ()

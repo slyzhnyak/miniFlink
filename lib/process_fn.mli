@@ -86,11 +86,25 @@ val process_keyed :
   ?serialize_state:('st -> Yojson.Safe.t) ->
   ?deserialize_state:(Yojson.Safe.t -> 'st) ->
   ?persistence:'st Persistence_backend.persist ->
+  ?on_update:('out ctx -> string -> 'st -> old:'a -> new_value:'a -> unit) ->
   init:(unit -> 'st) ->
   on_event:('out ctx -> string -> 'st -> 'a -> unit) ->
   on_timer:('out ctx -> string -> 'st -> Time.t -> timer_kind -> unit) ->
   'a Mf_event.t Stream.t -> 'out Mf_event.t Stream.t
-(** {b [?backend]} — если передан, [process_keyed] сохраняет
+(** {b [?on_update]} (Phase 3.3) — опциональный callback для
+    атомарной обработки {!Mf_event.Update} событий. Если передан,
+    вызывается на каждом Update с обоими значениями [old] и [new_value],
+    позволяя выполнить atomic state transition — например, откатить
+    эффект старого значения и применить новое.
+
+    Если [?on_update] {b не} передан, Update обрабатывается через
+    fallback: вызывается [on_event] с [new_value] (Phase 1
+    conservative). Это корректно для FSM-style processors которые
+    читают только current value; opt-in [on_update] нужен только
+    когда state зависит от {e предыдущего} значения и atomic
+    rollback важен.
+
+    {b [?backend]} — если передан, [process_keyed] сохраняет
     per-key state ([st] + event/processing таймеры этого ключа) в
     [Persistence_backend] на каждое изменение (после [on_event] и
     [on_timer]). На старте восстанавливает все state'ы и таймеры
