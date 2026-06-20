@@ -1,4 +1,44 @@
-# TODO: атомарный Update event
+# TODO: атомарный Update event — РЕШЕНО (Phases 1-3 завершены)
+
+> **СТАТУС:** Архитектурная задача закрыта end-to-end. См. ниже
+> "Что было сделано". Документ остаётся как историческая запись
+> design'а и причин.
+
+## Что было сделано
+
+**Phase 1** (merge a435f9d): `Mf_event.t` расширен вариантом
+`Update of { old; new_value; ts }`. Все 23 файла кодовой базы
+обновлены — pattern matches exhaustive, операторы обрабатывают
+Update либо нативно (keyed_join), либо conservatively (Data на
+new_value).
+
+**Phase 2** (внутри merge 65d773b): `Agg.t` стал retractable
+через optional `remove` поле. `window_fold` получил `?remove`
+параметр. `window_agg`/`window_agg_keyed` автоматически
+прокидывают remove из Agg.t.
+
+**Phase 3.1** (внутри merge 65d773b): Window операторы эмитят
+**один атомарный Update** event вместо пары Retract+Data на
+late-event correction. Тест `test_atomic_update_e2e.ml`
+доказывает что keyed_join видит **2** snapshot'а (старый и
+исправленный), а не 3 (с промежуточным None).
+
+**Phase 3.2**: Trigger.of_stream корректно работает с Update
+через conservative handling (new_value → как Data). Тест
+`test_trigger_update.ml` (5 сценариев) подтверждает корректность
+для problem/recovery/debounce/no-prior-Data/same-state cases.
+
+**Phase 3.3**: process_keyed получил optional `?on_update`
+callback для opt-in atomic native handling. Тест
+`test_process_keyed_update.ml` показывает разницу: без callback
+total после Data(10) + Update(10→15) = 25, с callback = 15
+(atomic rollback+apply).
+
+**Итого:** 81 тест, 10 примеров, end-to-end атомарная коррекция.
+
+---
+
+## Историческая запись (оставлено как ссылка на design)
 
 ## Проблема
 
