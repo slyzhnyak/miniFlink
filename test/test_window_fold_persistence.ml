@@ -72,9 +72,9 @@ let () =
   ] in
   let stream2 = events2 |> Stream.of_list
     |> Pipe.window_fold (module Int_keyed)
-         ~backend ~backend_name:"sum_test"
-         ~serialize_acc:sum_acc_to_json
-         ~deserialize_acc:sum_acc_of_json
+         ~persistence:{ Persistence_backend.backend = backend;
+         name = "sum_test"; serialize = sum_acc_to_json;
+         deserialize = sum_acc_of_json }
          (Pipe.tumbling (Time.seconds 10))
          ~init:(fun () -> 0)
          ~add:(fun acc (_, n) -> acc + n) in
@@ -99,25 +99,6 @@ let () =
      check "nonempty=true" ne
    | _ -> fail "json not assoc");
 
-  (* ── 3. Missing parameter → Invalid_argument ───────────────── *)
-  Printf.printf "\n-- 3. Missing parameter raises\n";
-
-  let tbl_x = Hashtbl.create 4 in
-  let backend_x = Persistence_backend.of_memory tbl_x in
-  (try
-    let _s = Pipe.window_fold (module Int_keyed)
-      ~backend:backend_x
-      ~serialize_acc:sum_acc_to_json
-      ~deserialize_acc:sum_acc_of_json
-      (* backend_name отсутствует *)
-      (Pipe.tumbling (Time.seconds 10))
-      ~init:(fun () -> 0)
-      ~add:(fun acc (_, n) -> acc + n)
-      Stream.empty in
-    fail "should have raised"
-  with Invalid_argument msg ->
-    pass (Printf.sprintf "raised: %s"
-            (String.sub msg 0 (min 60 (String.length msg)))));
 
   (* ── 4. Restore: окно с открытым state переживает рестарт ── *)
   Printf.printf "\n-- 4. Restore: open window continues accumulator\n";
@@ -133,9 +114,9 @@ let () =
   ] in
   let s1 = p1 |> Stream.of_list
     |> Pipe.window_fold (module Int_keyed)
-         ~backend:backend3 ~backend_name:"restore"
-         ~serialize_acc:sum_acc_to_json
-         ~deserialize_acc:sum_acc_of_json
+         ~persistence:{ Persistence_backend.backend = backend3;
+         name = "restore"; serialize = sum_acc_to_json;
+         deserialize = sum_acc_of_json }
          (Pipe.tumbling (Time.seconds 10))
          ~init:(fun () -> 0)
          ~add:(fun acc (_, n) -> acc + n) in
@@ -159,9 +140,9 @@ let () =
   ] in
   let s2 = p2 |> Stream.of_list
     |> Pipe.window_fold (module Int_keyed)
-         ~backend:backend3 ~backend_name:"restore"
-         ~serialize_acc:sum_acc_to_json
-         ~deserialize_acc:sum_acc_of_json
+         ~persistence:{ Persistence_backend.backend = backend3;
+         name = "restore"; serialize = sum_acc_to_json;
+         deserialize = sum_acc_of_json }
          (Pipe.tumbling (Time.seconds 10))
          ~init:(fun () -> 0)
          ~add:(fun acc (_, n) -> acc + n) in
@@ -185,9 +166,9 @@ let () =
   ] in
   let s1 = p1 |> Stream.of_list
     |> Pipe.window_fold (module Int_keyed)
-         ~backend:backend4 ~backend_name:"ffired"
-         ~serialize_acc:sum_acc_to_json
-         ~deserialize_acc:sum_acc_of_json
+         ~persistence:{ Persistence_backend.backend = backend4;
+         name = "ffired"; serialize = sum_acc_to_json;
+         deserialize = sum_acc_of_json }
          ~allowed_lateness:(Time.seconds 30)
          (Pipe.tumbling (Time.seconds 10))
          ~init:(fun () -> 0)
@@ -216,9 +197,9 @@ let () =
   ] in
   let s2 = p2 |> Stream.of_list
     |> Pipe.window_fold (module Int_keyed)
-         ~backend:backend4 ~backend_name:"ffired"
-         ~serialize_acc:sum_acc_to_json
-         ~deserialize_acc:sum_acc_of_json
+         ~persistence:{ Persistence_backend.backend = backend4;
+         name = "ffired"; serialize = sum_acc_to_json;
+         deserialize = sum_acc_of_json }
          ~allowed_lateness:(Time.seconds 30)
          (Pipe.tumbling (Time.seconds 10))
          ~init:(fun () -> 0)

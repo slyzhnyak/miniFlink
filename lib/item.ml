@@ -54,26 +54,13 @@ let default_key_to_string : 'k -> string = fun k ->
 
 let silence_age
     (type ev k)
-    ?(backend : Persistence_backend.t option)
-    ?(backend_name : string option)
-    ?(serialize_key : (k -> Yojson.Safe.t) option)
-    ?(deserialize_key : (Yojson.Safe.t -> k) option)
     ?(persistence : k Persistence_backend.persist option)
     ~(by : ev -> k)
     ~(tick : Time.t)
     (source : ev Mf_event.t Stream.t)
   : (k * Time.t) Mf_event.t Stream.t =
 
-  (* Нормализация двух API'шек persistence в единое представление.
-     Конфликт (оба заданы) — Invalid_argument. *)
-  let old_style_any =
-    backend <> None || backend_name <> None
-    || serialize_key <> None || deserialize_key <> None in
-  if persistence <> None && old_style_any then
-    invalid_arg
-      "Item.silence_age: cannot mix ?persistence with \
-       individual ?backend/?backend_name/?serialize_key/?deserialize_key — \
-       use one style or the other";
+  (* Раскрываем persistence bundle в локальные option-значения. *)
   let backend, backend_name, serialize_key, deserialize_key =
     match persistence with
     | Some p ->
@@ -81,23 +68,8 @@ let silence_age
        Some p.Persistence_backend.name,
        Some p.Persistence_backend.serialize,
        Some p.Persistence_backend.deserialize)
-    | None ->
-      (backend, backend_name, serialize_key, deserialize_key)
+    | None -> (None, None, None, None)
   in
-
-  (* Если backend подключён — обязательны name + сериализаторы. *)
-  (match backend with
-   | None -> ()
-   | Some _ ->
-     let missing =
-       (if backend_name    = None then ["backend_name"]    else []) @
-       (if serialize_key   = None then ["serialize_key"]   else []) @
-       (if deserialize_key = None then ["deserialize_key"] else [])
-     in
-     if missing <> [] then
-       invalid_arg (Printf.sprintf
-         "Item.silence_age: backend provided but missing: %s"
-         (String.concat ", " missing)));
 
   (* per-key state: last_seen_ts + сам ключ для обратной деривации *)
   let states : (string, Time.t * k) Hashtbl.t = Hashtbl.create 64 in

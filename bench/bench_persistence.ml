@@ -300,13 +300,11 @@ let run_pipeline ?trigger_bk ?silence_bk ?process_bk ?window_bk
   let silence_stream =
     packet_keyed
     |> Item.silence_age
-         ?backend:silence_bk
-         ?backend_name:(if silence_bk <> None then Some "bench_silence" else None)
-         ?serialize_key:(if silence_bk <> None
-                         then Some (fun k -> `String k) else None)
-         ?deserialize_key:(if silence_bk <> None
-                           then Some (fun j -> Yojson.Safe.Util.to_string j)
-                           else None)
+         ?persistence:(Option.map (fun bk ->
+           { Persistence_backend.backend = bk;
+             name = "bench_silence";
+             serialize = ((fun k -> `String k));
+             deserialize = ((fun j -> Yojson.Safe.Util.to_string j)) }) silence_bk)
          ~by:(fun (p : Domain.packet) -> p.lamp)
          ~tick:(Time.seconds 30) in
 
@@ -341,13 +339,11 @@ let run_pipeline ?trigger_bk ?silence_bk ?process_bk ?window_bk
   let evacuation_alerts =
     combined_stream
     |> Pipe.process_keyed (module Combined_keyed)
-         ?backend:process_bk
-         ?backend_name:(if process_bk <> None
-                        then Some "bench_combined_fsm" else None)
-         ?serialize_state:(if process_bk <> None
-                           then Some combined_to_json else None)
-         ?deserialize_state:(if process_bk <> None
-                             then Some combined_of_json else None)
+         ?persistence:(Option.map (fun bk ->
+           { Persistence_backend.backend = bk;
+             name = "bench_combined_fsm";
+             serialize = combined_to_json;
+             deserialize = combined_of_json }) process_bk)
          ~init:(fun () ->
            { voltage = 4.0; co = 0.0; rssi = -50.0; critical_since = 0 })
          ~on_event:(fun ctx key st (_k, opts) ->
@@ -374,13 +370,11 @@ let run_pipeline ?trigger_bk ?silence_bk ?process_bk ?window_bk
   let voltage_sum =
     voltage_stream
     |> Pipe.window_fold (module Voltage_keyed)
-         ?backend:window_bk
-         ?backend_name:(if window_bk <> None then Some "bench_vsum" else None)
-         ?serialize_acc:(if window_bk <> None
-                         then Some (fun (f : float) -> `Float f) else None)
-         ?deserialize_acc:(if window_bk <> None
-                           then Some (function `Float f -> f | _ -> 0.0)
-                           else None)
+         ?persistence:(Option.map (fun bk ->
+           { Persistence_backend.backend = bk;
+             name = "bench_vsum";
+             serialize = ((fun (f : float) -> `Float f));
+             deserialize = ((function `Float f -> f | _ -> 0.0)) }) window_bk)
          (Pipe.tumbling (Time.minutes 1))
          ~init:(fun () -> 0.0)
          ~add:(fun acc (_, v) -> acc +. v) in

@@ -56,13 +56,11 @@ let () =
   let mk_silence_age ?backend events =
     events |> Stream.of_list
     |> Item.silence_age
-         ?backend
-         ?backend_name:(if backend <> None then Some "e2e_test" else None)
-         ?serialize_key:(if backend <> None
-                         then Some (fun k -> `String k) else None)
-         ?deserialize_key:(if backend <> None
-                           then Some (fun j -> Yojson.Safe.Util.to_string j)
-                           else None)
+         ?persistence:(Option.map (fun bk ->
+           { Persistence_backend.backend = bk;
+             name = "e2e_test";
+             serialize = ((fun k -> `String k));
+             deserialize = ((fun j -> Yojson.Safe.Util.to_string j)) }) backend)
          ~by:(fun (p : Domain.packet) -> p.lamp)
          ~tick:(Time.seconds 30)
   in

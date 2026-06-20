@@ -54,10 +54,11 @@ let connectivity_pipeline ?backend events =
          type t = Domain.packet
          let key (p : Domain.packet) = p.lamp
        end)
-       ?backend
-       ?backend_name:(if backend <> None then Some "fsm_e2e" else None)
-       ?serialize_state:(if backend <> None then Some fsm_to_json else None)
-       ?deserialize_state:(if backend <> None then Some fsm_of_json else None)
+       ?persistence:(Option.map (fun bk ->
+           { Persistence_backend.backend = bk;
+             name = "fsm_e2e";
+             serialize = (fsm_to_json);
+             deserialize = (fsm_of_json) }) backend)
        ~init:(fun () -> { last_seen_ts = 0; timer_at = 0 })
        ~on_event:(fun ctx _key st (p : Domain.packet) ->
          (* Cancel предыдущий таймер если был *)

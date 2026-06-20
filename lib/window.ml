@@ -229,10 +229,6 @@ let window_fold
     (module K : Keyed.S with type t = a)
     ?(latency = 0)
     ?(allowed_lateness = 0)
-    ?(backend : Persistence_backend.t option)
-    ?(backend_name : string option)
-    ?(serialize_acc : (acc -> Yojson.Safe.t) option)
-    ?(deserialize_acc : (Yojson.Safe.t -> acc) option)
     ?(persistence : acc Persistence_backend.persist option)
     ?(remove : (acc -> a -> acc) option)
     (spec : win_spec)
@@ -241,14 +237,8 @@ let window_fold
     (upstream : a Mf_event.t Stream.t)
     : (string * acc) Mf_event.t Stream.t =
 
-  (* Нормализация ?persistence ↔ старые параметры. *)
-  let old_style_any =
-    backend <> None || backend_name <> None
-    || serialize_acc <> None || deserialize_acc <> None in
-  if persistence <> None && old_style_any then
-    invalid_arg
-      "Window.window_fold: cannot mix ?persistence with \
-       individual ?backend/?backend_name/?serialize_acc/?deserialize_acc";
+  (* Раскрываем persistence bundle в локальные option-значения.
+     Bundle гарантирует что все 4 поля присутствуют вместе. *)
   let backend, backend_name, serialize_acc, deserialize_acc =
     match persistence with
     | Some p ->
@@ -256,23 +246,8 @@ let window_fold
        Some p.Persistence_backend.name,
        Some p.Persistence_backend.serialize,
        Some p.Persistence_backend.deserialize)
-    | None ->
-      (backend, backend_name, serialize_acc, deserialize_acc)
+    | None -> (None, None, None, None)
   in
-
-  (* Если backend подключён — обязательны name + сериализаторы. *)
-  (match backend with
-   | None -> ()
-   | Some _ ->
-     let missing =
-       (if backend_name    = None then ["backend_name"]    else []) @
-       (if serialize_acc   = None then ["serialize_acc"]   else []) @
-       (if deserialize_acc = None then ["deserialize_acc"] else [])
-     in
-     if missing <> [] then
-       invalid_arg (Printf.sprintf
-         "Window.window_fold: backend provided but missing: %s"
-         (String.concat ", " missing)));
 
   let tbl : (win_key, acc fold_state) Hashtbl.t = Hashtbl.create 4096 in
   let out : (string * acc) Mf_event.t Queue.t = Queue.create () in
@@ -490,11 +465,55 @@ let window_fold
                Hashtbl.replace tbl mk (FFired (new_acc, true))
            ) (assign spec t);
            pull ())
-      | Some (Mf_event.Update _) ->
-        (* Phase 1 fallback: Update раскладывается на Retract+Data
-           но window_fold его пока обрабатывает только если remove
-           есть. Phase 3 даст native handling. *)
-        pull ()
+      | Some (Mf_event.Update { old; new_value; ts = t }) ->
+        (* Native Update на input: атомарная коррекция old → new.
+           Семантика: убрать old из аккумулятора (требует remove),
+           добавить new. old и new назначаются в окна по своим
+           ключам через assign(t).
+
+           Если remove нет — агрегат не retractable, и мы НЕ можем
+           корректно убрать old. В этом случае применяем только new
+           как Data (best-effort, документированное ограничение). *)
+        (match remove with
+         | None ->
+           (* Не retractable: применяем только new_value как Data.
+              old остаётся "учтённым" — это известное ограничение
+              для non-retractable агрегатов. *)
+           List.iter (fun (s, stop) ->
+             let mk = (K.key new_value, s, stop) in
+             match Hashtbl.find_opt tbl mk with
+             | None ->
+               Hashtbl.add tbl mk (FOpen (add (init ()) new_value, true))
+             | Some (FOpen (acc, _)) ->
+               Hashtbl.replace tbl mk (FOpen (add acc new_value, true))
+             | Some (FFired (acc, _)) ->
+               let acc' = add acc new_value in
+               emit_update (K.key new_value) stop acc acc';
+               Hashtbl.replace tbl mk (FFired (acc', true))
+           ) (assign spec t);
+           pull ()
+         | Some rem ->
+           (* Retractable: атомарно remove(old) + add(new) в каждом
+              затронутом окне. Предполагаем что old и new попадают в
+              одни и те же окна (одинаковый ts t) — это так для
+              window correction, где меняется значение, а не время. *)
+           List.iter (fun (s, stop) ->
+             let mk = (K.key new_value, s, stop) in
+             match Hashtbl.find_opt tbl mk with
+             | None ->
+               (* окна нет: old там не было, просто добавляем new *)
+               Hashtbl.add tbl mk (FOpen (add (init ()) new_value, true))
+             | Some (FOpen (acc, nonempty)) ->
+               let acc' = add (rem acc old) new_value in
+               Hashtbl.replace tbl mk (FOpen (acc', nonempty))
+             | Some (FFired (acc, _)) ->
+               (* late update на закрытое окно: атомарно пересчитываем
+                  и эмитим ОДИН Update event downstream *)
+               let acc' = add (rem acc old) new_value in
+               emit_update (K.key new_value) stop acc acc';
+               Hashtbl.replace tbl mk (FFired (acc', true))
+           ) (assign spec t);
+           pull ())
       | Some (Mf_event.Data (v, t)) ->
         List.iter (fun (s, stop) ->
           let mk = (K.key v, s, stop) in

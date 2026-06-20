@@ -37,10 +37,8 @@ let () =
   check "backend got record"
     (Hashtbl.mem tbl_new "item:silence_age:test_sa:\"42\"");
 
-  (* ── 2. silence_age equivalence: new == old API ─────────── *)
-  Printf.printf "\n-- 2. silence_age: ?persistence ≡ ?backend\n";
-  let tbl_a = Hashtbl.create 16 in
-  let backend_a = Persistence_backend.of_memory tbl_a in
+  (* ── 2. silence_age via ?persistence bundle ─────────────── *)
+  Printf.printf "\n-- 2. silence_age: ?persistence bundle\n";
   let tbl_b = Hashtbl.create 16 in
   let pst_b : string Persistence_backend.persist = {
     backend     = Persistence_backend.of_memory tbl_b;
@@ -53,45 +51,15 @@ let () =
     Mf_event.data 2 1000;
     Mf_event.wm 5000;
   ] in
-  let stream_old = events |> Stream.of_list
-    |> Item.silence_age
-         ~backend:backend_a ~backend_name:"eq"
-         ~serialize_key:(fun k -> `String k)
-         ~deserialize_key:(fun j -> Yojson.Safe.Util.to_string j)
-         ~by:string_of_int
-         ~tick:(Time.seconds 10) in
-  let outs_old = Pipe.collect stream_old in
   let stream_new = events |> Stream.of_list
     |> Item.silence_age ~persistence:pst_b
          ~by:string_of_int
          ~tick:(Time.seconds 10) in
   let outs_new = Pipe.collect stream_new in
-  check "same outputs" (outs_old = outs_new);
-  let keys_a = List.sort compare
-    (Hashtbl.fold (fun k _ a -> k :: a) tbl_a []) in
+  check "emits outputs" (List.length outs_new > 0);
   let keys_b = List.sort compare
     (Hashtbl.fold (fun k _ a -> k :: a) tbl_b []) in
-  check "same backend keys" (keys_a = keys_b);
-
-  (* ── 3. Конфликт ?persistence + ?backend → raise ────────── *)
-  Printf.printf "\n-- 3. Mixing ?persistence with ?backend raises\n";
-  let tbl = Hashtbl.create 4 in
-  let bk = Persistence_backend.of_memory tbl in
-  let pst : string Persistence_backend.persist = {
-    backend     = bk; name = "x";
-    serialize   = (fun k -> `String k);
-    deserialize = (fun j -> Yojson.Safe.Util.to_string j);
-  } in
-  (try
-    let s = Item.silence_age
-      ~persistence:pst
-      ~backend:bk     (* конфликт! *)
-      ~by:string_of_int ~tick:(Time.seconds 10)
-      Stream.empty in
-    let _ = s () in  (* force eval *)
-    fail "should have raised"
-  with Invalid_argument _ ->
-    pass "raised Invalid_argument on mixed API");
+  check "backend has keys" (List.length keys_b > 0);
 
   (* ── 4. process_keyed via ?persistence ──────────────────── *)
   Printf.printf "\n-- 4. process_keyed via ?persistence\n";
