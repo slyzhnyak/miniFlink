@@ -229,10 +229,6 @@ let window_fold
     (module K : Keyed.S with type t = a)
     ?(latency = 0)
     ?(allowed_lateness = 0)
-    ?(backend : Persistence_backend.t option)
-    ?(backend_name : string option)
-    ?(serialize_acc : (acc -> Yojson.Safe.t) option)
-    ?(deserialize_acc : (Yojson.Safe.t -> acc) option)
     ?(persistence : acc Persistence_backend.persist option)
     ?(remove : (acc -> a -> acc) option)
     (spec : win_spec)
@@ -241,14 +237,8 @@ let window_fold
     (upstream : a Mf_event.t Stream.t)
     : (string * acc) Mf_event.t Stream.t =
 
-  (* Нормализация ?persistence ↔ старые параметры. *)
-  let old_style_any =
-    backend <> None || backend_name <> None
-    || serialize_acc <> None || deserialize_acc <> None in
-  if persistence <> None && old_style_any then
-    invalid_arg
-      "Window.window_fold: cannot mix ?persistence with \
-       individual ?backend/?backend_name/?serialize_acc/?deserialize_acc";
+  (* Раскрываем persistence bundle в локальные option-значения.
+     Bundle гарантирует что все 4 поля присутствуют вместе. *)
   let backend, backend_name, serialize_acc, deserialize_acc =
     match persistence with
     | Some p ->
@@ -256,23 +246,8 @@ let window_fold
        Some p.Persistence_backend.name,
        Some p.Persistence_backend.serialize,
        Some p.Persistence_backend.deserialize)
-    | None ->
-      (backend, backend_name, serialize_acc, deserialize_acc)
+    | None -> (None, None, None, None)
   in
-
-  (* Если backend подключён — обязательны name + сериализаторы. *)
-  (match backend with
-   | None -> ()
-   | Some _ ->
-     let missing =
-       (if backend_name    = None then ["backend_name"]    else []) @
-       (if serialize_acc   = None then ["serialize_acc"]   else []) @
-       (if deserialize_acc = None then ["deserialize_acc"] else [])
-     in
-     if missing <> [] then
-       invalid_arg (Printf.sprintf
-         "Window.window_fold: backend provided but missing: %s"
-         (String.concat ", " missing)));
 
   let tbl : (win_key, acc fold_state) Hashtbl.t = Hashtbl.create 4096 in
   let out : (string * acc) Mf_event.t Queue.t = Queue.create () in

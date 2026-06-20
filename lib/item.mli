@@ -15,10 +15,6 @@
     триггеру не на что реагировать. *)
 
 val silence_age :
-  ?backend:Persistence_backend.t ->
-  ?backend_name:string ->
-  ?serialize_key:('key -> Yojson.Safe.t) ->
-  ?deserialize_key:(Yojson.Safe.t -> 'key) ->
   ?persistence:'key Persistence_backend.persist ->
   by:('event -> 'key) ->
   tick:Time.t ->

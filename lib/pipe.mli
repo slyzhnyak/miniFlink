@@ -248,10 +248,6 @@ val window_fold :
   (module Keyed.S with type t = 'a) ->
   ?latency:Time.t ->
   ?allowed_lateness:Time.t ->
-  ?backend:Persistence_backend.t ->
-  ?backend_name:string ->
-  ?serialize_acc:('acc -> Yojson.Safe.t) ->
-  ?deserialize_acc:(Yojson.Safe.t -> 'acc) ->
   ?persistence:'acc Persistence_backend.persist ->
   ?remove:('acc -> 'a -> 'acc) ->
   win_spec ->
@@ -494,10 +490,6 @@ val process_keyed :
   (module Keyed.S with type t = 'a) ->
   ?now_ms:(unit -> int) ->
   ?on_stat:(Process_fn.stat -> unit) ->
-  ?backend:Persistence_backend.t ->
-  ?backend_name:string ->
-  ?serialize_state:('st -> Yojson.Safe.t) ->
-  ?deserialize_state:(Yojson.Safe.t -> 'st) ->
   ?persistence:'st Persistence_backend.persist ->
   ?on_update:('out ctx -> string -> 'st -> old:'a -> new_value:'a -> unit) ->
   init:(unit -> 'st) ->

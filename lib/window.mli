@@ -25,10 +25,6 @@ val window :
 val window_fold :
   (module Keyed.S with type t = 'a) ->
   ?latency:Time.t -> ?allowed_lateness:Time.t ->
-  ?backend:Persistence_backend.t ->
-  ?backend_name:string ->
-  ?serialize_acc:('acc -> Yojson.Safe.t) ->
-  ?deserialize_acc:(Yojson.Safe.t -> 'acc) ->
   ?persistence:'acc Persistence_backend.persist ->
   ?remove:('acc -> 'a -> 'acc) ->
   win_spec ->

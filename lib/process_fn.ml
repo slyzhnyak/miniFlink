@@ -49,10 +49,6 @@ let process_keyed
     (module K : Keyed.S with type t = a)
     ?(now_ms = fun () -> int_of_float (Unix.gettimeofday () *. 1000.))
     ?(on_stat : stat -> unit = fun _ -> ())
-    ?(backend : Persistence_backend.t option)
-    ?(backend_name : string option)
-    ?(serialize_state : (st -> Yojson.Safe.t) option)
-    ?(deserialize_state : (Yojson.Safe.t -> st) option)
     ?(persistence : st Persistence_backend.persist option)
     ?(on_update : (out ctx -> string -> st -> old:a -> new_value:a -> unit) option)
     ~(init : unit -> st)
@@ -61,14 +57,7 @@ let process_keyed
     (upstream : a Mf_event.t Stream.t)
     : out Mf_event.t Stream.t =
 
-  (* Нормализация ?persistence ↔ старые параметры. *)
-  let old_style_any =
-    backend <> None || backend_name <> None
-    || serialize_state <> None || deserialize_state <> None in
-  if persistence <> None && old_style_any then
-    invalid_arg
-      "Process_fn.process_keyed: cannot mix ?persistence with \
-       individual ?backend/?backend_name/?serialize_state/?deserialize_state";
+  (* Раскрываем persistence bundle в локальные option-значения. *)
   let backend, backend_name, serialize_state, deserialize_state =
     match persistence with
     | Some p ->
@@ -76,23 +65,8 @@ let process_keyed
        Some p.Persistence_backend.name,
        Some p.Persistence_backend.serialize,
        Some p.Persistence_backend.deserialize)
-    | None ->
-      (backend, backend_name, serialize_state, deserialize_state)
+    | None -> (None, None, None, None)
   in
-
-  (* Если backend подключён — обязательны name + сериализаторы. *)
-  (match backend with
-   | None -> ()
-   | Some _ ->
-     let missing =
-       (if backend_name      = None then ["backend_name"]      else []) @
-       (if serialize_state   = None then ["serialize_state"]   else []) @
-       (if deserialize_state = None then ["deserialize_state"] else [])
-     in
-     if missing <> [] then
-       invalid_arg (Printf.sprintf
-         "Process_fn.process_keyed: backend provided but missing: %s"
-         (String.concat ", " missing)));
 
   let states : (string, st) Hashtbl.t = Hashtbl.create 64 in
   let ev_timers = ref TimerSet.empty in   (* (key, time) event-time *)
