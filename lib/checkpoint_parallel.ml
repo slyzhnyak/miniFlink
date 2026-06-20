@@ -27,6 +27,16 @@
 
 type epoch = int
 
+(* Выполнить [f] под mutex'ом, гарантированно разблокировав даже если
+   [f] бросит исключение. Критично для регионов вызывающих
+   пользовательский код (cs_persist, publish) — без этого исключение
+   в колбэке оставило бы mutex заблокированным навсегда (deadlock). *)
+let with_mutex mu f =
+  Mutex.lock mu;
+  match f () with
+  | r -> Mutex.unlock mu; r
+  | exception e -> Mutex.unlock mu; raise e
+
 (** Позиция чтения в источнике. Для Kafka — offset партиции,
     для списка — индекс, для файла — байтовое смещение. *)
 type offset = int
@@ -84,22 +94,16 @@ let make_store ?persist () =
   { committed = []; cs_mu = Mutex.create (); cs_persist = persist }
 
 let commit store cp =
-  Mutex.lock store.cs_mu;
-  store.committed <- cp :: store.committed;
-  (match store.cs_persist with Some f -> f cp | None -> ());
-  Mutex.unlock store.cs_mu
+  with_mutex store.cs_mu (fun () ->
+    store.committed <- cp :: store.committed;
+    (match store.cs_persist with Some f -> f cp | None -> ()))
 
 let latest_checkpoint store =
-  Mutex.lock store.cs_mu;
-  let r = match store.committed with [] -> None | x :: _ -> Some x in
-  Mutex.unlock store.cs_mu;
-  r
+  with_mutex store.cs_mu (fun () ->
+    match store.committed with [] -> None | x :: _ -> Some x)
 
 let checkpoint_count store =
-  Mutex.lock store.cs_mu;
-  let n = List.length store.committed in
-  Mutex.unlock store.cs_mu;
-  n
+  with_mutex store.cs_mu (fun () -> List.length store.committed)
 
 (* ── Координатор сбора снапшотов ──────────────────────────── *)
 
@@ -151,20 +155,18 @@ let try_close c =
   end
 
 let submit_snapshot c (snap : worker_snapshot) =
-  Mutex.lock c.co_mu;
-  c.pending.(snap.worker) <- Some snap;
-  try_close c;
-  Mutex.unlock c.co_mu
+  with_mutex c.co_mu (fun () ->
+    c.pending.(snap.worker) <- Some snap;
+    try_close c)
 
 (* Пометить воркера выбывшим (после краха). Координатор перестаёт ждать
    его снапшот; если он был последним недостающим — текущий checkpoint
    закрывается по оставшимся живым. *)
 let mark_failed c worker =
-  Mutex.lock c.co_mu;
-  if worker < c.workers then c.alive.(worker) <- false;
-  c.pending.(worker) <- None;
-  try_close c;
-  Mutex.unlock c.co_mu
+  with_mutex c.co_mu (fun () ->
+    if worker < c.workers then c.alive.(worker) <- false;
+    c.pending.(worker) <- None;
+    try_close c)
 
 (* Ждать коммита данного epoch (для теста/синхронизации) *)
 let wait_committed c ~epoch =
@@ -225,25 +227,23 @@ let buffered_sink (publish : 'b list -> unit) : 'b transactional_sink =
     | Some r -> r
     | None -> let r = ref [] in Hashtbl.replace buffers epoch r; r in
   { ts_write = (fun epoch v ->
-      Mutex.lock mu; let r = buf epoch in r := v :: !r; Mutex.unlock mu);
+      with_mutex mu (fun () -> let r = buf epoch in r := v :: !r));
     ts_commit = (fun epoch ->
-      Mutex.lock mu;
-      (match Hashtbl.find_opt buffers epoch with
-       | Some r -> publish (List.rev !r); Hashtbl.remove buffers epoch
-       | None -> ());
-      Mutex.unlock mu);
+      with_mutex mu (fun () ->
+        match Hashtbl.find_opt buffers epoch with
+        | Some r -> publish (List.rev !r); Hashtbl.remove buffers epoch
+        | None -> ()));
     ts_abort = (fun epoch ->
-      Mutex.lock mu; Hashtbl.remove buffers epoch; Mutex.unlock mu);
+      with_mutex mu (fun () -> Hashtbl.remove buffers epoch));
     ts_flush = (fun () ->
       (* Штатное завершение: опубликовать все оставшиеся epoch по порядку.
          Это хвостовые события после последнего checkpoint — не сбой. *)
-      Mutex.lock mu;
-      let epochs = Hashtbl.fold (fun e _ acc -> e :: acc) buffers [] in
-      List.iter (fun e ->
-        match Hashtbl.find_opt buffers e with
-        | Some r -> publish (List.rev !r); Hashtbl.remove buffers e
-        | None -> ()) (List.sort compare epochs);
-      Mutex.unlock mu) }
+      with_mutex mu (fun () ->
+        let epochs = Hashtbl.fold (fun e _ acc -> e :: acc) buffers [] in
+        List.iter (fun e ->
+          match Hashtbl.find_opt buffers e with
+          | Some r -> publish (List.rev !r); Hashtbl.remove buffers e
+          | None -> ()) (List.sort compare epochs))) }
 
 (* ── Параллельный прогон с checkpoint + offset + 2PC ──────── *)
 
