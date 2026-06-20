@@ -25,6 +25,8 @@ type worker_stats = {
 let make_stats () = { processed = 0; emitted = 0; wm_seen = 0 }
 
 let hash_key key n =
+  if n <= 0 then
+    invalid_arg "hash_key: число шардов должно быть > 0";
   let h = ref 5381 in
   String.iter (fun c -> h := !h * 33 + Char.code c) key;
   (!h land max_int) mod n

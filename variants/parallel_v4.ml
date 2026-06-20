@@ -22,6 +22,8 @@
 
 (* Djb2 hash для строк — быстрый и равномерный *)
 let hash_key key n_shards =
+  if n_shards <= 0 then
+    invalid_arg "hash_key: число шардов должно быть > 0";
   let h = ref 5381 in
   String.iter (fun c -> h := !h * 33 + Char.code c) key;
   (!h land max_int) mod n_shards

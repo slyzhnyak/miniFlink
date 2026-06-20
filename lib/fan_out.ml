@@ -96,6 +96,16 @@ let fan_out (source : 'a Mf_event.t Stream.t) (outlets : 'a outlet list)
     let b = bufs.(i) in
     fun () ->
       Mutex.lock t.mu;
+      (* Весь loop держит t.mu (кроме Condition.wait, который сам
+         временно отпускает его). Единственное место где может
+         возникнуть исключение — advance t, внутри которого
+         вызывается t.source () (пользовательский источник). Если
+         источник бросит, mutex остался бы заблокированным навсегда
+         (deadlock всех выходов fan_out). Оборачиваем loop так, чтобы
+         любое исключение освободило mutex и было проброшено дальше.
+         Все штатные выходы (Some/None) сами делают unlock до возврата;
+         в момент исключения mutex заведомо удерживается нами (либо
+         никогда не отпускался, либо перезахвачен Condition.wait). *)
       let rec loop () =
         if not (Queue.is_empty b.q) then begin
           let ev = Queue.pop b.q in
@@ -117,6 +127,9 @@ let fan_out (source : 'a Mf_event.t Stream.t) (outlets : 'a outlet list)
           Condition.wait t.cv t.mu;
           loop ()
         end
-      in loop ()
+      in
+      (match loop () with
+       | r -> r
+       | exception e -> Mutex.unlock t.mu; raise e)
   in
   List.mapi (fun i _ -> make_stream i) outlets

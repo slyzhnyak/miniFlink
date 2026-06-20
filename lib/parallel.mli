@@ -14,6 +14,8 @@ type worker_stats = {
 
 val make_stats : unit -> worker_stats
 val hash_key : string -> int -> int
+(** [hash_key key n] — детерминированный шард [0, n) для [key]
+    (djb2-хеш). Бросает [Invalid_argument] если [n <= 0]. *)
 
 (** Data-parallel pipeline.
     Шардирует source по hash(key_of) на N воркеров.
