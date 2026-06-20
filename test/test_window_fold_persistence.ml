@@ -225,17 +225,22 @@ let () =
          ~add:(fun acc (_, n) -> acc + n) in
   let datas2 = ref [] in
   let retracts2 = ref [] in
+  let updates2 = ref [] in
   let rec drain () = match s2 () with
     | None -> ()
     | Some (Mf_event.Data (v, _)) -> datas2 := v :: !datas2; drain ()
     | Some (Mf_event.Retract (v, _)) -> retracts2 := v :: !retracts2; drain ()
+    | Some (Mf_event.Update { old; new_value; _ }) ->
+      updates2 := (old, new_value) :: !updates2; drain ()
     | Some _ -> drain ()
   in drain ();
-  Printf.printf "  phase 2: %d Data %d Retract\n"
-    (List.length !datas2) (List.length !retracts2);
-  check "phase 2: 1 retract (old 300)"
-    (!retracts2 = [("Z", 300)]);
-  check "phase 2: 1 new emit (350 = 300+50)"
-    (!datas2 = [("Z", 350)]);
+  Printf.printf "  phase 2: %d Data %d Retract %d Update\n"
+    (List.length !datas2) (List.length !retracts2) (List.length !updates2);
+  (* Phase 3 atomic: late event correction теперь эмитит одно Update
+     событие вместо пары Retract+Data. *)
+  check "phase 2: 1 atomic Update emitted"
+    (!updates2 = [(("Z", 300), ("Z", 350))]);
+  check "phase 2: no separate Retract/Data"
+    (!datas2 = [] && !retracts2 = []);
 
   Printf.printf "\nAll window_fold persistence tests passed.\n"

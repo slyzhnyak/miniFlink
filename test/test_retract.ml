@@ -45,14 +45,23 @@ let test_late_retract () =
   in
   let datas = List.filter Mf_event.is_data out in
   let retracts = List.filter (function Mf_event.Retract _ -> true | _ -> false) out in
-  (* Ожидаем: Data(2 события) → Retract(2 события) → Data(3 события) *)
-  check "2 Data emitted (initial + corrected)" (List.length datas = 2);
-  check "1 Retract emitted" (List.length retracts = 1);
-  (* Первый Data — 2 события, второй — 3 *)
+  let updates = List.filter (function Mf_event.Update _ -> true | _ -> false) out in
+  (* Phase 3: late correction теперь эмитит ОДИН Update event вместо
+     пары Retract+Data. Ожидаем: Data(2 события) → Update((2,3)) *)
+  check "1 Data emitted (initial)" (List.length datas = 1);
+  check "no separate Retract" (List.length retracts = 0);
+  check "1 atomic Update emitted (initial → corrected)"
+    (List.length updates = 1);
+  (* Первый Data — 2 события; Update содержит old=2 события, new=3 *)
   let data_counts = List.filter_map (function
     | Mf_event.Data ((_, vs), _) -> Some (List.length vs) | _ -> None) out in
   check "first window had 2 events" (List.nth data_counts 0 = 2);
-  check "corrected window has 3 events" (List.nth data_counts 1 = 3)
+  let update_counts = List.filter_map (function
+    | Mf_event.Update { old = (_, ovs); new_value = (_, nvs); _ } ->
+      Some (List.length ovs, List.length nvs)
+    | _ -> None) out in
+  check "Update: old=2, new=3"
+    (List.nth update_counts 0 = (2, 3))
 
 (* ── very late data beyond allowed_lateness: dropped ───────── *)
 let test_too_late () =
