@@ -15,7 +15,33 @@
 
 ---
 
-## P1 — Недоделки (функциональные пробелы)
+## СТАТУС ЧИСТКИ (обновлено)
+
+- **P1.1 — ЗАКРЫТО.** window_fold + materializing-окна (window,
+  global_window, window_instrumented) обрабатывают Update/Retract
+  на input. count_window и session_window — документированные
+  ограничения (не недоделки). Тесты: test_window_fold_update_input,
+  test_window_materializing_update.
+- **P1.2 — ЗАКРЫТО.** Все 12 `assert false` в persistence-guards
+  (window, item, process_fn, trigger) заменены на `invalid_arg`
+  с понятными сообщениями. Остался 1 законный assert false в
+  pipe.ml (доказуемо недостижим).
+- **P2.1 — ЗАКРЫТО (вариант а).** Old-style persistence params
+  удалены, остался только ?persistence bundle. ~60 строк glue
+  убрано. Все consumers мигрированы.
+- **P3.1, P3.2 — ОСОЗНАННО ОТЛОЖЕНО.** ~150 fragile-match +
+  ~100 name-disambiguation, подавляющее большинство в тестах/бенчах
+  где они полностью безопасны (тест намеренно матчит один паттерн;
+  disambiguation работает через вывод типов). В lib/ — 78 warnings,
+  в основном на полях Persistence_backend.t (be.set/get/keys/delete)
+  и win_state/fold_state matches. Исправление всех ~250 — большая
+  механическая работа с близкой к нулю пользой. Оставлены
+  подавленными в dune.
+- **P2.2, P4 — открыты, низкий приоритет.**
+
+---
+
+
 
 ### P1.1 — Window операторы DROP Update на input (6 мест)
 
