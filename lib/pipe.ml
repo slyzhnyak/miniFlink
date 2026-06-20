@@ -94,7 +94,7 @@ let keyed_join
     ) streams in
     (* Объединяем все через попарный Mf_event.union (fold справа). *)
     let unioned = match tagged with
-      | [] -> assert false
+      | [] -> assert false  (* недостижимо: n = 0 обработан выше через Stream.empty *)
       | [s] -> s
       | first :: rest ->
         List.fold_left Mf_event.union first rest

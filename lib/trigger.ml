@@ -358,17 +358,17 @@ let of_stream
   let ser_v v =
     match spec.s_serialize_value with
     | Some f -> f v
-    | None -> assert false
+    | None -> invalid_arg "Trigger: (de)serializer missing — backend set but spec lacks it (invariant violated)"
   in
   let ser_a a =
     match spec.s_serialize_alert with
     | Some f -> f a
-    | None -> assert false
+    | None -> invalid_arg "Trigger: (de)serializer missing — backend set but spec lacks it (invariant violated)"
   in
   let ser_k k =
     match spec.s_serialize_key with
     | Some f -> f k
-    | None -> assert false
+    | None -> invalid_arg "Trigger: (de)serializer missing — backend set but spec lacks it (invariant violated)"
   in
 
   let state_to_json (s : (k, v, a) state) : Yojson.Safe.t =
@@ -427,17 +427,17 @@ let of_stream
   let deser_v j =
     match spec.s_deserialize_value with
     | Some f -> f j
-    | None -> assert false
+    | None -> invalid_arg "Trigger: (de)serializer missing — backend set but spec lacks it (invariant violated)"
   in
   let deser_a j =
     match spec.s_deserialize_alert with
     | Some f -> f j
-    | None -> assert false
+    | None -> invalid_arg "Trigger: (de)serializer missing — backend set but spec lacks it (invariant violated)"
   in
   let deser_k j =
     match spec.s_deserialize_key with
     | Some f -> f j
-    | None -> assert false
+    | None -> invalid_arg "Trigger: (de)serializer missing — backend set but spec lacks it (invariant violated)"
   in
   let state_of_json (j : Yojson.Safe.t) : (k, v, a) state =
     match j with

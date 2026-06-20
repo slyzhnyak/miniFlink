@@ -286,12 +286,21 @@ let window_fold
   let ser_acc a =
     match serialize_acc with
     | Some f -> f a
-    | None -> assert false
+    | None ->
+      (* Недостижимо: ser_acc вызывается только в snapshot-пути,
+         который guarded `match backend with Some _`, а backend и
+         serialize_acc приходят вместе из persistence bundle.
+         invalid_arg вместо assert false даёт понятную диагностику
+         если инвариант когда-нибудь нарушится. *)
+      invalid_arg "window_fold: serialize requested but persistence \
+                   bundle has no serializer (internal invariant violated)"
   in
   let deser_acc j =
     match deserialize_acc with
     | Some f -> f j
-    | None -> assert false
+    | None ->
+      invalid_arg "window_fold: deserialize requested but persistence \
+                   bundle has no deserializer (internal invariant violated)"
   in
 
   (* Backend-ключ для (user_key, start, stop). Используем
