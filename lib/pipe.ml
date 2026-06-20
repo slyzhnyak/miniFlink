@@ -268,8 +268,13 @@ let window_agg
     (agg : (a, r) Agg.t)
     (upstream : a Mf_event.t Stream.t)
     : (string * r) Mf_event.t Stream.t =
-  Agg.with_parts agg { Agg.k = fun init add finish ->
-    window_fold (module K) ?latency ?allowed_lateness spec ~init ~add upstream
+  (* Phase 2: используем with_parts2 чтобы пробросить optional remove
+     из Agg.t в window_fold. Если агрегат retractable (sum, count,
+     mean, median, to_list, group_by-with-retractable-inner, etc),
+     window_fold получит remove и сможет обрабатывать Retract input. *)
+  Agg.with_parts2 agg { Agg.k2 = fun init add remove finish ->
+    window_fold (module K) ?latency ?allowed_lateness ?remove
+      spec ~init ~add upstream
     |> emap (fun (key, acc) -> (key, finish acc)) }
 
 (* window_agg_keyed ~by — window_agg с ключом-функцией инлайн. *)
