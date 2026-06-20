@@ -112,12 +112,14 @@ let silence_age
   let ser_k k =
     match serialize_key with
     | Some f -> f k
-    | None -> assert false  (* проверено выше *)
+    | None -> invalid_arg "silence_age: serialize requested but no \
+                serializer in persistence bundle (invariant violated)"
   in
   let deser_k j =
     match deserialize_key with
     | Some f -> f j
-    | None -> assert false
+    | None -> invalid_arg "silence_age: deserialize requested but no \
+                deserializer in persistence bundle (invariant violated)"
   in
 
   let persist (ks : string) (key : k) (last_seen : Time.t) (fire_at : Time.t) =

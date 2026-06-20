@@ -90,6 +90,16 @@ type 'a win_state =
     закрытое окно: эмитится [Retract] старого результата, затем
     [Data] нового. За пределами [allowed_lateness] окно окончательно
     удаляется (ограничивает рост состояния). *)
+
+(* Убрать первое вхождение [x] из списка (для retract/update в
+   materializing-окнах, которые хранят полный список событий). *)
+let remove_first x lst =
+  let rec go = function
+    | [] -> []
+    | h :: tl when h = x -> tl
+    | h :: tl -> h :: go tl
+  in go lst
+
 let window
     (type a)
     (module K : Keyed.S with type t = a)
@@ -161,11 +171,39 @@ let window
         List.iter (Hashtbl.remove tbl) !to_remove;
         Queue.push (Mf_event.wm wm) out;
         pull ()
-      | Some (Mf_event.Retract _) -> pull ()
-      | Some (Mf_event.Update _) ->
-        (* Phase 1 fallback: Window не умеет retract на input,
-           аналогично Update игнорируется. Phase 2/3 добавит native
-           handling через retractable Agg.t. *)
+      | Some (Mf_event.Retract (v, t)) ->
+        (* Materializing window хранит список — убираем первое
+           вхождение v из затронутых окон. *)
+        List.iter (fun (s, stop) ->
+          let mk = (K.key v, s, stop) in
+          match Hashtbl.find_opt tbl mk with
+          | None -> ()
+          | Some (Open vs) ->
+            Hashtbl.replace tbl mk (Open (remove_first v vs))
+          | Some (Fired vs) ->
+            let vs' = remove_first v vs in
+            emit_update (K.key v) stop vs vs';
+            Hashtbl.replace tbl mk (Fired vs')
+        ) (assign spec t);
+        pull ()
+      | Some (Mf_event.Update { old; new_value; ts = t }) ->
+        (* Атомарная коррекция: убрать old, добавить new. *)
+        saw_data := true;
+        List.iter (fun (s, stop) ->
+          let mk = (K.key new_value, s, stop) in
+          match Hashtbl.find_opt tbl mk with
+          | None ->
+            if stop + latency + allowed_lateness <= !cur_wm then
+              on_late new_value
+            else
+              Hashtbl.add tbl mk (Open [new_value])
+          | Some (Open vs) ->
+            Hashtbl.replace tbl mk (Open (new_value :: remove_first old vs))
+          | Some (Fired vs) ->
+            let vs' = new_value :: remove_first old vs in
+            emit_update (K.key new_value) stop vs vs';
+            Hashtbl.replace tbl mk (Fired vs')
+        ) (assign spec t);
         pull ()
       | Some (Mf_event.Data (v,t)) ->
         saw_data := true;
@@ -286,12 +324,21 @@ let window_fold
   let ser_acc a =
     match serialize_acc with
     | Some f -> f a
-    | None -> assert false
+    | None ->
+      (* Недостижимо: ser_acc вызывается только в snapshot-пути,
+         который guarded `match backend with Some _`, а backend и
+         serialize_acc приходят вместе из persistence bundle.
+         invalid_arg вместо assert false даёт понятную диагностику
+         если инвариант когда-нибудь нарушится. *)
+      invalid_arg "window_fold: serialize requested but persistence \
+                   bundle has no serializer (internal invariant violated)"
   in
   let deser_acc j =
     match deserialize_acc with
     | Some f -> f j
-    | None -> assert false
+    | None ->
+      invalid_arg "window_fold: deserialize requested but persistence \
+                   bundle has no deserializer (internal invariant violated)"
   in
 
   (* Backend-ключ для (user_key, start, stop). Используем
@@ -603,11 +650,14 @@ let count_window
         (* watermark несёт только время — пересоздаём в выходном типе *)
         Some (Mf_event.wm wm)
       | Some (Mf_event.Retract _) ->
-        (* retract входного типа в count-окне не транслируется
-           (значение чужого типа) — пропускаем *)
+        (* Count-окна группируют по ЧИСЛУ прибывших событий, а не по
+           значениям. Retract («убрать событие») для такого окна не
+           имеет смысла — окно определяется порядком прибытия, а не
+           содержимым. Документированное ограничение, не TODO. *)
         pull ()
       | Some (Mf_event.Update _) ->
-        (* Update тоже не транслируется в count-окно (Phase 1 fallback) *)
+        (* Update тоже не транслируется в count-окно по той же
+           причине (см. Retract выше) — count не зависит от значений. *)
         pull ()
       | Some (Mf_event.Data (v, _)) ->
         push_value (K.key v) v;
@@ -676,11 +726,33 @@ let global_window
         Hashtbl.reset buffers;
         if Queue.is_empty out then None else Some (Queue.pop out)
       | Some (Mf_event.Watermark wm) -> Some (Mf_event.wm wm)
-      | Some (Mf_event.Retract _) -> pull ()
-      | Some (Mf_event.Update _) ->
-        (* Phase 1 fallback: Window не умеет retract на input,
-           аналогично Update игнорируется. Phase 2/3 добавит native
-           handling через retractable Agg.t. *)
+      | Some (Mf_event.Retract (v, _)) ->
+        (* global_window хранит буфер-список per ключ — убираем
+           первое вхождение v. Не триггерим (retract уменьшает буфер,
+           не повод для fire). *)
+        let k = K.key v in
+        (match Hashtbl.find_opt buffers k with
+         | None -> ()
+         | Some buf -> Hashtbl.replace buffers k (remove_first v buf));
+        pull ()
+      | Some (Mf_event.Update { old; new_value; _ }) ->
+        (* Атомарная коррекция: убрать old, добавить new в буфер.
+           Проверяем триггер на новом размере буфера (new может
+           триггернуть fire так же как Data). *)
+        let k = K.key new_value in
+        Hashtbl.remove clean k;
+        let buf0 = match Hashtbl.find_opt buffers k with
+          | Some b -> remove_first old b | None -> [] in
+        let buf = new_value :: buf0 in
+        (match trigger ~count:(List.length buf) ~last:new_value with
+         | Continue -> Hashtbl.replace buffers k buf
+         | Fire ->
+           Queue.push (Mf_event.data (k, List.rev buf) 0) out;
+           Hashtbl.replace buffers k buf;
+           Hashtbl.replace clean k ()
+         | FireAndPurge ->
+           Queue.push (Mf_event.data (k, List.rev buf) 0) out;
+           Hashtbl.replace buffers k []);
         pull ()
       | Some (Mf_event.Data (v, _)) ->
         let k = K.key v in
@@ -785,11 +857,18 @@ let session_window
         close_ready wm;
         Queue.push (Mf_event.wm wm) out;
         pull ()
-      | Some (Mf_event.Retract _) -> pull ()
-      | Some (Mf_event.Update _) ->
-        (* Phase 1 fallback: Window не умеет retract на input,
-           аналогично Update игнорируется. Phase 2/3 добавит native
-           handling через retractable Agg.t. *)
+      | Some (Mf_event.Retract _) ->
+        (* Session-окна определяются временной близостью значений
+           (gap-based merging). Убрать значение может изменить
+           границы сессии [s_start, s_last] или даже РАСЩЕПИТЬ
+           сессию на две. Это не простая list-операция — пришлось
+           бы пересчитывать merging. Документированное ограничение:
+           session_window не поддерживает retract на input. *)
+        pull ()
+      | Some (Mf_event.Update { new_value; ts; _ }) ->
+        (* Update: conservative best-effort — добавляем new_value
+           как Data. old НЕ убираем (см. ограничение Retract выше). *)
+        add_event (K.key new_value) ts new_value;
         pull ()
       | Some (Mf_event.Data (v, t)) ->
         add_event (K.key v) t v;
@@ -838,11 +917,22 @@ let window_instrumented
         ) !to_close;
         Queue.push (Mf_event.wm wm) out;
         pull ()
-      | Some (Mf_event.Retract _) -> pull ()
-      | Some (Mf_event.Update _) ->
-        (* Phase 1 fallback: Window не умеет retract на input,
-           аналогично Update игнорируется. Phase 2/3 добавит native
-           handling через retractable Agg.t. *)
+      | Some (Mf_event.Retract (v, t)) ->
+        (* instrumented window хранит списки — убираем v из окон. *)
+        List.iter (fun (s, stop) ->
+          let mk = (K.key v, s, stop) in
+          match Hashtbl.find_opt tbl mk with
+          | None -> ()
+          | Some vs -> Hashtbl.replace tbl mk (remove_first v vs)
+        ) (assign spec t);
+        pull ()
+      | Some (Mf_event.Update { old; new_value; ts = t }) ->
+        (* Атомарная коррекция: убрать old, добавить new. *)
+        List.iter (fun (s, stop) ->
+          let mk = (K.key new_value, s, stop) in
+          let existing = Option.value ~default:[] (Hashtbl.find_opt tbl mk) in
+          Hashtbl.replace tbl mk (new_value :: remove_first old existing)
+        ) (assign spec t);
         pull ()
       | Some (Mf_event.Data (v,t)) ->
         List.iter (fun (s, stop) ->

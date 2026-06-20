@@ -102,12 +102,14 @@ let process_keyed
   let ser_st s =
     match serialize_state with
     | Some f -> f s
-    | None -> assert false
+    | None -> invalid_arg "process_keyed: serialize requested but no \
+                serializer in persistence bundle (invariant violated)"
   in
   let deser_st j =
     match deserialize_state with
     | Some f -> f j
-    | None -> assert false
+    | None -> invalid_arg "process_keyed: deserialize requested but no \
+                deserializer in persistence bundle (invariant violated)"
   in
 
   let timers_for_key timers key =
