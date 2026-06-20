@@ -465,3 +465,15 @@
  (libraries miniflink)
  (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
  (modules test_process_keyed_spec))
+
+(test
+ (name test_window_agg_retract)
+ (libraries miniflink)
+ (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
+ (modules test_window_agg_retract))
+
+(test
+ (name test_atomic_update_e2e)
+ (libraries miniflink)
+ (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
+ (modules test_atomic_update_e2e))

@@ -253,6 +253,7 @@ val window_fold :
   ?serialize_acc:('acc -> Yojson.Safe.t) ->
   ?deserialize_acc:(Yojson.Safe.t -> 'acc) ->
   ?persistence:'acc Persistence_backend.persist ->
+  ?remove:('acc -> 'a -> 'acc) ->
   win_spec ->
   init:(unit -> 'acc) ->
   add:('acc -> 'a -> 'acc) ->

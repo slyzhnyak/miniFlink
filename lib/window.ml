@@ -109,8 +109,9 @@ let window
   let emit_data k stop vs =
     incr n_emitted;
     Queue.push (Mf_event.data (k, List.rev vs) stop) out in
-  let emit_retract k stop vs =
-    Queue.push (Mf_event.retract (k, List.rev vs) stop) out in
+  let emit_update k stop old_vs new_vs =
+    Queue.push (Mf_event.update
+                  (k, List.rev old_vs) (k, List.rev new_vs) stop) out in
   fun () ->
     let rec pull () =
       if not (Queue.is_empty out) then Some (Queue.pop out) else
@@ -183,11 +184,12 @@ let window
           | Some (Open vs) ->
             Hashtbl.replace tbl mk (Open (v :: vs))
           | Some (Fired vs) ->
-            (* Late data в пределах allowed_lateness: переоткрываем окно.
-               Retract старого результата, Data нового. *)
-            emit_retract (K.key v) stop vs;
+            (* Phase 3 atomic: late data в пределах allowed_lateness —
+               эмитим ОДИН Update event вместо пары Retract+Data,
+               чтобы downstream snapshot-операторы (keyed_join) не
+               видели промежуточный None flicker. *)
             let vs' = v :: vs in
-            emit_data (K.key v) stop vs';
+            emit_update (K.key v) stop vs vs';
             Hashtbl.replace tbl mk (Fired vs')
         ) (assign spec t);
         pull ()
@@ -232,6 +234,7 @@ let window_fold
     ?(serialize_acc : (acc -> Yojson.Safe.t) option)
     ?(deserialize_acc : (Yojson.Safe.t -> acc) option)
     ?(persistence : acc Persistence_backend.persist option)
+    ?(remove : (acc -> a -> acc) option)
     (spec : win_spec)
     ~(init : unit -> acc)
     ~(add  : acc -> a -> acc)
@@ -274,7 +277,12 @@ let window_fold
   let tbl : (win_key, acc fold_state) Hashtbl.t = Hashtbl.create 4096 in
   let out : (string * acc) Mf_event.t Queue.t = Queue.create () in
   let emit_data k stop acc = Queue.push (Mf_event.data (k, acc) stop) out in
-  let emit_retract k stop acc = Queue.push (Mf_event.retract (k, acc) stop) out in
+  (* Phase 3: эмитим atomic Update вместо пары Retract+Data при
+     late-correction. Downstream видит ОДНО событие, нет flicker'а
+     через None в snapshot-based операторах (keyed_join). *)
+  let emit_update k stop old_acc new_acc =
+    Queue.push (Mf_event.update (k, old_acc) (k, new_acc) stop) out
+  in
 
   (* ════════════════════════════════════════════════════════════════
      PERSISTENCE LAYER
@@ -462,13 +470,32 @@ let window_fold
         persist_all ();
         Queue.push (Mf_event.wm wm) out;
         pull ()
-      | Some (Mf_event.Retract _) -> pull ()
+      | Some (Mf_event.Retract (v, t)) ->
+        (* Phase 2: если remove передан, применяем его к окнам куда
+           попадает (K.key v, t). Без remove — drop (backwards compat). *)
+        (match remove with
+         | None -> pull ()
+         | Some rem ->
+           List.iter (fun (s, stop) ->
+             let mk = (K.key v, s, stop) in
+             match Hashtbl.find_opt tbl mk with
+             | None -> ()  (* окна нет — retract на пустой стейт игнорируется *)
+             | Some (FOpen (acc, nonempty)) ->
+               Hashtbl.replace tbl mk (FOpen (rem acc v, nonempty))
+             | Some (FFired (acc, _nonempty)) ->
+               (* Phase 3 atomic: late retract применяет remove и
+                  эмитит ОДИН Update event (был Retract+Data пара). *)
+               let new_acc = rem acc v in
+               emit_update (K.key v) stop acc new_acc;
+               Hashtbl.replace tbl mk (FFired (new_acc, true))
+           ) (assign spec t);
+           pull ())
       | Some (Mf_event.Update _) ->
-        (* Phase 1 fallback: Window не умеет retract на input,
-           аналогично Update игнорируется. Phase 2/3 добавит native
-           handling через retractable Agg.t. *)
+        (* Phase 1 fallback: Update раскладывается на Retract+Data
+           но window_fold его пока обрабатывает только если remove
+           есть. Phase 3 даст native handling. *)
         pull ()
-      | Some (Mf_event.Data (v,t)) ->
+      | Some (Mf_event.Data (v, t)) ->
         List.iter (fun (s, stop) ->
           let mk = (K.key v, s, stop) in
           match Hashtbl.find_opt tbl mk with
@@ -477,10 +504,10 @@ let window_fold
           | Some (FOpen (acc, _)) ->
             Hashtbl.replace tbl mk (FOpen (add acc v, true))
           | Some (FFired (acc, _)) ->
-            (* late data: сворачиваем в сохранённый acc, пере-эмитим *)
-            emit_retract (K.key v) stop acc;
+            (* Phase 3 atomic: late data применяет add и эмитит
+               ОДИН Update event (был Retract+Data пара). *)
             let acc' = add acc v in
-            emit_data (K.key v) stop acc';
+            emit_update (K.key v) stop acc acc';
             Hashtbl.replace tbl mk (FFired (acc', true))
         ) (assign spec t);
         pull ()

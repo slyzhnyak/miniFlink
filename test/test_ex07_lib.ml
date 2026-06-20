@@ -48,7 +48,13 @@ let () =
   check "median_rssi pipeline produces locations" (List.length location_data > 0);
   let retracts = List.filter (function
     | Mf_event.Retract _ -> true | _ -> false) locations in
-  check "late packets cause retractions" (List.length retracts > 0);
+  let updates = List.filter (function
+    | Mf_event.Update _ -> true | _ -> false) locations in
+  (* Phase 3: late packets теперь эмитят Update вместо пары Retract+Data.
+     Так что проверяем что либо retract есть, либо update есть — оба
+     показывают что late correction обработана. *)
+  check "late packets cause corrections (retracts or updates)"
+    (List.length retracts + List.length updates > 0);
 
   (* Пайплайн алертов *)
   let alerts =

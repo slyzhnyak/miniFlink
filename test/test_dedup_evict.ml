@@ -86,9 +86,11 @@ let test_dedup_passes_late_drops_duplicate () =
   (* отделим Data и Retract — retract пересчитал старое окно *)
   let datas = List.filter (function Mf_event.Data _ -> true | _ -> false) out in
   let retracts = List.filter (function Mf_event.Retract _ -> true | _ -> false) out in
-  (* окно [0,60): без дубликата 1 событие (ts=10), но опоздавший ts=20 → пересчёт до 2 *)
-  check "duplicate dropped, late packet caused retract"
-    (List.length retracts >= 1);
+  let updates = List.filter (function Mf_event.Update _ -> true | _ -> false) out in
+  (* окно [0,60): без дубликата 1 событие (ts=10), но опоздавший ts=20 → пересчёт до 2.
+     Phase 3: пересчёт теперь эмитит Update, не Retract+Data пару. *)
+  check "duplicate dropped, late packet caused correction (retract or update)"
+    (List.length retracts + List.length updates >= 1);
   check "some windows emitted"
     (List.length datas >= 1)
 
