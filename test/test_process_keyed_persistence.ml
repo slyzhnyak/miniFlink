@@ -73,9 +73,9 @@ let () =
   ] in
   let stream2 = events2 |> Stream.of_list
     |> Pipe.process_keyed (module Int_keyed)
-         ~backend ~backend_name:"counter_test"
-         ~serialize_state:counter_state_to_json
-         ~deserialize_state:counter_state_of_json
+         ~persistence:{ Persistence_backend.backend = backend;
+         name = "counter_test"; serialize = counter_state_to_json;
+         deserialize = counter_state_of_json }
          ~init:(fun () -> { count = 0 })
          ~on_event:(fun ctx _key st _ev ->
            st.count <- st.count + 1;
@@ -105,25 +105,6 @@ let () =
       | _ -> fail "state not assoc")
    | _ -> fail "json not assoc");
 
-  (* ── 3. Missing parameter → Invalid_argument ───────────────── *)
-  Printf.printf "\n-- 3. Missing parameter raises\n";
-
-  let tbl_x = Hashtbl.create 4 in
-  let backend_x = Persistence_backend.of_memory tbl_x in
-  (try
-    let _s = Pipe.process_keyed (module Int_keyed)
-      ~backend:backend_x
-      ~serialize_state:counter_state_to_json
-      ~deserialize_state:counter_state_of_json
-      (* backend_name отсутствует *)
-      ~init:(fun () -> { count = 0 })
-      ~on_event:(fun _ _ _ _ -> ())
-      ~on_timer:(fun _ _ _ _ _ -> ())
-      Stream.empty in
-    fail "should have raised"
-  with Invalid_argument msg ->
-    pass (Printf.sprintf "raised: %s"
-            (String.sub msg 0 (min 60 (String.length msg)))));
 
   (* ── 4. Restore state ──────────────────────────────────────── *)
   Printf.printf "\n-- 4. Restore: new instance continues counter\n";
@@ -139,9 +120,9 @@ let () =
   ] in
   let s1 = p1 |> Stream.of_list
     |> Pipe.process_keyed (module Int_keyed)
-         ~backend:backend3 ~backend_name:"restore_test"
-         ~serialize_state:counter_state_to_json
-         ~deserialize_state:counter_state_of_json
+         ~persistence:{ Persistence_backend.backend = backend3;
+         name = "restore_test"; serialize = counter_state_to_json;
+         deserialize = counter_state_of_json }
          ~init:(fun () -> { count = 0 })
          ~on_event:(fun ctx _key st _ev ->
            st.count <- st.count + 1;
@@ -163,9 +144,9 @@ let () =
   ] in
   let s2 = p2 |> Stream.of_list
     |> Pipe.process_keyed (module Int_keyed)
-         ~backend:backend3 ~backend_name:"restore_test"
-         ~serialize_state:counter_state_to_json
-         ~deserialize_state:counter_state_of_json
+         ~persistence:{ Persistence_backend.backend = backend3;
+         name = "restore_test"; serialize = counter_state_to_json;
+         deserialize = counter_state_of_json }
          ~init:(fun () -> { count = 0 })
          ~on_event:(fun ctx _key st _ev ->
            st.count <- st.count + 1;
@@ -197,9 +178,9 @@ let () =
   ] in
   let s1 = p1 |> Stream.of_list
     |> Pipe.process_keyed (module Int_keyed)
-         ~backend:backend4 ~backend_name:"timer_test"
-         ~serialize_state:counter_state_to_json
-         ~deserialize_state:counter_state_of_json
+         ~persistence:{ Persistence_backend.backend = backend4;
+         name = "timer_test"; serialize = counter_state_to_json;
+         deserialize = counter_state_of_json }
          ~init:(fun () -> { count = 0 })
          ~on_event:(fun ctx _key _st _ev ->
            ctx.set_event_timer 10_000)
@@ -227,9 +208,9 @@ let () =
   let p2 = [ Mf_event.wm 15_000 ] in
   let s2 = p2 |> Stream.of_list
     |> Pipe.process_keyed (module Int_keyed)
-         ~backend:backend4 ~backend_name:"timer_test"
-         ~serialize_state:counter_state_to_json
-         ~deserialize_state:counter_state_of_json
+         ~persistence:{ Persistence_backend.backend = backend4;
+         name = "timer_test"; serialize = counter_state_to_json;
+         deserialize = counter_state_of_json }
          ~init:(fun () -> { count = 0 })
          ~on_event:(fun _ _ _ _ -> ())
          ~on_timer:(fun _ctx _key _st _t _kind ->

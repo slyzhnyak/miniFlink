@@ -39,10 +39,11 @@ let voltage_window ?backend events =
          type t = Domain.packet
          let key (p : Domain.packet) = p.lamp
        end)
-       ?backend
-       ?backend_name:(if backend <> None then Some "voltage_e2e" else None)
-       ?serialize_acc:(if backend <> None then Some voltage_acc_to_json else None)
-       ?deserialize_acc:(if backend <> None then Some voltage_acc_of_json else None)
+       ?persistence:(Option.map (fun bk ->
+           { Persistence_backend.backend = bk;
+             name = "voltage_e2e";
+             serialize = (voltage_acc_to_json);
+             deserialize = (voltage_acc_of_json) }) backend)
        ~allowed_lateness:(Time.seconds 30)
        (Pipe.sliding (Time.seconds 60) (Time.seconds 15))
        ~init:(fun () -> 0)

@@ -62,10 +62,9 @@ let () =
   let stream2 =
     events2 |> Stream.of_list
     |> Item.silence_age
-         ~backend
-         ~backend_name:"test_no_packets"
-         ~serialize_key:ser_key
-         ~deserialize_key:deser_key
+         ~persistence:{ Persistence_backend.backend = backend;
+         name = "test_no_packets"; serialize = ser_key;
+         deserialize = deser_key }
          ~by:(fun k -> k) ~tick:(Time.seconds 10) in
   let _ = collect_ages stream2 in
 
@@ -90,23 +89,6 @@ let () =
        (fire_at = 10000 || fire_at = 40000)
    | _ -> fail "json not assoc");
 
-  (* ── 3. Missing parameters → Invalid_argument ─────────────── *)
-  Printf.printf "\n-- 3. Missing parameter raises\n";
-
-  let tbl_x = Hashtbl.create 4 in
-  let backend_x = Persistence_backend.of_memory tbl_x in
-  (* backend есть, backend_name нет *)
-  (try
-    let _s = Item.silence_age
-      ~backend:backend_x
-      ~serialize_key:ser_key
-      ~deserialize_key:deser_key
-      ~by:(fun k -> k) ~tick:(Time.seconds 10)
-      Stream.empty in
-    fail "should have raised Invalid_argument"
-  with Invalid_argument msg ->
-    pass (Printf.sprintf "raised: %s"
-            (String.sub msg 0 (min 60 (String.length msg)))));
 
   (* ── 4. Restore: state переживает создание нового instance'а  *)
   Printf.printf "\n-- 4. Restore: new silence_age picks up state\n";
@@ -123,10 +105,9 @@ let () =
   ] in
   let s1 = p1 |> Stream.of_list
     |> Item.silence_age
-         ~backend:backend3
-         ~backend_name:"recovery_test"
-         ~serialize_key:ser_key
-         ~deserialize_key:deser_key
+         ~persistence:{ Persistence_backend.backend = backend3;
+         name = "recovery_test"; serialize = ser_key;
+         deserialize = deser_key }
          ~by:(fun k -> k) ~tick:(Time.seconds 10) in
   let pairs1 = collect_ages s1 in
   check "phase 1: 1 emission (zero only, timer not fired)"
@@ -138,10 +119,9 @@ let () =
   let p2 = [ Mf_event.wm 15_000 ] in
   let s2 = p2 |> Stream.of_list
     |> Item.silence_age
-         ~backend:backend3
-         ~backend_name:"recovery_test"
-         ~serialize_key:ser_key
-         ~deserialize_key:deser_key
+         ~persistence:{ Persistence_backend.backend = backend3;
+         name = "recovery_test"; serialize = ser_key;
+         deserialize = deser_key }
          ~by:(fun k -> k) ~tick:(Time.seconds 10) in
   let pairs2 = collect_ages s2 in
   Printf.printf "  phase 2: %d emissions: %s\n"
@@ -166,13 +146,15 @@ let () =
 
   let _ = collect_ages (p_first |> Stream.of_list
     |> Item.silence_age
-         ~backend:backend4 ~backend_name:"alpha"
-         ~serialize_key:ser_key ~deserialize_key:deser_key
+         ~persistence:{ Persistence_backend.backend = backend4;
+         name = "alpha"; serialize = ser_key;
+         deserialize = deser_key }
          ~by:(fun k -> k) ~tick:(Time.seconds 10)) in
   let _ = collect_ages (p_second |> Stream.of_list
     |> Item.silence_age
-         ~backend:backend4 ~backend_name:"beta"
-         ~serialize_key:ser_key ~deserialize_key:deser_key
+         ~persistence:{ Persistence_backend.backend = backend4;
+         name = "beta"; serialize = ser_key;
+         deserialize = deser_key }
          ~by:(fun k -> k) ~tick:(Time.seconds 10)) in
 
   let keys = Hashtbl.fold (fun k _ a -> k :: a) tbl4 [] in
