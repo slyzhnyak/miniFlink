@@ -26,6 +26,18 @@ val put_version :
     значения. *)
 val as_of : ('k, 'v) versioned -> 'k -> Time.t -> 'v option
 
+(** [prune_versions_before tbl ~before] — обрезать историю версий,
+    ограничивая рост памяти. Для каждого ключа оставляет версии с
+    [valid_from >= before] плюс одну непосредственно предшествующую
+    (она ещё актуальна для [as_of] на момент [before]). Версии старше
+    недостижимы для любого [as_of ts] с [ts >= before].
+
+    Вызывать когда main-поток больше не запросит [as_of] для
+    [ts < before] (например [before = min_main_watermark - max_lateness]).
+    Без обрезки история версий растёт неограниченно у long-running
+    temporal join. *)
+val prune_versions_before : ('k, 'v) versioned -> before:Time.t -> unit
+
 (** [temporal_join ~key_main ~key_upd ~valid_from ~merge ~updates main]
     обогащает каждое событие [main] значением справочника, актуальным на
     event-time события.
