@@ -91,15 +91,25 @@ let run_parallel
      Блокирующий pop: нет busy-wait, нет преждевременного завершения.
      pop возвращает None только когда канал закрыт И пуст → воркер кончил. *)
   let mu_sink = Mutex.create () in
+  (* sink — пользовательский callback; вызывается из N collector-потоков
+     под общим mu_sink. Если sink бросит, mutex обязан освободиться,
+     иначе остальные collector-потоки навсегда зависнут на нём
+     (deadlock). Совпадает с защитой в parallel_v5. *)
+  let safe_sink v =
+    Mutex.lock mu_sink;
+    (match sink v with
+     | () -> Mutex.unlock mu_sink
+     | exception e -> Mutex.unlock mu_sink; raise e)
+  in
   let collector_threads = Array.init workers (fun i ->
     Thread.create (fun () ->
       let rec loop () =
         match Channel.pop out_chans.(i) with
         | None -> ()                       (* канал закрыт и пуст *)
         | Some (Mf_event.Data (v, _)) ->
-          Mutex.lock mu_sink; sink v; Mutex.unlock mu_sink; loop ()
+          safe_sink v; loop ()
         | Some (Mf_event.Update { new_value = v; _ }) ->
-          Mutex.lock mu_sink; sink v; Mutex.unlock mu_sink; loop ()
+          safe_sink v; loop ()
         | Some (Mf_event.Watermark _) | Some (Mf_event.Retract _) ->
           loop ()
       in loop ()
