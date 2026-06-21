@@ -186,7 +186,7 @@ type ('key, 'v, 'alert) state =
 
 type pending_timer = {
   t_fire_at : Time.t;
-  t_key     : string;   (* key serialized: используем (Hashtbl.hash) → строку  *)
+  t_key     : string;   (* key, сериализованный через key_to_string (см. ниже) *)
 }
 
 (* Для простоты используем массив, который держим отсортированным.
@@ -221,12 +221,29 @@ end
    of_stream: реализация
    ──────────────────────────────────────────────────────────────────── *)
 
-(* Сериализация ключа для использования в строковом Hashtbl таймеров.
-   Используем Hashtbl.hash; чтобы избежать коллизий в реальном коде
-   с произвольным 'key, дополнительно пишем в state-таблицу с
-   тем же ключом — это даёт страховку. *)
+(* Сериализация ключа в строку для строковых Hashtbl (состояние +
+   таймеры).
+
+   ВАЖНО — почему НЕ Hashtbl.hash: Hashtbl.hash даёт 30-битный хеш,
+   поэтому два разных ключа могут дать одинаковую строку. Тогда их
+   записи в [states]/[last_event_ts] схлопываются в одну ячейку:
+   второй Hashtbl.replace затирает первый, и одна state-машина молча
+   подменяет другую (silent state corruption). Хранение исходного
+   key рядом со state НЕ спасает — коллизия в самом ключе таблицы.
+
+   Поэтому используем Marshal (полная сериализация значения) +
+   128-битный MD5-дайджест: детерминированно, без параметров от
+   пользователя, и пространство коллизий 2^128 вместо 2^30 — то есть
+   на любом реальном числе ключей коллизий нет. Состояние ключа —
+   замкнуто-свободные данные, поэтому Marshal на нём безопасен (та же
+   причина, по которой ортогональная persistence сериализует
+   состояние Marshal'ом).
+
+   Был баг R3: использовался Hashtbl.hash; пара ключей с одинаковым
+   30-битным хешем делила одну state-машину. Тест:
+   test/test_trigger_key_collision.ml. *)
 let key_to_string : 'k -> string = fun k ->
-  string_of_int (Hashtbl.hash k)
+  Digest.string (Marshal.to_string k []) |> Digest.to_hex
 
 let of_stream
     (type k v a)
@@ -239,7 +256,10 @@ let of_stream
   let timers = Timers.create () in
   let out_buf : a Mf_event.t Queue.t = Queue.create () in
 
-  let key_to_string (key : k) : string = string_of_int (Hashtbl.hash key) in
+  (* Тот же детерминированный ключ, что и модульный key_to_string выше
+     (см. подробный комментарий там о том, почему НЕ Hashtbl.hash). *)
+  let key_to_string (key : k) : string =
+    Digest.string (Marshal.to_string key []) |> Digest.to_hex in
 
   (* ════════════════════════════════════════════════════════════════
      PERSISTENCE — ортогональная, через Managed_state.
