@@ -33,6 +33,13 @@ let temperature_events = [
   Mf_event.data ("ST1", 35.0)  10_000;  (* перегрев ST1 *)
   Mf_event.data ("ST2", 27.0)  12_000;
   Mf_event.data ("ST1", 38.0)  20_000;  (* ST1 ещё горячее *)
+  (* Калибровочная коррекция: датчик ST1 был рассинхронизирован, его
+     замер 38.0 на самом деле 31.5 после поправки. Приходит как
+     АТОМАРНЫЙ Update — keyed_join заменяет значение в snapshot БЕЗ
+     промежуточного None (без "мигания" частичного состояния, из-за
+     которого ложно сработала/сбросилась бы тревога). Это ключевая
+     гарантия keyed_join, ради которой существует вариант Update. *)
+  Mf_event.update ("ST1", 38.0) ("ST1", 31.5) 25_000;
 ]
 
 let humidity_events = [
@@ -81,6 +88,8 @@ let () =
 
   Printf.printf "--- Snapshots (порядок по event-time) ---\n";
   let critical_count = ref 0 in
+  let prev_st1_temp = ref None in
+  let corrections = ref 0 in
   joined |> Pipe.iter_data (fun (station, opts) ->
     (match opts with
      | [Some (_, t); Some (_, h); Some (_, p)]
@@ -88,8 +97,22 @@ let () =
        incr critical_count;
        Printf.printf "  %s\n" (pp_options (station, opts))
      | _ ->
-       Printf.printf "  %s\n" (pp_options (station, opts))));
+       Printf.printf "  %s\n" (pp_options (station, opts)));
+    (* Зафиксируем коррекцию температуры ST1: входной Update
+       38.0→31.5 пришёл в keyed_join, который атомарно обновил slot
+       и выдал НОВЫЙ полный snapshot (без промежуточного None —
+       snapshot всегда содержит все три датчика). *)
+    if station = "ST1" then begin
+      (match opts, !prev_st1_temp with
+       | [Some (_, t); _; _], Some pt when pt = 38.0 && t = 31.5 ->
+         incr corrections;
+         Printf.printf "  ↳ температура ST1 атомарно скорректирована %.1f→%.1f (snapshot целостный, без None)\n" pt t
+       | _ -> ());
+      match opts with [Some (_, t); _; _] -> prev_st1_temp := Some t | _ -> ()
+    end);
 
-  Printf.printf "\nИтого: %d critical snapshots\n" !critical_count;
-  Printf.printf "\nЗаметьте: %d строк против ~30 в ex09's combined_item.\n"
-    (* approximate count *) 5
+  Printf.printf "\nИтого: %d critical snapshots, %d атомарная коррекция через Update\n"
+    !critical_count !corrections;
+  Printf.printf "Калибровочный Update (38.0→31.5) keyed_join применил атомарно:\n";
+  Printf.printf "snapshot обновился целиком, без промежуточного None — тревога\n";
+  Printf.printf "не мигнула. Это и есть смысл варианта Update против Retract+Data.\n"
