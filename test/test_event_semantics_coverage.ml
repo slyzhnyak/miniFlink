@@ -142,4 +142,62 @@ let () =
     (String.concat " " (List.map (fun (o,n) -> Printf.sprintf "%d→%d" o n) updates));
   check "flat_map zips: [2→3; 4→6]" (updates = [(2,3); (4,6)]);
 
+  (* ════════════════════════════════════════════════════════════
+     6. WINDOW_AGG — noop-коррекция подавляется (late data, тот же результат)
+     ════════════════════════════════════════════════════════════ *)
+  Printf.printf "\n-- 6. window_agg: noop late correction is suppressed\n";
+  let module WK = struct type t = int let key _ = "k" end in
+  (* sum: late Data 0 не меняет сумму → не должно быть Update{100→100} *)
+  let events = [
+    Mf_event.data 100 0;
+    Mf_event.wm 2000;          (* закрывает окно, emit Data sum=100 *)
+    Mf_event.data 0 500;       (* late, sum 100+0=100, результат тот же *)
+    Mf_event.wm 3000;
+  ] in
+  let out = events |> Stream.of_list
+    |> Pipe.window_agg (module WK) ~allowed_lateness:5000
+         (Pipe.tumbling 1000) Agg.(sum (fun x -> float_of_int x))
+    |> collect in
+  let (d, u, _, _) = classify out in
+  Printf.printf "  output: Data=%d Update=%d\n" d u;
+  check "sum+0 late data: no noop Update (just initial Data)"
+    (d = 1 && u = 0);
+
+  (* median: late значение между существующими → median тот же *)
+  let module WK2 = struct type t = float let key _ = "k" end in
+  let events = [
+    Mf_event.data 10.0 0;
+    Mf_event.data 20.0 100;
+    Mf_event.wm 6000;          (* median(10,20)=15 *)
+    Mf_event.data 15.0 500;    (* late, median(10,15,20)=15 — тот же! *)
+    Mf_event.wm 7000;
+  ] in
+  let out = events |> Stream.of_list
+    |> Pipe.window_agg (module WK2) ~allowed_lateness:10000
+         (Pipe.tumbling 5000) Agg.(median (fun x -> x))
+    |> collect in
+  let (_, u, _, _) = classify out in
+  Printf.printf "  median late same-value: Update=%d\n" u;
+  check "median unchanged by late value: no noop Update" (u = 0);
+
+  (* контроль: late data которое РЕАЛЬНО меняет результат → Update есть *)
+  let events = [
+    Mf_event.data 10.0 0;
+    Mf_event.data 20.0 100;
+    Mf_event.wm 6000;          (* median=15 *)
+    Mf_event.data 100.0 500;   (* late, median(10,20,100)=20 — изменился! *)
+    Mf_event.wm 7000;
+  ] in
+  let out = events |> Stream.of_list
+    |> Pipe.window_agg (module WK2) ~allowed_lateness:10000
+         (Pipe.tumbling 5000) Agg.(median (fun x -> x))
+    |> collect in
+  let real_updates = List.filter_map (function
+    | Mf_event.Update { old = (_, o); new_value = (_, n); _ } -> Some (o, n)
+    | _ -> None) out in
+  Printf.printf "  median changed by late value: %d real update(s)\n"
+    (List.length real_updates);
+  check "median changed by late value: emits real Update (15→20)"
+    (real_updates = [(Some 15.0, Some 20.0)]);
+
   Printf.printf "\nDone.\n"

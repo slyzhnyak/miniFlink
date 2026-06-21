@@ -300,7 +300,21 @@ let window_agg
   Agg.with_parts2 agg { Agg.k2 = fun init add remove finish ->
     window_fold (module K) ?latency ?allowed_lateness ?remove
       spec ~init ~add upstream
-    |> emap (fun (key, acc) -> (key, finish acc)) }
+    |> Stream.flat_map (function
+       | Mf_event.Update { old = (k, old_acc); new_value = (_, new_acc); ts } ->
+         (* finish обе стороны. Если ВИДИМЫЙ результат не изменился
+            (late Data/Retract не повлияло на агрегат — sum+0, median
+            с тем же значением, max меньшим), подавляем noop Update:
+            downstream иначе обработал бы фиктивную коррекцию
+            (keyed_join сделал бы лишний snapshot). Сравниваем ПОСЛЕ
+            finish — acc может меняться при неизменном результате
+            (median: список растёт, медиана та же). *)
+         let old_r = finish old_acc and new_r = finish new_acc in
+         if old_r = new_r then []
+         else [Mf_event.update (k, old_r) (k, new_r) ts]
+       | Mf_event.Data ((key, acc), ts) -> [Mf_event.data (key, finish acc) ts]
+       | Mf_event.Retract ((key, acc), ts) -> [Mf_event.retract (key, finish acc) ts]
+       | Mf_event.Watermark _ as w -> [w]) }
 
 (* window_agg_keyed ~by — window_agg с ключом-функцией инлайн. *)
 let window_agg_keyed ~by ?latency ?allowed_lateness spec agg stream =

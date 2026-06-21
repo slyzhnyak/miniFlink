@@ -120,8 +120,12 @@ let window
     incr n_emitted;
     Queue.push (Mf_event.data (k, List.rev vs) stop) out in
   let emit_update k stop old_vs new_vs =
-    Queue.push (Mf_event.update
-                  (k, List.rev old_vs) (k, List.rev new_vs) stop) out in
+    (* Подавляем noop: если список окна не изменился (например retract
+       значения которого там не было — remove_first вернул тот же
+       список), Update{xs→xs} downstream был бы шумом. *)
+    if old_vs <> new_vs then
+      Queue.push (Mf_event.update
+                    (k, List.rev old_vs) (k, List.rev new_vs) stop) out in
   fun () ->
     let rec pull () =
       if not (Queue.is_empty out) then Some (Queue.pop out) else
