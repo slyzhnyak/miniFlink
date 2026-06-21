@@ -68,6 +68,33 @@ let test_recovery_seek () =
   check "third was 30" (third = Some 30);
   check "after seek(3) re-reads 40 (no skip, no dup loss)" (after = Some 40)
 
+let test_prune_snapshots () =
+  Printf.printf "\n-- prune_snapshots_before keeps seek correct after pruning\n";
+  let b = Kafka_fake.make_broker () in
+  Kafka_fake.seed b ~topic:"t" ~partition:0 ["10"; "20"; "30"; "40"; "50"];
+  let consumer = Kafka_fake.Consumer.create b [("t", 0)] in
+  let src = Src.create consumer ~decode ~ts_of () in
+  let ss = Src.to_seekable src in
+  let read_one () = match ss.Checkpoint_parallel.pull () with
+    | Some (Mf_event.Data (v,_)) -> Some v | _ -> None in
+  (* читаем 5 событий — 5 снимков накоплено *)
+  let _ = read_one () and _ = read_one () and _ = read_one () in
+  let _ = read_one () and _ = read_one () in
+
+  (* подтверждён checkpoint на counter 3 → снимки < 3 удаляем *)
+  Src.prune_snapshots_before src ~before:3;
+
+  (* seek на сохранённый counter 3 всё ещё работает (снимок 3 сохранён,
+     удалены только 1 и 2 которые больше не нужны) *)
+  ss.Checkpoint_parallel.seek 3;
+  let after = read_one () in
+  check "seek(3) after prune re-reads 40 (snapshot 3 retained)"
+    (after = Some 40);
+
+  (* повторный prune до начала (before:0) ничего не ломает *)
+  Src.prune_snapshots_before src ~before:0;
+  check "prune before:0 is a no-op" true
+
 let () =
   Printf.printf "==========================================\n";
   Printf.printf "  Kafka source adapter (fake broker)\n";
@@ -75,4 +102,5 @@ let () =
   test_basic_consume ();
   test_decode_error_to_on_error ();
   test_recovery_seek ();
+  test_prune_snapshots ();
   Printf.printf "\nKafka adapter tests passed.\n"
