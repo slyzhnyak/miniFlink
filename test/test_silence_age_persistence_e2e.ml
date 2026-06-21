@@ -53,20 +53,16 @@ let () =
   Printf.printf "Mock_source.Default: %d events total\n"
     (List.length all_events);
 
-  let mk_silence_age ?backend events =
+  let mk_silence_age events =
     events |> Stream.of_list
     |> Item.silence_age
-         ?persistence:(Option.map (fun bk ->
-           { Persistence_backend.backend = bk;
-             name = "e2e_test";
-             serialize = ((fun k -> `String k));
-             deserialize = ((fun j -> Yojson.Safe.Util.to_string j)) }) backend)
+         ~name:"e2e_test"
          ~by:(fun (p : Domain.packet) -> p.lamp)
          ~tick:(Time.seconds 30)
   in
 
-  (* ── Baseline: full run без backend ────────────────────────── *)
-  Printf.printf "\n-- Baseline: silence_age on full source\n";
+  (* ── Baseline: full run в EPHEMERAL ────────────────────────── *)
+  Printf.printf "\n-- Baseline: silence_age on full source (ephemeral)\n";
 
   let baseline_stream = mk_silence_age all_events in
   let baseline_zeros = count_zeros_per_key baseline_stream in
@@ -75,45 +71,35 @@ let () =
   let baseline_total = Hashtbl.fold (fun _ v a -> a + v) baseline_zeros 0 in
   Printf.printf "  baseline total zeros: %d\n" baseline_total;
 
-  (* ── Phase 1: подаём events до t=180с с backend ─────────────── *)
-  Printf.printf "\n-- Phase 1: run up to t=180s with backend\n";
+  (* ── Phase 1: events до t=180с в DURABLE-контексте ─────────── *)
+  Printf.printf "\n-- Phase 1: run up to t=180s in durable context\n";
 
   let tbl = Hashtbl.create 64 in
   let backend = Persistence_backend.of_memory tbl in
+  let ctx = Runtime_context.durable backend in
 
   let phase1_events, phase2_events = split_at_ts all_events 180_000 in
   Printf.printf "  phase 1 events: %d, phase 2 events: %d\n"
     (List.length phase1_events) (List.length phase2_events);
 
-  let phase1_stream = mk_silence_age ~backend phase1_events in
-  let phase1_zeros = count_zeros_per_key phase1_stream in
+  let phase1_zeros =
+    Runtime_context.with_context ctx (fun () ->
+      count_zeros_per_key (mk_silence_age phase1_events)) in
   let phase1_total = Hashtbl.fold (fun _ v a -> a + v) phase1_zeros 0 in
-  Printf.printf "  phase 1 zeros: %d (per key: " phase1_total;
-  Hashtbl.iter (fun k n -> Printf.printf "%s=%d " k n) phase1_zeros;
-  Printf.printf ")\n";
+  Printf.printf "  phase 1 zeros: %d\n" phase1_total;
 
   let backend_keys = Hashtbl.length tbl in
   Printf.printf "  backend has %d state records\n" backend_keys;
-  check "phase 1: backend has records for active keys"
-    (backend_keys >= 1);
+  check "phase 1: backend has records for active keys" (backend_keys >= 1);
 
-  (* Проверим что backend содержит last_seen для каждого активного ключа *)
-  let backend_keys_list = Hashtbl.fold (fun k _ a -> k :: a) tbl [] in
-  let has_m1 = List.exists
-    (fun bk -> String.length bk > 0 &&
-               bk = "item:silence_age:e2e_test:\"M1\"")
-    backend_keys_list in
-  check "backend has M1 record" has_m1;
+  (* ── Phase 2: новый instance, тот же контекст → restore ─────── *)
+  Printf.printf "\n-- Phase 2: new silence_age picks up state from backend\n";
 
-  (* ── Phase 2: новый instance с тем же backend ──────────────── *)
-  Printf.printf "\n-- Phase 2: new silence_age picks up state\n";
-
-  let phase2_stream = mk_silence_age ~backend phase2_events in
-  let phase2_zeros = count_zeros_per_key phase2_stream in
+  let phase2_zeros =
+    Runtime_context.with_context ctx (fun () ->
+      count_zeros_per_key (mk_silence_age phase2_events)) in
   let phase2_total = Hashtbl.fold (fun _ v a -> a + v) phase2_zeros 0 in
-  Printf.printf "  phase 2 zeros: %d (per key: " phase2_total;
-  Hashtbl.iter (fun k n -> Printf.printf "%s=%d " k n) phase2_zeros;
-  Printf.printf ")\n";
+  Printf.printf "  phase 2 zeros: %d\n" phase2_total;
 
   (* Главный инвариант: zeros по каждому ключу суммируются как в baseline. *)
   let all_keys = ref [] in

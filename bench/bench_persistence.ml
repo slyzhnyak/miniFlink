@@ -300,11 +300,7 @@ let run_pipeline ?trigger_bk ?silence_bk ?process_bk ?window_bk
   let silence_stream =
     packet_keyed
     |> Item.silence_age
-         ?persistence:(Option.map (fun bk ->
-           { Persistence_backend.backend = bk;
-             name = "bench_silence";
-             serialize = ((fun k -> `String k));
-             deserialize = ((fun j -> Yojson.Safe.Util.to_string j)) }) silence_bk)
+         ~name:"bench_silence"
          ~by:(fun (p : Domain.packet) -> p.lamp)
          ~tick:(Time.seconds 30) in
 
