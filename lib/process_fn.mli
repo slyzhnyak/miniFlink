@@ -107,37 +107,10 @@ val process_keyed :
     когда state зависит от {e предыдущего} значения и atomic
     rollback важен.
 
-    {b [?backend]} — если передан, [process_keyed] сохраняет
-    per-key state ([st] + event/processing таймеры этого ключа) в
-    [Persistence_backend] на каждое изменение (после [on_event] и
-    [on_timer]). На старте восстанавливает все state'ы и таймеры
-    из backend.
-
-    Требует [?backend_name] (namespace в backend) и
-    [?serialize_state]/[?deserialize_state] для пользовательского
-    типа [st]. Если backend подключён, а параметры отсутствуют —
-    [Invalid_argument].
-
-    {b [?persistence]} — современная альтернатива четырём параметрам
-    выше: единый bundle {!Persistence_backend.persist}. Эквивалентно
-    по семантике. Нельзя смешивать с [?backend] стилем —
-    [Invalid_argument].
-
-    Backend-ключ: ["process_keyed:{backend_name}:{key}"].
-    Значение (JSON):
-    {[
-      {
-        "state":     <serialized 'st>,
-        "ev_timers": [t1, t2, ...],
-        "pt_timers": [t1, t2, ...]
-      }
-    ]}
-
-    {b Ограничения:} Snapshot пишется {b после каждого} [on_event] и
-    [on_timer]. Watermark-based snapshot — TODO.
-
-    Без backend'а — поведение как раньше (state и timers в памяти,
-    теряются при завершении процесса). *)
+    Persistence ортогональна (см. выше про [?name]): per-key state
+    (включая event/processing таймеры) снапшотится в durable-контексте
+    после каждого изменения и восстанавливается на старте; вне
+    durable-контекста — в памяти. Подробно — docs/orthogonal-persistence.md. *)
 
 (** {2 Record-based конструктор}
 
