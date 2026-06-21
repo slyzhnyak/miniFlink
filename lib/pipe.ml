@@ -10,10 +10,35 @@
 (* ── Lift: применить функцию к значению события ─────────── *)
 
 let emap  f = Stream.map   (Mf_event.map_value f)
-let efilt p = Stream.filter (function
-  | Mf_event.Data (v, _) -> p v
-  | Mf_event.Update { new_value = v; _ } -> p v
-  | Mf_event.Watermark _ | Mf_event.Retract _ -> true)
+(* Фильтр с корректной семантикой Update/Retract.
+
+   Простой Stream.filter не годится для Update/Retract, потому что
+   фильтр — это не трансформация, а отбрасывание, и предикат может
+   по-разному реагировать на old и new половины Update. Если просто
+   пропустить Update целиком по p(new), downstream получит коррекцию
+   значения, которое он никогда не видел (его old не прошёл фильтр) —
+   рассогласование состояния.
+
+   Корректная семантика по (p old, p new):
+   - (true,  true)  → Update остаётся (оба видимы downstream)
+   - (false, true)  → Data(new): для downstream это ПОЯВЛЕНИЕ нового
+                      значения, а не коррекция (old он не видел)
+   - (true,  false) → Retract(old): для downstream это ИСЧЕЗНОВЕНИЕ
+                      (new не пройдёт, old надо убрать)
+   - (false, false) → отбрасывается целиком (оба невидимы)
+
+   Retract пропускается только если p(value) — иначе downstream
+   никогда не видел это значение, и retract бессмыслен. *)
+let efilt p = Stream.flat_map (function
+  | Mf_event.Data (v, t) -> if p v then [Mf_event.data v t] else []
+  | Mf_event.Watermark _ as w -> [w]
+  | Mf_event.Retract (v, t) -> if p v then [Mf_event.retract v t] else []
+  | Mf_event.Update { old; new_value; ts } ->
+    (match p old, p new_value with
+     | true,  true  -> [Mf_event.update old new_value ts]
+     | false, true  -> [Mf_event.data new_value ts]      (* появление *)
+     | true,  false -> [Mf_event.retract old ts]         (* исчезновение *)
+     | false, false -> []))
 let eflatmap f = Stream.flat_map (function
   | Mf_event.Watermark _ as w -> [w]
   | Mf_event.Retract (v, t) -> List.map (fun w -> Mf_event.retract w t) (f v)
@@ -275,7 +300,21 @@ let window_agg
   Agg.with_parts2 agg { Agg.k2 = fun init add remove finish ->
     window_fold (module K) ?latency ?allowed_lateness ?remove
       spec ~init ~add upstream
-    |> emap (fun (key, acc) -> (key, finish acc)) }
+    |> Stream.flat_map (function
+       | Mf_event.Update { old = (k, old_acc); new_value = (_, new_acc); ts } ->
+         (* finish обе стороны. Если ВИДИМЫЙ результат не изменился
+            (late Data/Retract не повлияло на агрегат — sum+0, median
+            с тем же значением, max меньшим), подавляем noop Update:
+            downstream иначе обработал бы фиктивную коррекцию
+            (keyed_join сделал бы лишний snapshot). Сравниваем ПОСЛЕ
+            finish — acc может меняться при неизменном результате
+            (median: список растёт, медиана та же). *)
+         let old_r = finish old_acc and new_r = finish new_acc in
+         if old_r = new_r then []
+         else [Mf_event.update (k, old_r) (k, new_r) ts]
+       | Mf_event.Data ((key, acc), ts) -> [Mf_event.data (key, finish acc) ts]
+       | Mf_event.Retract ((key, acc), ts) -> [Mf_event.retract (key, finish acc) ts]
+       | Mf_event.Watermark _ as w -> [w]) }
 
 (* window_agg_keyed ~by — window_agg с ключом-функцией инлайн. *)
 let window_agg_keyed ~by ?latency ?allowed_lateness spec agg stream =

@@ -49,12 +49,20 @@ let () =
   let retracts = List.filter (function
     | Mf_event.Retract _ -> true | _ -> false) locations in
   let updates = List.filter (function
-    | Mf_event.Update _ -> true | _ -> false) locations in
-  (* Phase 3: late packets теперь эмитят Update вместо пары Retract+Data.
-     Так что проверяем что либо retract есть, либо update есть — оба
-     показывают что late correction обработана. *)
-  check "late packets cause corrections (retracts or updates)"
-    (List.length retracts + List.length updates > 0);
+    | Mf_event.Update { old; new_value; _ } -> old <> new_value | _ -> false) locations in
+  (* window_agg подавляет noop-коррекции: late packet эмитит Update
+     только если итоговый результат (top-2 маяков по median RSSI)
+     реально изменился. В этом источнике late-пакеты не меняют top-2
+     (median устойчив к одиночным поздним значениям), поэтому
+     корректное поведение — НОЛЬ corrections, а не Update{x→x}.
+
+     Инвариант: любой эмитнутый Update несёт реальное изменение
+     (old <> new); noop-Update'ов быть не должно. *)
+  check "no noop corrections (every Update changes the result)"
+    (List.for_all (function
+       | Mf_event.Update { old; new_value; _ } -> old <> new_value
+       | _ -> true) locations);
+  ignore retracts; ignore updates;
 
   (* Пайплайн алертов *)
   let alerts =
