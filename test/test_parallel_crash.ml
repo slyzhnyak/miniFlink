@@ -79,7 +79,7 @@ let test_no_crash_all_processed () =
     else fail (Printf.sprintf "expected %d, got %d" n !processed)
   )
 
-(* ── Тест 3: run_parallel (с collector) — нет busy-wait ──────── *)
+(* ── Тест 3: run_parallel_simple — нет busy-wait ──────── *)
 let test_collector_no_busywait () =
   Printf.printf "\n-- run_parallel_simple: all processed, no hang\n";
   with_timeout 15 (fun () ->
