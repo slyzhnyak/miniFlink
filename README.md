@@ -17,7 +17,7 @@ Apache Flink **на одном узле**. Акцент — на чистоте 
 operators, exactly-once (end-to-end: offset, 2PC sink, recovery, durable),
 table/join с TTL (+ temporal as-of join), union потоков, retractions — плюс production-слои
 (DLQ + retry/backoff, graceful shutdown, Prometheus metrics, структурированные
-логи, health, config, RocksDB state). ~4100 строк OCaml, 49 тест-сюит.
+логи, health, config, RocksDB state). ~5700 строк OCaml, 88 тест-сюит.
 
 ## Почему декларативно
 
@@ -99,7 +99,7 @@ variants/            — реализации channel/parallel по версии
 bin/    main.ml        демо pipeline
 examples/              самодостаточные примеры (см. examples/README.md)
 bench/  bench.ml bench_parallel.ml bench_ex07.ml soak.ml
-test/   49 тест-сюит (core, props, invariants, reliability, metrics,
+test/   88 тест-сюит (core, props, invariants, reliability, metrics,
                      retract, sliding, count_window, session_window,
                      global_window, window_fold, agg, union, safe, parallel_retract,
                      side_output, ttl_state, nexmark, watermark_fuzz, timers,
