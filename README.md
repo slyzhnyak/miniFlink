@@ -67,7 +67,7 @@ flowchart TD
 lib/                 — библиотека miniflink
   Ядро (не меняется):
     stream.ml          pull-based поток: unit -> 'a option
-    mf_event.ml        Data | Watermark | Retract
+    mf_event.ml        Data | Watermark | Retract | Update (атомарная коррекция)
     pipe.ml            enrich, window, aggregate, dedup, flat_map
     keyed.ml           type class KEYED — убирает ~key: из операторов
     table.ml           Static | Snapshot таблицы
@@ -194,13 +194,14 @@ dune exec examples/ex07_location/ex07_location.exe  # локация шахтё�
 dune exec bench/bench.exe              # базовый: throughput single + parallel
 dune exec bench/bench_parallel.exe     # параллелизм по ядрам
 dune exec bench/bench_ex07.exe         # большая шахта (1M пакетов, ~90 сек)
+dune exec bench/bench_changed_paths.exe -- 1000000  # filter + group_by под объёмом
 
 # Все тесты (быстрые, входят в CI)
 dune test
 
-# Soak-тест (медленный, вручную): проверка отсутствия утечек памяти
-dune exec bench/soak.exe              # 2M событий
-dune exec bench/soak.exe -- 10000000  # 10M событий
+# Soak-тесты (медленные, вручную): проверка отсутствия утечек памяти
+dune exec bench/soak.exe     -- 5000000  # window/dedup/enrich
+dune exec bench/soak_agg.exe -- 5000000  # group_by/window_agg/filter + late data
 ```
 
 ## Выбор режима
@@ -273,14 +274,16 @@ OCaml 4 на single-thread тоже, но конкретно эти числа �
 
 | Пайплайн                | Время  | Throughput | Heap   | Allocated |
 |-------------------------|--------|------------|--------|-----------|
-| `connectivity_alerts`   | 2.7 с  | 362K ev/s  | 775 MB | 2.4 GB    |
-| `median_rssi`           | 51.8 с | 19K ev/s   | 1.9 GB | 27 GB     |
+| `connectivity_alerts`   | 2.7 с  | 397K ev/s  | ~0.8 GB| 2.4 GB    |
+| `median_rssi`           | 53 с   | 19K ev/s   | 2.0 GB | 33 GB     |
 
 Результаты: 2416 алертов всех типов (252 NoPkt / 204 NoRd / 705 NoMot /
-1217 LowV / 38 SOS), 2.8M событий окон, 180K ретракций от опоздавших
-пакетов. Пайплайн локации значительно медленнее — это цена окон с
-двухуровневой агрегацией (median per beacon → top-2) плюс ретракции;
-именно эту цену скрывал бы бенчмарк на «чистом» потоке без late+dups.
+1217 LowV / 38 SOS), 2.65M событий окон. Опоздавшие пакеты дают
+коррекции в виде **атомарных `Update`** (old→new одним событием), а не
+пар `Retract`+`Data` — downstream не видит промежуточного состояния.
+Пайплайн локации значительно медленнее — это цена окон с двухуровневой
+агрегацией (median per beacon → top-2) плюс коррекции; именно эту цену
+скрывал бы бенчмарк на «чистом» потоке без late+dups.
 
 **Историческая справка**: первоначальные цифры на этой же конфигурации
 были `median_rssi` 84с / 12K ev/s / 70 GB allocated. Миграция
@@ -288,6 +291,14 @@ OCaml 4 на single-thread тоже, но конкретно эти числа �
 ускорение и **−61% аллокаций**. Найдено через направленное профилирование
 (`bench_ops` показал window-механизм 64% времени → `bench_window_ab`
 подтвердил гипотезу A/B-сравнением до изменения lib).
+
+Примечание про `group_by`: его аккумулятор, наоборот, использует
+immutable `Map` (а не `Hashtbl`). Это сознательный выбор: `group_by`
+участвует в коррекциях (window_fold эмитит `Update{old, new}`, где old и
+new обязаны быть независимыми снимками), а mutable `Hashtbl` сделал бы
+их одним объектом и молча терял бы late data. `Map` даёт immutability
+дёшево (O(log n) со структурным разделением) — детали в
+[docs/load-test-2026-06.md](docs/load-test-2026-06.md).
 
 ```bash
 dune exec bench/bench_ex07.exe
@@ -364,12 +375,13 @@ dune exec bench/bench_ex07_parallel.exe
 | Exactly-once (single)       | ✓ реализовано                 |
 | Table + Join                | ✓ реализовано                 |
 | Retractions                 | ✓ реализовано                 |
+| Атомарный Update            | ✓ коррекция old→new одним событием (без flicker); корректен во всех операторах (filter, window_agg, keyed_join, trigger) |
 | Параллелизм OCaml 4/5       | ✓ реализовано                 |
 | Dead Letter Queue           | ✓ реализовано (noop + log)    |
 | Graceful Shutdown           | ✓ реализовано (SIGTERM/INT)   |
 | Prometheus Metrics          | ✓ реализовано (HTTP :9090)    |
 | Изоляция исключений         | ✓ safe_map / safe_filter (битое событие → on_error, не падение) |
-| Unit + Property тесты       | ✓ 49 сюит, QCheck-инварианты  |
+| Unit + Property тесты       | ✓ 88 сюит, QCheck-инварианты  |
 | CI                          | ⚠ workflow написан (docs/ci/ci.yml: сборка + тесты на OCaml 4.14/5.2), но НЕ активен: токен автоматизации без workflow-scope не может пушить в .github/workflows/ — скопируйте файл туда вручную |
 | Exactly-once parallel       | ✓ реализовано (barrier + snapshot) |
 | Exactly-once end-to-end     | ✓ offset + 2PC sink + recovery + durable (E2E recovery harness: kill→recover→output совпадает) |
@@ -918,6 +930,34 @@ API-документация генерируется через odoc:
   [docs/process-keyed-persistence.md](docs/process-keyed-persistence.md),
   [docs/window-fold-persistence.md](docs/window-fold-persistence.md) —
   reference по persistence четырёх stateful операторов
+- [docs/atomic-update-event.md](docs/atomic-update-event.md) — вариант
+  `Update` (атомарная коррекция old→new без промежуточного состояния)
+
+### Аудит и нагрузочное тестирование
+
+Кодовая база прошла многораундовый аудит (июнь 2026). Каждый раунд
+закрывал свой класс проблем; все находки — с регрессионными тестами:
+
+- [docs/inspection-2026-06.md](docs/inspection-2026-06.md) — раунд 1:
+  функциональные пробелы (Update на input окон, assert→invalid_arg,
+  единый persistence API)
+- [docs/inspection-2026-06-round2.md](docs/inspection-2026-06-round2.md) —
+  раунд 2: concurrency/IO ядра (mutex-deadlock'и при исключении в
+  callback, fd-leak, div-by-zero)
+- [docs/inspection-2026-06-round3.md](docs/inspection-2026-06-round3.md) —
+  раунд 3: variants/connectors/FFI (GC-safety в C-стабе, два
+  unbounded-memory leak, Obj.t→abstract type)
+- [docs/inspection-2026-06-round4-coverage.md](docs/inspection-2026-06-round4-coverage.md) —
+  раунд 4: семантика Update/Retract по всем операторам + матрица
+  покрытия (filter и window_agg давали молча неверный результат на
+  не-Data событиях)
+- [docs/inspection-2026-06-round5-examples.md](docs/inspection-2026-06-round5-examples.md) —
+  раунд 5: реалистичность примеров вскрыла silent-data-loss в
+  `group_by` (mutable accumulator терял late data)
+- [docs/load-test-2026-06.md](docs/load-test-2026-06.md) — нагрузочный
+  тест на 4096 ламп: устранена перф-регрессия `group_by`
+  (Hashtbl.copy → immutable Map), soak на 5M событий без утечек,
+  корректность параллельного режима
 
 ## Связанные материалы
 
