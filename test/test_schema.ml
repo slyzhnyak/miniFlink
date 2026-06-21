@@ -74,6 +74,27 @@ let test_unknown_version_errors () =
   check "decode v5 msg with v2 + migrate → Ok"
     (match Schema_default.decode c2m msg_v5 with Ok _ -> true | _ -> false)
 
+let test_version_range () =
+  Printf.printf "\n-- version outside uint16 raises at make\n";
+  (try
+     let _ = Schema_default.make ~version:70000
+       ~encode:str_encode ~decode:str_decode () in
+     check "should have raised for version 70000" false
+   with Invalid_argument _ -> check "version 70000 → Invalid_argument" true);
+  (try
+     let _ = Schema_default.make ~version:(-1)
+       ~encode:str_encode ~decode:str_decode () in
+     check "should have raised for version -1" false
+   with Invalid_argument _ -> check "version -1 → Invalid_argument" true);
+  (* граница 65535 валидна *)
+  (try
+     let c = Schema_default.make ~version:65535
+       ~encode:str_encode ~decode:str_decode () in
+     let msg = Schema_default.encode c "x" in
+     check "version 65535 (max uint16) round-trips"
+       (match Schema_default.decode c msg with Ok "x" -> true | _ -> false)
+   with Invalid_argument _ -> check "65535 should be valid" false)
+
 let () =
   Printf.printf "==========================================\n";
   Printf.printf "  Schema evolution (versioned codec)\n";
@@ -83,4 +104,5 @@ let () =
   test_migration ();
   test_edge_cases ();
   test_unknown_version_errors ();
+  test_version_range ();
   Printf.printf "\nAll schema tests passed.\n"

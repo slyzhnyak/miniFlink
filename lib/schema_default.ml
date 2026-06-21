@@ -8,6 +8,13 @@ type 'a t = {
 }
 
 let make ~version ~encode ~decode ?migrate () =
+  (* version пишется в 2 байта (uint16 big-endian). Значение вне
+     [0, 65535] молча потеряло бы старшие биты при encode, и decode
+     прочитал бы другую версию — тихая рассинхронизация схемы.
+     Падаем явно при создании codec'а. *)
+  if version < 0 || version > 0xFFFF then
+    invalid_arg (Printf.sprintf
+      "Schema.make: version %d вне диапазона uint16 [0, 65535]" version);
   { enc = encode; dec = decode; ver = version; migrate }
 
 let encode t v =

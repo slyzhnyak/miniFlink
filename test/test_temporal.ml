@@ -155,6 +155,29 @@ let test_determinism () =
     (scrambled = [("B1",100,"north"); ("B1",200,"east"); ("B1",400,"south");
                   ("B2",50,"west"); ("B2",250,"north")])
 
+let test_prune_versions () =
+  Printf.printf "\n-- prune_versions_before bounds history, keeps as_of correct\n";
+  let tbl = Temporal.create_versioned () in
+  (* 4 версии B1: valid_from 0, 100, 200, 300 *)
+  Temporal.put_version tbl ~key:"B1" ~valid_from:0   "v0";
+  Temporal.put_version tbl ~key:"B1" ~valid_from:100 "v100";
+  Temporal.put_version tbl ~key:"B1" ~valid_from:200 "v200";
+  Temporal.put_version tbl ~key:"B1" ~valid_from:300 "v300";
+
+  (* обрезаем до before:200 — оставляем версии >= 200 + одну
+     предшествующую (100). Версия 0 удаляется. *)
+  Temporal.prune_versions_before tbl ~before:200;
+
+  (* as_of для ts >= 200 корректен *)
+  check "as_of 250 → v200 (retained)" (Temporal.as_of tbl "B1" 250 = Some "v200");
+  check "as_of 350 → v300 (retained)" (Temporal.as_of tbl "B1" 350 = Some "v300");
+  (* as_of 150 → v100 (предшествующая сохранена для границы) *)
+  check "as_of 150 → v100 (predecessor kept)" (Temporal.as_of tbl "B1" 150 = Some "v100");
+  (* as_of 50 теперь даёт v100 (v0 удалена) — приемлемо, т.к. before:200
+     означает что запросов для ts < 200 не будет; проверяем что не падает *)
+  check "as_of 50 after prune doesn't crash"
+    (match Temporal.as_of tbl "B1" 50 with Some _ | None -> true)
+
 let () =
   Printf.printf "==========================================\n";
   Printf.printf "  Temporal join (versioned / as-of)\n";
@@ -165,4 +188,5 @@ let () =
   test_late_update ();
   test_waits_for_watermark ();
   test_determinism ();
+  test_prune_versions ();
   Printf.printf "\nAll temporal join tests passed.\n"

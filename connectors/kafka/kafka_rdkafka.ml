@@ -11,20 +11,31 @@
 
 open Kafka_client
 
+(* Непрозрачный хэндл на rd_kafka_t. На C-стороне это custom block
+   (см. kafka_stubs.c, alloc_rk + rk_finalize), который OCaml видит
+   как value. Раньше тип был Obj.t — это работало, но Obj.t стирает
+   различие между consumer- и producer-хэндлами, так что компилятор
+   не поймал бы случайную передачу producer'а в consumer_poll (→ UB
+   в C). Abstract type не даёт большей строгости между Consumer и
+   Producer (оба используют один handle), но убирает Obj и делает
+   намерение явным: это непрозрачный указатель, а не произвольный
+   OCaml-объект. *)
+type handle
+
 module Raw = struct
-  external producer_new   : (string * string) list -> Obj.t = "caml_rdk_producer_new"
-  external produce        : Obj.t -> string -> int -> string option -> string -> int = "caml_rdk_produce"
-  external flush          : Obj.t -> int -> int = "caml_rdk_flush"
-  external consumer_new   : (string * string) list -> Obj.t = "caml_rdk_consumer_new"
-  external subscribe      : Obj.t -> string list -> int = "caml_rdk_subscribe"
-  external consumer_poll  : Obj.t -> int -> (string * int * int64 * string option * string) option = "caml_rdk_consumer_poll"
-  external commit_offset  : Obj.t -> string -> int -> int64 -> int = "caml_rdk_commit_offset"
-  external seek           : Obj.t -> string -> int -> int64 -> int = "caml_rdk_seek"
-  external consumer_close : Obj.t -> unit = "caml_rdk_consumer_close"
+  external producer_new   : (string * string) list -> handle = "caml_rdk_producer_new"
+  external produce        : handle -> string -> int -> string option -> string -> int = "caml_rdk_produce"
+  external flush          : handle -> int -> int = "caml_rdk_flush"
+  external consumer_new   : (string * string) list -> handle = "caml_rdk_consumer_new"
+  external subscribe      : handle -> string list -> int = "caml_rdk_subscribe"
+  external consumer_poll  : handle -> int -> (string * int * int64 * string option * string) option = "caml_rdk_consumer_poll"
+  external commit_offset  : handle -> string -> int -> int64 -> int = "caml_rdk_commit_offset"
+  external seek           : handle -> string -> int -> int64 -> int = "caml_rdk_seek"
+  external consumer_close : handle -> unit = "caml_rdk_consumer_close"
 end
 
 module Consumer = struct
-  type t = { rk : Obj.t }
+  type t = { rk : handle }
 
   let create ~brokers ~group_id ~topics =
     let rk = Raw.consumer_new [
@@ -52,7 +63,7 @@ module Consumer = struct
 end
 
 module Producer = struct
-  type t = { rk : Obj.t }
+  type t = { rk : handle }
 
   let create ~brokers ?transactional_id () =
     let conf = ("bootstrap.servers", brokers) ::

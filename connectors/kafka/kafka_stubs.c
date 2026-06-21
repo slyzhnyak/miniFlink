@@ -185,7 +185,7 @@ CAMLprim value caml_rdk_subscribe(value v_rk, value v_topics) {
      Some (topic, partition, offset, key_opt, payload) */
 CAMLprim value caml_rdk_consumer_poll(value v_rk, value v_timeout) {
     CAMLparam2(v_rk, v_timeout);
-    CAMLlocal3(result, tuple, key_opt);
+    CAMLlocal5(result, tuple, key_opt, k, payload);
 
     rd_kafka_message_t *msg =
         rd_kafka_consumer_poll(Rk_val(v_rk), Int_val(v_timeout));
@@ -210,7 +210,7 @@ CAMLprim value caml_rdk_consumer_poll(value v_rk, value v_timeout) {
     Store_field(tuple, 2, caml_copy_int64(msg->offset));
 
     if (msg->key && msg->key_len > 0) {
-        value k = caml_alloc_string(msg->key_len);
+        k = caml_alloc_string(msg->key_len);
         memcpy(Bytes_val(k), msg->key, msg->key_len);
         key_opt = caml_alloc_tuple(1);
         Store_field(key_opt, 0, k);
@@ -219,7 +219,7 @@ CAMLprim value caml_rdk_consumer_poll(value v_rk, value v_timeout) {
     }
     Store_field(tuple, 3, key_opt);
 
-    value payload = caml_alloc_string(msg->len);
+    payload = caml_alloc_string(msg->len);
     memcpy(Bytes_val(payload), msg->payload, msg->len);
     Store_field(tuple, 4, payload);
 

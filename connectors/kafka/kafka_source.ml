@@ -90,4 +90,19 @@ module Make (C : CONSUMER) = struct
      checkpoint — это и есть Kafka-часть exactly-once на входной стороне) *)
   let commit_positions t =
     List.iter (fun po -> C.commit t.consumer po) (cur_positions t)
+
+  (* Удалить снимки позиций для счётчиков СТРОГО МЕНЬШЕ [before].
+     Без этого Hashtbl snapshots растёт неограниченно — по записи на
+     каждое прочитанное событие за всё время работы source (утечка
+     памяти у long-running consumer'а). После подтверждённого
+     checkpoint откат назад дальше его counter невозможен, поэтому
+     более старые снимки уже не нужны.
+
+     Вызывать после commit_positions с counter последнего
+     зафиксированного checkpoint. *)
+  let prune_snapshots_before t ~before =
+    let stale =
+      Hashtbl.fold (fun k _ acc -> if k < before then k :: acc else acc)
+        t.snapshots [] in
+    List.iter (fun k -> Hashtbl.remove t.snapshots k) stale
 end

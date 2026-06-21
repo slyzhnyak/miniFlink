@@ -24,7 +24,14 @@ let create_versioned () : ('k, 'v) versioned = Hashtbl.create 64
 
 (* Добавить версию: значение [v] для ключа [k], действующее с [valid_from].
    Вставка с сохранением сортировки по убыванию valid_from (опоздавший
-   апдельт со старым valid_from встанет на своё место в истории). *)
+   апдельт со старым valid_from встанет на своё место в истории).
+
+   ВНИМАНИЕ про память: история версий per ключ растёт с каждым апдейтом
+   и НЕ обрезается автоматически — as_of должен уметь ответить на запрос
+   для любого прошлого ts. У long-running temporal join это
+   неограниченный рост. Если main-поток имеет известный максимальный
+   lateness, версии старше (min_main_wm - max_lateness) уже не нужны:
+   используйте prune_versions_before для обрезки. *)
 let put_version (tbl : ('k,'v) versioned) ~key ~valid_from v =
   let cur = match Hashtbl.find_opt tbl key with Some l -> l | None -> [] in
   let rec insert = function
@@ -32,6 +39,27 @@ let put_version (tbl : ('k,'v) versioned) ~key ~valid_from v =
     | (t, _) :: _ as rest when valid_from >= t -> (valid_from, v) :: rest
     | x :: xs -> x :: insert xs in
   Hashtbl.replace tbl key (insert cur)
+
+(* Обрезать историю: для каждого ключа оставить версии с valid_from
+   >= [before], ПЛЮС одну непосредственно предшествующую (она ещё может
+   быть актуальна для as_of на момент [before]). Версии старше неё уже
+   недостижимы никаким as_of(ts) для ts >= before, поэтому удаляются.
+
+   Вызывать когда известно что main-поток больше не запросит as_of для
+   ts < before (например before = min_main_watermark - max_lateness).
+   Ограничивает рост памяти versioned-таблицы. *)
+let prune_versions_before (tbl : ('k,'v) versioned) ~before =
+  Hashtbl.filter_map_inplace (fun _key versions ->
+    (* versions отсортированы по убыванию valid_from. Идём сверху
+       (свежее), оставляем всё с vf >= before; как только встретили
+       vf < before — это первая «предшествующая», оставляем её и
+       обрываем (всё после неё ещё старше и не нужно). *)
+    let rec take = function
+      | [] -> []
+      | (vf, v) :: _ when vf < before -> [(vf, v)]  (* первая старая — keep + stop *)
+      | x :: xs -> x :: take xs
+    in
+    Some (take versions)) tbl
 
 (* as_of: значение ключа [k], актуальное на момент [ts] — первая версия
    с valid_from <= ts (история отсортирована по убыванию). None если на
