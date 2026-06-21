@@ -80,21 +80,13 @@ multi-sensor IoT-сценарии.
 
 Tests: `test/test_keyed_join.ml` (13 сценариев).
 
-## 3. `Persistence_backend.persist` bundle — один параметр вместо четырёх
+## 3. Ортогональная persistence — пайплайн не меняется
 
-Три persistent оператора (silence_age, process_keyed, window_fold)
-принимают bundle вместо четырёх раздельных параметров:
+Все четыре stateful-оператора (silence_age, process_keyed,
+window_fold, trigger) не принимают persistence-параметра вообще. Тот
+же пайплайн работает с persistence и без; режим задаётся снаружи.
 
-```ocaml
-type 'v persist = {
-  backend     : t;
-  name        : string;
-  serialize   : 'v -> Yojson.Safe.t;
-  deserialize : Yojson.Safe.t -> 'v;
-}
-```
-
-**До:**
+**До** (persistence вплетена в оператор, у каждого свои сериализаторы):
 ```ocaml
 Item.silence_age
   ~backend
@@ -104,26 +96,27 @@ Item.silence_age
   ~by:... ~tick:... source
 ```
 
-**После:**
+**После** (оператор объявляет только namespace; режим и сериализация —
+снаружи):
 ```ocaml
-let pst = {
-  backend; name = "no_packets";
-  serialize = (fun k -> `String k);
-  deserialize = (fun j -> Yojson.Safe.Util.to_string j);
-} in
-Item.silence_age ~persistence:pst ~by:... ~tick:... source
+let pipeline source =
+  Item.silence_age ~name:"no_packets" ~by:... ~tick:... source
+
+(* без persistence *)  pipeline source
+(* с persistence *)    Runtime_context.with_context
+                         (Runtime_context.durable backend)
+                         (fun () -> pipeline source)
 ```
 
-Backwards compatible: старый API работает идентично. Mixing
-обоих стилей в одном вызове — `Invalid_argument`.
+Сериализация ортогональна: Marshal по умолчанию (состояние
+closure-free), codec-реестр для schema evolution — всё в контексте,
+не в пайплайне. trigger потерял **6** сериализаторов и собственный
+backend-тип. Подробно: [orthogonal-persistence.md](orthogonal-persistence.md).
 
-**Не охватывает:** `Trigger` (более сложная схема с 6 сериализаторами
-для key/value/alert и `name` в spec record). Bundle для Trigger
-требует другой type signature и отложен.
-
-Tests: `test/test_persistence_bundle.ml` (6 сценариев), включая
-**equivalence test** — старый и новый API дают идентичные outputs
-и backend state на одних и тех же входных данных.
+Tests: `test_window_fold_persistence(_e2e)`,
+`test_process_keyed_persistence(_e2e)`,
+`test_silence_age_persistence(_e2e)`, `test_trigger_persistence(_e2e)`
+— каждый показывает `phase1 + phase2 = baseline` через рестарт.
 
 ## Сравнение
 

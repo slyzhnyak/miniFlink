@@ -103,35 +103,22 @@ let () =
   check "critical doesn't fire on 3.2 ≥ 3.0"
     (List.length crit_alerts = 0);
 
-  (* ── 3. serdes bundle ─────────────────────────────── *)
-  Printf.printf "\n-- 3. serdes bundle\n";
+  (* ── 3. persistence через Runtime_context (ортогонально) ─── *)
+  Printf.printf "\n-- 3. orthogonal persistence via context\n";
   let tbl = Hashtbl.create 16 in
   let backend = Persistence_backend.of_memory tbl in
-
-  let serdes = Trigger.{
-    serialize_key   = (fun k -> `String k);
-    deserialize_key = (fun j -> Yojson.Safe.Util.to_string j);
-    serialize_value = (fun v -> `Float v);
-    deserialize_value = (function `Float f -> f | _ -> 0.0);
-    serialize_alert = (function
-      | A_problem (k, v, t) ->
-        `Assoc [("k",`String k);("v",`Float v);("t",`Int t)]
-      | A_recovery (k, t) ->
-        `Assoc [("k",`String k);("t",`Int t)]);
-    deserialize_alert = (fun _ -> A_recovery ("?", 0));
-  } in
+  let ctx = Runtime_context.durable backend in
 
   let with_persist = Trigger.of_config {
     base with
       name = "persisted_low";
       condition = Trigger.less_than 3.5;
-      serdes = Some serdes;
   } in
 
-  let _ = events |> Stream.of_list
-    |> Trigger.of_stream ~backend with_persist
-    |> Pipe.collect in
-  check "backend has records after run"
-    (Hashtbl.length tbl > 0);
+  Runtime_context.with_context ctx (fun () ->
+    let _ = events |> Stream.of_list
+      |> Trigger.of_stream with_persist
+      |> Pipe.collect in
+    check "backend has records after run" (Hashtbl.length tbl > 0));
 
   Printf.printf "\nTest passed.\n"

@@ -311,12 +311,15 @@ let high_cpu = Trigger.create
   считаются свежими, могут сделать ложное recovery
 
 Для системы безопасности шахты это **неприемлемо**. Persistence
-решает проблему.
+решает проблему — и она **ортогональна**: тот же триггер работает с
+ней и без, режим задаётся снаружи (подробно в
+[orthogonal-persistence.md](orthogonal-persistence.md)).
 
 ### Минимальный пример
 
 ```ocaml
-(* 1. Spec с сериализаторами *)
+(* 1. Spec — БЕЗ сериализаторов. Состояние триггера closure-free,
+      сериализуется Marshal'ом автоматически. *)
 let evacuation_spec =
   Trigger.create
     ~name:"evacuation"
@@ -325,22 +328,18 @@ let evacuation_spec =
     ~severity:Trigger.Disaster
     ~produce_alert:(fun ~key ~value ~ts -> mk_alert key value ts)
     ~produce_recovery:(fun ~key ~ts -> mk_cleared key ts)
-    (* Persistence: указать как (де)сериализовать key, value, alert *)
-    ~serialize_key:(fun k -> `String k)
-    ~deserialize_key:(fun j -> Yojson.Safe.Util.to_string j)
-    ~serialize_value:value_to_json
-    ~deserialize_value:value_of_json
-    ~serialize_alert:alert_to_json
-    ~deserialize_alert:alert_of_json
     ()
 
-(* 2. Backend — обёртка над key-value хранилищем *)
-let tbl = Hashtbl.create 64 in
-let backend = Trigger.backend_of_memory tbl in
-(* для production: Trigger.backend_of_rocksdb или ваша обёртка *)
+(* 2. Backend — любой Persistence_backend.t (in-memory, RocksDB, …) *)
+let backend = Persistence_backend.of_memory (Hashtbl.create 64)
 
-(* 3. of_stream с подключённым backend *)
-combined |> Trigger.of_stream ~backend evacuation_spec
+(* 3. Тот же пайплайн, persistence включена снаружи через контекст.
+      Состояние триггера (FSM + last_event_ts + pending-таймеры)
+      переживёт рестарт. *)
+let alerts =
+  Runtime_context.with_context
+    (Runtime_context.durable backend)
+    (fun () -> combined |> Trigger.of_stream evacuation_spec)
 ```
 
 На каждом изменении state-машины (Ok→Pending_problem,
@@ -416,32 +415,31 @@ let pipeline' =
 
 ### Ограничения текущей реализации
 
-Описаны подробно в `docs/trigger-persistence.md`:
+Подробности модели — в
+[orthogonal-persistence.md](orthogonal-persistence.md):
 
-- Snapshot **только на state-машинных transitions**, не на каждом event.
-  Если упали между двумя event'ами без перехода — теряем
-  ≈секундный окно out-of-order tolerance, не критично.
-- Только `'k = string` сейчас работает на 100%. Для произвольных
-  ключей нужен deterministic serialize_key.
-- Нет координации между несколькими триггерами или с другими
-  операторами — каждый триггер snapshot'ит свой namespace
-  независимо. Atomic multi-operator checkpoint — в TODO.
+- Snapshot per-key на state-машинных transitions, не на каждом event.
+- Сериализация по умолчанию Marshal; для произвольных ключей
+  достаточно, чтобы они были замкнуто-свободными данными.
+- Координация между несколькими операторами: каждый snapshot'ит свой
+  namespace независимо. Atomic multi-operator checkpoint — в TODO.
 
 ### silence_age тоже persistent
 
 `Item.silence_age` (главный non-trivial item для триггеров «нет
-пакетов дольше N») использует тот же паттерн persistence:
+пакетов дольше N») использует ту же ортогональную модель — никаких
+сериализаторов, режим снаружи:
 
 ```ocaml
 let no_packets_item packets =
   packets
   |> Item.silence_age
-       ~backend                              (* тот же что у Trigger *)
-       ~backend_name:"no_packets"            (* namespace *)
-       ~serialize_key:(fun k -> `String k)
-       ~deserialize_key:(fun j -> Yojson.Safe.Util.to_string j)
+       ~name:"no_packets"                    (* namespace состояния *)
        ~by:(fun (p : Domain.packet) -> p.lamp)
        ~tick:(Time.seconds 30)
+(* persistence включается тем же with_context, что оборачивает
+   весь пайплайн — silence_age и Trigger делят один backend,
+   namespace их разводит. *)
 ```
 
 Это **важно** для триггеров с silence_age в pipeline'е: без

@@ -81,13 +81,20 @@ val process_keyed :
   (module Keyed.S with type t = 'a) ->
   ?now_ms:(unit -> int) ->
   ?on_stat:(stat -> unit) ->
-  ?persistence:'st Persistence_backend.persist ->
+  ?name:string ->
   ?on_update:('out ctx -> string -> 'st -> old:'a -> new_value:'a -> unit) ->
   init:(unit -> 'st) ->
   on_event:('out ctx -> string -> 'st -> 'a -> unit) ->
   on_timer:('out ctx -> string -> 'st -> Time.t -> timer_kind -> unit) ->
   'a Mf_event.t Stream.t -> 'out Mf_event.t Stream.t
-(** {b [?on_update]} (Phase 3.3) — опциональный callback для
+(** Persistence ОРТОГОНАЛЬНА: задаётся ambient {!Runtime_context}, не
+    параметром. В durable-контексте per-key состояние (включая event-
+    и processing-таймеры) снапшотится в backend на каждое изменение и
+    восстанавливается на старте. [?name] — стабильный namespace
+    оператора (по умолчанию ["default"]); нужен если в пайплайне
+    несколько process_keyed, чтобы их ключи в backend не коллидировали.
+
+    {b [?on_update]} (Phase 3.3) — опциональный callback для
     атомарной обработки {!Mf_event.Update} событий. Если передан,
     вызывается на каждом Update с обоими значениями [old] и [new_value],
     позволяя выполнить atomic state transition — например, откатить
@@ -100,37 +107,10 @@ val process_keyed :
     когда state зависит от {e предыдущего} значения и atomic
     rollback важен.
 
-    {b [?backend]} — если передан, [process_keyed] сохраняет
-    per-key state ([st] + event/processing таймеры этого ключа) в
-    [Persistence_backend] на каждое изменение (после [on_event] и
-    [on_timer]). На старте восстанавливает все state'ы и таймеры
-    из backend.
-
-    Требует [?backend_name] (namespace в backend) и
-    [?serialize_state]/[?deserialize_state] для пользовательского
-    типа [st]. Если backend подключён, а параметры отсутствуют —
-    [Invalid_argument].
-
-    {b [?persistence]} — современная альтернатива четырём параметрам
-    выше: единый bundle {!Persistence_backend.persist}. Эквивалентно
-    по семантике. Нельзя смешивать с [?backend] стилем —
-    [Invalid_argument].
-
-    Backend-ключ: ["process_keyed:{backend_name}:{key}"].
-    Значение (JSON):
-    {[
-      {
-        "state":     <serialized 'st>,
-        "ev_timers": [t1, t2, ...],
-        "pt_timers": [t1, t2, ...]
-      }
-    ]}
-
-    {b Ограничения:} Snapshot пишется {b после каждого} [on_event] и
-    [on_timer]. Watermark-based snapshot — TODO.
-
-    Без backend'а — поведение как раньше (state и timers в памяти,
-    теряются при завершении процесса). *)
+    Persistence ортогональна (см. выше про [?name]): per-key state
+    (включая event/processing таймеры) снапшотится в durable-контексте
+    после каждого изменения и восстанавливается на старте; вне
+    durable-контекста — в памяти. Подробно — docs/orthogonal-persistence.md. *)
 
 (** {2 Record-based конструктор}
 
@@ -167,7 +147,7 @@ type ('a, 'st, 'out) spec = {
   on_timer    : 'out ctx -> string -> 'st -> Time.t -> timer_kind -> unit;
   now_ms      : (unit -> int) option;
   on_stat     : (stat -> unit) option;
-  persistence : 'st Persistence_backend.persist option;
+  name        : string option;
 }
 
 val default_spec :
@@ -177,7 +157,7 @@ val default_spec :
   on_timer:('out ctx -> string -> 'st -> Time.t -> timer_kind -> unit) ->
   ('a, 'st, 'out) spec
 (** Минимальный spec с обязательными полями. Defaults для
-    [now_ms], [on_stat], [persistence] — все [None]. *)
+    [now_ms], [on_stat], [name] — все [None]. *)
 
 val process_keyed_spec :
   ('a, 'st, 'out) spec ->

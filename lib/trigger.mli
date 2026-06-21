@@ -126,12 +126,6 @@ val create :
   ?severity:severity ->
   produce_alert:(key:'key -> value:'v -> ts:Time.t -> 'alert) ->
   produce_recovery:(key:'key -> ts:Time.t -> 'alert) ->
-  ?serialize_key:('key -> Yojson.Safe.t) ->
-  ?deserialize_key:(Yojson.Safe.t -> 'key) ->
-  ?serialize_value:('v -> Yojson.Safe.t) ->
-  ?deserialize_value:(Yojson.Safe.t -> 'v) ->
-  ?serialize_alert:('alert -> Yojson.Safe.t) ->
-  ?deserialize_alert:(Yojson.Safe.t -> 'alert) ->
   unit -> ('key, 'v, 'alert) spec
 (** Сконструировать spec.
 
@@ -190,16 +184,6 @@ val severity : ('key, 'v, 'alert) spec -> severity
       }
     ]} *)
 
-type ('key, 'v, 'alert) serdes_config = {
-  serialize_key     : 'key -> Yojson.Safe.t;
-  deserialize_key   : Yojson.Safe.t -> 'key;
-  serialize_value   : 'v -> Yojson.Safe.t;
-  deserialize_value : Yojson.Safe.t -> 'v;
-  serialize_alert   : 'alert -> Yojson.Safe.t;
-  deserialize_alert : Yojson.Safe.t -> 'alert;
-}
-(** Bundle всех шести (де)сериализаторов нужных для persistence. *)
-
 type ('key, 'v, 'alert) config = {
   name             : string;
   condition        : 'v condition;
@@ -208,7 +192,6 @@ type ('key, 'v, 'alert) config = {
   problem_for      : Time.t;
   recovery_for     : Time.t;
   severity         : severity;
-  serdes           : ('key, 'v, 'alert) serdes_config option;
 }
 (** Полный config для одного триггера. *)
 
@@ -219,41 +202,22 @@ val default_config :
   produce_recovery:(key:'key -> ts:Time.t -> 'alert) ->
   ('key, 'v, 'alert) config
 (** Минимальный config с обязательными полями. Defaults:
-    [problem_for = 0], [recovery_for = 0], [severity = Warning],
-    [serdes = None]. *)
+    [problem_for = 0], [recovery_for = 0], [severity = Warning]. *)
 
 val of_config : ('key, 'v, 'alert) config -> ('key, 'v, 'alert) spec
 (** Сконструировать spec из config'а. Эквивалентно {!create} с
     соответствующими параметрами. *)
 
-(** {1 Backend для persistence}
+(** {1 Основной оператор}
 
-    Простой record-of-functions интерфейс к key-value хранилищу.
-    Позволяет подключать любую реализацию (in-memory, RocksDB, mock
-    для тестов) через первоклассные значения, без functor'ов.
-
-    {b Переезд:} с расширением persistence на другие операторы
-    ([Item.silence_age], [Pipe.process_keyed] и т.д.) интерфейс
-    backend'а вынесен в общий модуль [Persistence_backend]. Здесь
-    [backend] и [backend_of_memory] оставлены как алиасы для
-    backwards compatibility — существующий код продолжает работать. *)
-
-type backend = Persistence_backend.t = {
-  get    : string -> bytes option;
-  set    : string -> bytes -> unit;
-  delete : string -> unit;
-  keys   : unit -> string list;
-}
-(** Минимальный key-value интерфейс — алиас [Persistence_backend.t]. *)
-
-val backend_of_memory : (string, bytes) Hashtbl.t -> backend
-(** Удобный конструктор: обёртка над [Hashtbl.t]. Алиас для
-    [Persistence_backend.of_memory]. *)
-
-(** {1 Основной оператор} *)
+    Persistence ОРТОГОНАЛЬНА: задаётся ambient {!Runtime_context}, не
+    параметром. В durable-контексте per-key state-машина (вместе с
+    last_event_ts и pending-таймерами) снапшотится в backend на каждое
+    изменение и восстанавливается на старте; namespace в backend =
+    ["trigger:{spec.name}"]. Состояние — closure-free, сериализуется
+    Marshal'ом по умолчанию, поэтому отдельные сериализаторы не нужны. *)
 
 val of_stream :
-  ?backend:backend ->
   ('key, 'v, 'alert) spec ->
   ('key * 'v) Mf_event.t Stream.t ->
   'alert Mf_event.t Stream.t
@@ -276,20 +240,10 @@ val of_stream :
     Эмитируемые события идут в event-time порядке (определяется
     upstream watermark'ами + моментами срабатывания таймеров).
 
-    {b [?backend]} — если передан, триггер сохраняет и восстанавливает
-    своё состояние (state machine per key + last_event_ts + pending
-    timers) через [State_backend]. На старте читает все ключи с
-    префиксом ["trigger:{name}:"] и восстанавливает state. На каждое
-    изменение state-машины пишет обратно в backend.
-
-    Требует чтобы в [spec] были заполнены все [serialize_*] и
-    [deserialize_*] поля. Иначе [Invalid_argument].
-
-    Без backend'а — поведение как раньше (state в памяти, теряется
-    при завершении процесса). *)
+    Persistence ортогональна (см. выше): в durable-контексте state
+    переживает рестарт, вне — в памяти. *)
 
 val combine :
-  ?backend:backend ->
   ('key, 'v, 'alert) spec list ->
   ('key * 'v) Mf_event.t Stream.t ->
   'alert Mf_event.t Stream.t

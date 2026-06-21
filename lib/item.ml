@@ -54,121 +54,42 @@ let default_key_to_string : 'k -> string = fun k ->
 
 let silence_age
     (type ev k)
-    ?(persistence : k Persistence_backend.persist option)
+    ?(name = "default")
     ~(by : ev -> k)
     ~(tick : Time.t)
     (source : ev Mf_event.t Stream.t)
   : (k * Time.t) Mf_event.t Stream.t =
-
-  (* Раскрываем persistence bundle в локальные option-значения. *)
-  let backend, backend_name, serialize_key, deserialize_key =
-    match persistence with
-    | Some p ->
-      (Some p.Persistence_backend.backend,
-       Some p.Persistence_backend.name,
-       Some p.Persistence_backend.serialize,
-       Some p.Persistence_backend.deserialize)
-    | None -> (None, None, None, None)
-  in
 
   (* per-key state: last_seen_ts + сам ключ для обратной деривации *)
   let states : (string, Time.t * k) Hashtbl.t = Hashtbl.create 64 in
   let timers = Timers.create () in
   let out_buf : (k * Time.t) Mf_event.t Queue.t = Queue.create () in
 
-  (* Локальный key_to_string. Без backend'а — Hashtbl.hash;
-     с backend'ом — JSON-сериализация для детерминизма между
-     запусками процесса. *)
-  let key_to_string (key : k) : string =
-    match backend, serialize_key with
-    | Some _, Some sk -> Yojson.Safe.to_string (sk key)
-    | _ -> default_key_to_string key
-  in
+  let key_to_string (key : k) : string = default_key_to_string key in
 
   (* ════════════════════════════════════════════════════════════════
-     PERSISTENCE LAYER
+     PERSISTENCE — ортогональная, через Managed_state.
 
-     Формат backend-ключа:
-       "item:silence_age:{backend_name}:" ^ Yojson.to_string (ser_k user_key)
-
-     Формат значения (JSON в bytes):
-       {
-         "key":          <serialized 'k>,
-         "last_seen_ts": int,
-         "fire_at":      int   // запланированное срабатывание таймера
-       }
-
-     Snapshot пишется при: on_data (новое событие — обновляем
-     last_seen + fire_at) и on_timer (срабатывание — обновляем
-     fire_at). На watermark без таймера — не пишем (изменений нет).
+     Persistence решается ambient Runtime_context. Рабочие структуры
+     (states + timers) остаются; managed-state — durable-зеркало,
+     значение per-ключ = (last_seen_ts, key, fire_at).
      ════════════════════════════════════════════════════════════════ *)
-
-  let key_prefix =
-    match backend_name with
-    | Some n -> "item:silence_age:" ^ n ^ ":"
-    | None -> ""  (* не используется когда backend = None *)
-  in
-
-  let ser_k k =
-    match serialize_key with
-    | Some f -> f k
-    | None -> invalid_arg "silence_age: serialize requested but no \
-                serializer in persistence bundle (invariant violated)"
-  in
-  let deser_k j =
-    match deserialize_key with
-    | Some f -> f j
-    | None -> invalid_arg "silence_age: deserialize requested but no \
-                deserializer in persistence bundle (invariant violated)"
-  in
+  let mstate : (string, Time.t * k * Time.t) Managed_state.t =
+    Managed_state.create_string ~name:("item:silence_age:" ^ name) () in
 
   let persist (ks : string) (key : k) (last_seen : Time.t) (fire_at : Time.t) =
-    match backend with
-    | None -> ()
-    | Some be ->
-      let json = `Assoc [
-        ("key",          ser_k key);
-        ("last_seen_ts", `Int last_seen);
-        ("fire_at",      `Int fire_at);
-      ] in
-      let bk = key_prefix ^ Yojson.Safe.to_string (ser_k key) in
-      be.set bk (Bytes.of_string (Yojson.Safe.to_string json))
+    Managed_state.set mstate ks (last_seen, key, fire_at);
+    Managed_state.checkpoint_key mstate ks
   in
 
-  (* Восстановление per-key state из backend на старте. *)
+  (* Восстановление per-key state из managed-state на старте. *)
   let restore_all () =
-    match backend with
-    | None -> ()
-    | Some be ->
-      let plen = String.length key_prefix in
-      List.iter (fun bk ->
-        if String.length bk >= plen
-           && String.sub bk 0 plen = key_prefix
-        then begin
-          match be.get bk with
-          | None -> ()
-          | Some v_bytes ->
-            (try
-               let json = Yojson.Safe.from_string (Bytes.to_string v_bytes) in
-               match json with
-               | `Assoc kv ->
-                 let key       = deser_k (List.assoc "key" kv) in
-                 let last_seen = Yojson.Safe.Util.to_int (List.assoc "last_seen_ts" kv) in
-                 let fire_at   = Yojson.Safe.Util.to_int (List.assoc "fire_at" kv) in
-                 let ks        = key_to_string key in
-                 Hashtbl.replace states ks (last_seen, key);
-                 Timers.insert timers
-                   { pt_fire_at = fire_at; pt_key_str = ks }
-               | _ -> failwith "Item.silence_age restore: top-level JSON not object"
-             with
-             | Yojson.Json_error msg ->
-               failwith ("Item.silence_age restore: invalid JSON (key=" ^ bk ^ "): " ^ msg)
-             | Not_found ->
-               failwith ("Item.silence_age restore: missing field (key=" ^ bk ^ ")"))
-        end
-      ) (be.keys ())
+    Managed_state.iter mstate (fun ks (last_seen, key, fire_at) ->
+      Hashtbl.replace states ks (last_seen, key);
+      Timers.insert timers { pt_fire_at = fire_at; pt_key_str = ks })
   in
   restore_all ();
+
 
   (* На каждое Data ключа k в момент ts:
      - обновляем last_seen

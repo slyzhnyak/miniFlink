@@ -28,6 +28,13 @@ type win_spec =
   | Tumbling of Time.t
   | Sliding  of Time.t * Time.t   (* size, step *)
 
+(* Стабильный строковый тег спецификации окна — для namespace
+   managed-state, чтобы разные window_fold не коллидировали в
+   backend. *)
+let win_spec_tag = function
+  | Tumbling sz -> Printf.sprintf "tumbling:%d" sz
+  | Sliding (sz, step) -> Printf.sprintf "sliding:%d:%d" sz step
+
 (** Неперекрывающиеся окна фиксированного размера [size] (> 0).
     @raise Invalid_argument если [size <= 0]. *)
 let tumbling size =
@@ -271,7 +278,6 @@ let window_fold
     (module K : Keyed.S with type t = a)
     ?(latency = 0)
     ?(allowed_lateness = 0)
-    ?(persistence : acc Persistence_backend.persist option)
     ?(remove : (acc -> a -> acc) option)
     (spec : win_spec)
     ~(init : unit -> acc)
@@ -279,19 +285,25 @@ let window_fold
     (upstream : a Mf_event.t Stream.t)
     : (string * acc) Mf_event.t Stream.t =
 
-  (* Раскрываем persistence bundle в локальные option-значения.
-     Bundle гарантирует что все 4 поля присутствуют вместе. *)
-  let backend, backend_name, serialize_acc, deserialize_acc =
-    match persistence with
-    | Some p ->
-      (Some p.Persistence_backend.backend,
-       Some p.Persistence_backend.name,
-       Some p.Persistence_backend.serialize,
-       Some p.Persistence_backend.deserialize)
-    | None -> (None, None, None, None)
-  in
+  (* Состояние окон — managed-state с прозрачной persistence.
+     Persistence решается ambient Runtime_context, НЕ параметром
+     оператора: тот же код работает в ephemeral и durable. Ключ окна
+     (user_key, start, stop) сериализуем в строку для backend.
 
-  let tbl : (win_key, acc fold_state) Hashtbl.t = Hashtbl.create 4096 in
+     namespace включает spec, чтобы разные window_fold в одном
+     пайплайне не коллидировали по ключам в backend. *)
+  let win_key_str (uk, start, stop) = Printf.sprintf "%s:%d:%d" uk start stop in
+  let win_key_unstr s =
+    (* обратный разбор: два int с конца — start, stop; остальное — uk *)
+    match List.rev (String.split_on_char ':' s) with
+    | stop_s :: start_s :: rest_rev ->
+      let uk = String.concat ":" (List.rev rest_rev) in
+      (uk, int_of_string start_s, int_of_string stop_s)
+    | _ -> invalid_arg ("window_fold: bad win_key in backend: " ^ s)
+  in
+  let state = Managed_state.create
+      ~name:("window_fold:" ^ win_spec_tag spec)
+      ~key_str:win_key_str ~key_unstr:win_key_unstr () in
   let out : (string * acc) Mf_event.t Queue.t = Queue.create () in
   let emit_data k stop acc = Queue.push (Mf_event.data (k, acc) stop) out in
   (* Phase 3: эмитим atomic Update вместо пары Retract+Data при
@@ -301,154 +313,6 @@ let window_fold
     Queue.push (Mf_event.update (k, old_acc) (k, new_acc) stop) out
   in
 
-  (* ════════════════════════════════════════════════════════════════
-     PERSISTENCE LAYER
-
-     Backend-ключ:
-       "window_fold:{backend_name}:{user_key}:{start}:{stop}"
-
-     Значение (JSON):
-       {
-         "state":    "open" | "fired",
-         "acc":      <serialized 'acc>,
-         "nonempty": bool
-       }
-
-     Snapshot пишется на каждом Watermark: после обработки
-     to_fire/to_remove логики записываем текущее состояние всех
-     записей tbl в backend. Это даёт consistent snapshot потому что
-     watermark — естественный checkpoint barrier.
-     ════════════════════════════════════════════════════════════════ *)
-  let key_prefix =
-    match backend_name with
-    | Some n -> "window_fold:" ^ n ^ ":"
-    | None -> ""
-  in
-
-  let ser_acc a =
-    match serialize_acc with
-    | Some f -> f a
-    | None ->
-      (* Недостижимо: ser_acc вызывается только в snapshot-пути,
-         который guarded `match backend with Some _`, а backend и
-         serialize_acc приходят вместе из persistence bundle.
-         invalid_arg вместо assert false даёт понятную диагностику
-         если инвариант когда-нибудь нарушится. *)
-      invalid_arg "window_fold: serialize requested but persistence \
-                   bundle has no serializer (internal invariant violated)"
-  in
-  let deser_acc j =
-    match deserialize_acc with
-    | Some f -> f j
-    | None ->
-      invalid_arg "window_fold: deserialize requested but persistence \
-                   bundle has no deserializer (internal invariant violated)"
-  in
-
-  (* Backend-ключ для (user_key, start, stop). Используем
-     ':'-разделители; user_key может содержать ':' но это не
-     приводит к коллизиям так как start/stop — int. *)
-  let backend_key_for (uk, start, stop) =
-    Printf.sprintf "%s%s:%d:%d" key_prefix uk start stop
-  in
-
-  (* Разбор backend-ключа обратно в win_key. Берём из конца два int
-     (start, stop), всё остальное между prefix и start — user_key. *)
-  let parse_backend_key (bk : string) : win_key option =
-    let plen = String.length key_prefix in
-    if String.length bk < plen
-       || String.sub bk 0 plen <> key_prefix
-    then None
-    else
-      try
-        let suffix = String.sub bk plen (String.length bk - plen) in
-        (* Найти последние два ':' *)
-        let last_colon = String.rindex suffix ':' in
-        let pre = String.sub suffix 0 last_colon in
-        let stop_str = String.sub suffix (last_colon + 1)
-                         (String.length suffix - last_colon - 1) in
-        let last_colon2 = String.rindex pre ':' in
-        let uk = String.sub pre 0 last_colon2 in
-        let start_str = String.sub pre (last_colon2 + 1)
-                          (String.length pre - last_colon2 - 1) in
-        Some (uk, int_of_string start_str, int_of_string stop_str)
-      with _ -> None
-  in
-
-  let state_to_json (st : acc fold_state) : Yojson.Safe.t =
-    match st with
-    | FOpen (acc, nonempty) ->
-      `Assoc [
-        ("state",    `String "open");
-        ("acc",      ser_acc acc);
-        ("nonempty", `Bool nonempty);
-      ]
-    | FFired (acc, nonempty) ->
-      `Assoc [
-        ("state",    `String "fired");
-        ("acc",      ser_acc acc);
-        ("nonempty", `Bool nonempty);
-      ]
-  in
-
-  let state_of_json (j : Yojson.Safe.t) : acc fold_state =
-    match j with
-    | `Assoc kv ->
-      let state = Yojson.Safe.Util.to_string (List.assoc "state" kv) in
-      let acc = deser_acc (List.assoc "acc" kv) in
-      let nonempty = Yojson.Safe.Util.to_bool (List.assoc "nonempty" kv) in
-      (match state with
-       | "open" -> FOpen (acc, nonempty)
-       | "fired" -> FFired (acc, nonempty)
-       | other -> failwith ("window_fold restore: unknown state tag: " ^ other))
-    | _ -> failwith "window_fold restore: top-level not assoc"
-  in
-
-  (* Snapshot всех окон в backend.
-     Также собираем set текущих ключей tbl чтобы удалить из backend
-     записи которые были удалены из tbl (FFired beyond lateness). *)
-  let persist_all () =
-    match backend with
-    | None -> ()
-    | Some be ->
-      let current_keys = Hashtbl.create 64 in
-      Hashtbl.iter (fun key st ->
-        let bk = backend_key_for key in
-        Hashtbl.add current_keys bk ();
-        be.set bk (Bytes.of_string (Yojson.Safe.to_string (state_to_json st)))
-      ) tbl;
-      (* Удалить из backend ключи которые больше не в tbl *)
-      List.iter (fun bk ->
-        let plen = String.length key_prefix in
-        if String.length bk >= plen
-           && String.sub bk 0 plen = key_prefix
-           && not (Hashtbl.mem current_keys bk)
-        then be.delete bk
-      ) (be.keys ())
-  in
-
-  (* Восстановление при старте. *)
-  let restore_all () =
-    match backend with
-    | None -> ()
-    | Some be ->
-      List.iter (fun bk ->
-        match parse_backend_key bk with
-        | None -> ()
-        | Some win_key ->
-          match be.get bk with
-          | None -> ()
-          | Some v_bytes ->
-            (try
-              let json = Yojson.Safe.from_string (Bytes.to_string v_bytes) in
-              let st = state_of_json json in
-              Hashtbl.replace tbl win_key st
-            with
-            | Yojson.Json_error msg ->
-              failwith ("window_fold restore: invalid JSON (" ^ bk ^ "): " ^ msg))
-      ) (be.keys ())
-  in
-  restore_all ();
 
   fun () ->
     let rec pull () =
@@ -461,39 +325,40 @@ let window_fold
            - С backend: считаем что upstream может вернуться (recovery
              сценарий) и оставляем open окна в backend как есть, чтобы
              новый instance продолжил их при рестарте. *)
-        if backend = None then begin
-          Hashtbl.iter (fun (k,_,stop) st ->
+        if not (Managed_state.is_durable state) then begin
+          Managed_state.iter state (fun (k,_,stop) st ->
             match st with FOpen (acc, true) -> emit_data k stop acc | _ -> ()
-          ) tbl;
-          Hashtbl.clear tbl
+          );
+          Managed_state.iter state (fun k _ -> Managed_state.remove state k)
         end;
         if Queue.is_empty out then None else Some (Queue.pop out)
       | Some (Mf_event.Watermark wm) ->
         (* Open окна со stop+latency <= wm → Fire (с двухфазным проходом) *)
         let to_fire = ref [] in
-        Hashtbl.iter (fun key st ->
+        Managed_state.iter state (fun key st ->
           let (_,_,stop) = key in
           match st with
           | FOpen (acc, nonempty) when stop + latency <= wm ->
             to_fire := (key, acc, nonempty) :: !to_fire
           | _ -> ()
-        ) tbl;
+        );
         List.iter (fun ((k,_,stop) as key, acc, nonempty) ->
           if nonempty then emit_data k stop acc;
-          Hashtbl.replace tbl key (FFired (acc, nonempty))
+          Managed_state.set state key (FFired (acc, nonempty))
         ) !to_fire;
         (* Удаление старых FFired *)
         let to_remove = ref [] in
-        Hashtbl.iter (fun key st ->
+        Managed_state.iter state (fun key st ->
           let (_,_,stop) = key in
           match st with
           | FFired _ when stop + latency + allowed_lateness <= wm ->
             to_remove := key :: !to_remove
           | _ -> ()
-        ) tbl;
-        List.iter (Hashtbl.remove tbl) !to_remove;
-        (* Snapshot после всех изменений по watermark'у *)
-        persist_all ();
+        );
+        List.iter (Managed_state.evict state) !to_remove;
+        (* Snapshot после всех изменений по watermark'у — noop если
+           ephemeral, поэтому зовём безусловно. *)
+        Managed_state.checkpoint state;
         Queue.push (Mf_event.wm wm) out;
         pull ()
       | Some (Mf_event.Retract (v, t)) ->
@@ -504,16 +369,16 @@ let window_fold
          | Some rem ->
            List.iter (fun (s, stop) ->
              let mk = (K.key v, s, stop) in
-             match Hashtbl.find_opt tbl mk with
+             match Managed_state.get state mk with
              | None -> ()  (* окна нет — retract на пустой стейт игнорируется *)
              | Some (FOpen (acc, nonempty)) ->
-               Hashtbl.replace tbl mk (FOpen (rem acc v, nonempty))
+               Managed_state.set state mk (FOpen (rem acc v, nonempty))
              | Some (FFired (acc, _nonempty)) ->
                (* Phase 3 atomic: late retract применяет remove и
                   эмитит ОДИН Update event (был Retract+Data пара). *)
                let new_acc = rem acc v in
                emit_update (K.key v) stop acc new_acc;
-               Hashtbl.replace tbl mk (FFired (new_acc, true))
+               Managed_state.set state mk (FFired (new_acc, true))
            ) (assign spec t);
            pull ())
       | Some (Mf_event.Update { old; new_value; ts = t }) ->
@@ -532,15 +397,15 @@ let window_fold
               для non-retractable агрегатов. *)
            List.iter (fun (s, stop) ->
              let mk = (K.key new_value, s, stop) in
-             match Hashtbl.find_opt tbl mk with
+             match Managed_state.get state mk with
              | None ->
-               Hashtbl.add tbl mk (FOpen (add (init ()) new_value, true))
+               Managed_state.set state mk (FOpen (add (init ()) new_value, true))
              | Some (FOpen (acc, _)) ->
-               Hashtbl.replace tbl mk (FOpen (add acc new_value, true))
+               Managed_state.set state mk (FOpen (add acc new_value, true))
              | Some (FFired (acc, _)) ->
                let acc' = add acc new_value in
                emit_update (K.key new_value) stop acc acc';
-               Hashtbl.replace tbl mk (FFired (acc', true))
+               Managed_state.set state mk (FFired (acc', true))
            ) (assign spec t);
            pull ()
          | Some rem ->
@@ -550,35 +415,35 @@ let window_fold
               window correction, где меняется значение, а не время. *)
            List.iter (fun (s, stop) ->
              let mk = (K.key new_value, s, stop) in
-             match Hashtbl.find_opt tbl mk with
+             match Managed_state.get state mk with
              | None ->
                (* окна нет: old там не было, просто добавляем new *)
-               Hashtbl.add tbl mk (FOpen (add (init ()) new_value, true))
+               Managed_state.set state mk (FOpen (add (init ()) new_value, true))
              | Some (FOpen (acc, nonempty)) ->
                let acc' = add (rem acc old) new_value in
-               Hashtbl.replace tbl mk (FOpen (acc', nonempty))
+               Managed_state.set state mk (FOpen (acc', nonempty))
              | Some (FFired (acc, _)) ->
                (* late update на закрытое окно: атомарно пересчитываем
                   и эмитим ОДИН Update event downstream *)
                let acc' = add (rem acc old) new_value in
                emit_update (K.key new_value) stop acc acc';
-               Hashtbl.replace tbl mk (FFired (acc', true))
+               Managed_state.set state mk (FFired (acc', true))
            ) (assign spec t);
            pull ())
       | Some (Mf_event.Data (v, t)) ->
         List.iter (fun (s, stop) ->
           let mk = (K.key v, s, stop) in
-          match Hashtbl.find_opt tbl mk with
+          match Managed_state.get state mk with
           | None ->
-            Hashtbl.add tbl mk (FOpen (add (init ()) v, true))
+            Managed_state.set state mk (FOpen (add (init ()) v, true))
           | Some (FOpen (acc, _)) ->
-            Hashtbl.replace tbl mk (FOpen (add acc v, true))
+            Managed_state.set state mk (FOpen (add acc v, true))
           | Some (FFired (acc, _)) ->
             (* Phase 3 atomic: late data применяет add и эмитит
                ОДИН Update event (был Retract+Data пара). *)
             let acc' = add acc v in
             emit_update (K.key v) stop acc acc';
-            Hashtbl.replace tbl mk (FFired (acc', true))
+            Managed_state.set state mk (FFired (acc', true))
         ) (assign spec t);
         pull ()
     in pull ()

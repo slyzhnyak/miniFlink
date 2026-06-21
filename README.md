@@ -923,13 +923,13 @@ API-документация генерируется через odoc:
 
 Тематические документы:
 - [docs/expressiveness.md](docs/expressiveness.md) — улучшения выразительности
-  API: `Pipe.iter_data` family, `Pipe.keyed_join` (multi-stream join по ключу),
-  `Persistence_backend.persist` bundle для упрощения persistence-параметров
-- [docs/trigger-persistence.md](docs/trigger-persistence.md),
-  [docs/silence-age-persistence.md](docs/silence-age-persistence.md),
-  [docs/process-keyed-persistence.md](docs/process-keyed-persistence.md),
-  [docs/window-fold-persistence.md](docs/window-fold-persistence.md) —
-  reference по persistence четырёх stateful операторов
+  API: `Pipe.iter_data` family, `Pipe.keyed_join` (multi-stream join по ключу)
+- [docs/orthogonal-persistence.md](docs/orthogonal-persistence.md) —
+  **ортогональная persistence**: один и тот же пайплайн работает с
+  persistence и без, режим и сериализация задаются снаружи через
+  `Runtime_context` (Marshal по умолчанию). Все четыре stateful-оператора
+  (window_fold, process_keyed, silence_age, trigger) на этой модели.
+  Старые operator-specific доки оставлены как redirect-заметки.
 - [docs/atomic-update-event.md](docs/atomic-update-event.md) — вариант
   `Update` (атомарная коррекция old→new без промежуточного состояния)
 

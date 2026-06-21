@@ -49,24 +49,13 @@ let process_keyed
     (module K : Keyed.S with type t = a)
     ?(now_ms = fun () -> int_of_float (Unix.gettimeofday () *. 1000.))
     ?(on_stat : stat -> unit = fun _ -> ())
-    ?(persistence : st Persistence_backend.persist option)
+    ?(name = "default")
     ?(on_update : (out ctx -> string -> st -> old:a -> new_value:a -> unit) option)
     ~(init : unit -> st)
     ~(on_event : out ctx -> string -> st -> a -> unit)
     ~(on_timer : out ctx -> string -> st -> Time.t -> timer_kind -> unit)
     (upstream : a Mf_event.t Stream.t)
     : out Mf_event.t Stream.t =
-
-  (* Раскрываем persistence bundle в локальные option-значения. *)
-  let backend, backend_name, serialize_state, deserialize_state =
-    match persistence with
-    | Some p ->
-      (Some p.Persistence_backend.backend,
-       Some p.Persistence_backend.name,
-       Some p.Persistence_backend.serialize,
-       Some p.Persistence_backend.deserialize)
-    | None -> (None, None, None, None)
-  in
 
   let states : (string, st) Hashtbl.t = Hashtbl.create 64 in
   let ev_timers = ref TimerSet.empty in   (* (key, time) event-time *)
@@ -77,110 +66,40 @@ let process_keyed
   let stat e = on_stat e in
 
   (* ════════════════════════════════════════════════════════════════
-     PERSISTENCE LAYER
+     PERSISTENCE — ортогональная, через Managed_state.
 
-     Backend-ключ:
-       "process_keyed:{backend_name}:{key}"
-
-     Значение (JSON):
-       {
-         "state":     <serialized 'st>,
-         "ev_timers": [t1, t2, ...],
-         "pt_timers": [t1, t2, ...]
-       }
-
-     persist_key (ks) — записать всё, что относится к ключу ks:
-     - текущее состояние из states
-     - таймеры из ev_timers / pt_timers с этим ключом
+     Persistence решается ambient Runtime_context, не параметром.
+     Рабочие структуры (states + ev/pt_timers) остаются для быстрого
+     доступа; managed-state — durable-зеркало. Значение per-ключ
+     упаковывает состояние и таймеры этого ключа.
      ════════════════════════════════════════════════════════════════ *)
-  let key_prefix =
-    match backend_name with
-    | Some n -> "process_keyed:" ^ n ^ ":"
-    | None -> ""
+  let mstate : (string, st option * int list * int list) Managed_state.t =
+    Managed_state.create_string ~name:("process_keyed:" ^ name) () in
+
+  let timers_int_for_key timers key =
+    TimerSet.fold (fun (k, t) acc -> if k = key then t :: acc else acc)
+      !timers []
   in
 
-  let ser_st s =
-    match serialize_state with
-    | Some f -> f s
-    | None -> invalid_arg "process_keyed: serialize requested but no \
-                serializer in persistence bundle (invariant violated)"
-  in
-  let deser_st j =
-    match deserialize_state with
-    | Some f -> f j
-    | None -> invalid_arg "process_keyed: deserialize requested but no \
-                deserializer in persistence bundle (invariant violated)"
-  in
-
-  let timers_for_key timers key =
-    TimerSet.fold (fun (k, t) acc ->
-      if k = key then `Int t :: acc else acc
-    ) !timers []
-  in
-
+  (* persist_key (ks) — собрать состояние+таймеры ключа в managed-state
+     и точечно сcheckpoint'ить. В ephemeral checkpoint_key — noop. *)
   let persist_key (ks : string) =
-    match backend with
-    | None -> ()
-    | Some be ->
-      (* Если state отсутствует и таймеров нет — удаляем запись. *)
-      let st_opt = Hashtbl.find_opt states ks in
-      let evs = timers_for_key ev_timers ks in
-      let pts = timers_for_key pt_timers ks in
-      let bk = key_prefix ^ ks in
-      (match st_opt with
-       | None when evs = [] && pts = [] ->
-         be.delete bk
-       | _ ->
-         let state_json = match st_opt with
-           | Some s -> ser_st s
-           | None -> `Null in
-         let json = `Assoc [
-           ("state",     state_json);
-           ("ev_timers", `List evs);
-           ("pt_timers", `List pts);
-         ] in
-         be.set bk (Bytes.of_string (Yojson.Safe.to_string json)))
+    let st_opt = Hashtbl.find_opt states ks in
+    let evs = timers_int_for_key ev_timers ks in
+    let pts = timers_int_for_key pt_timers ks in
+    (match st_opt with
+     | None when evs = [] && pts = [] -> Managed_state.remove mstate ks
+     | _ -> Managed_state.set mstate ks (st_opt, evs, pts));
+    Managed_state.checkpoint_key mstate ks
   in
 
-  (* Восстановление при старте. *)
+  (* Восстановление при старте: managed-state уже загрузил записи из
+     backend (если durable), раскладываем их в рабочие структуры. *)
   let restore_all () =
-    match backend with
-    | None -> ()
-    | Some be ->
-      let plen = String.length key_prefix in
-      List.iter (fun bk ->
-        if String.length bk >= plen
-           && String.sub bk 0 plen = key_prefix
-        then begin
-          let ks = String.sub bk plen (String.length bk - plen) in
-          match be.get bk with
-          | None -> ()
-          | Some v_bytes ->
-            (try
-              let json = Yojson.Safe.from_string (Bytes.to_string v_bytes) in
-              match json with
-              | `Assoc kv ->
-                (match List.assoc "state" kv with
-                 | `Null -> ()
-                 | sj -> Hashtbl.replace states ks (deser_st sj));
-                let ev_list = match List.assoc "ev_timers" kv with
-                  | `List xs -> List.map Yojson.Safe.Util.to_int xs
-                  | _ -> [] in
-                List.iter (fun t ->
-                  ev_timers := TimerSet.add (ks, t) !ev_timers) ev_list;
-                let pt_list = match List.assoc "pt_timers" kv with
-                  | `List xs -> List.map Yojson.Safe.Util.to_int xs
-                  | _ -> [] in
-                List.iter (fun t ->
-                  pt_timers := TimerSet.add (ks, t) !pt_timers) pt_list
-              | _ -> failwith "process_keyed restore: top-level not assoc"
-            with
-            | Yojson.Json_error msg ->
-              failwith ("process_keyed restore: invalid JSON (" ^ bk ^ "): " ^ msg)
-            | Not_found ->
-              failwith ("process_keyed restore: missing field (" ^ bk ^ ")"))
-        end
-      ) (be.keys ())
+    Managed_state.iter mstate (fun ks (st_opt, evs, pts) ->
+      (match st_opt with Some s -> Hashtbl.replace states ks s | None -> ());
+      List.iter (fun t -> ev_timers := TimerSet.add (ks, t) !ev_timers) evs;
+      List.iter (fun t -> pt_timers := TimerSet.add (ks, t) !pt_timers) pts)
   in
   restore_all ();
 
@@ -278,12 +197,12 @@ type ('a, 'st, 'out) spec = {
   on_timer    : 'out ctx -> string -> 'st -> Time.t -> timer_kind -> unit;
   now_ms      : (unit -> int) option;
   on_stat     : (stat -> unit) option;
-  persistence : 'st Persistence_backend.persist option;
+  name        : string option;
 }
 
 let default_spec ~keyed ~init ~on_event ~on_timer = {
   keyed; init; on_event; on_timer;
-  now_ms = None; on_stat = None; persistence = None;
+  now_ms = None; on_stat = None; name = None;
 }
 
 let process_keyed_spec (spec : ('a, 'st, 'out) spec)
@@ -291,7 +210,7 @@ let process_keyed_spec (spec : ('a, 'st, 'out) spec)
   process_keyed spec.keyed
     ?now_ms:spec.now_ms
     ?on_stat:spec.on_stat
-    ?persistence:spec.persistence
+    ?name:spec.name
     ~init:spec.init
     ~on_event:spec.on_event
     ~on_timer:spec.on_timer

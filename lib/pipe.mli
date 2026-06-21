@@ -248,7 +248,6 @@ val window_fold :
   (module Keyed.S with type t = 'a) ->
   ?latency:Time.t ->
   ?allowed_lateness:Time.t ->
-  ?persistence:'acc Persistence_backend.persist ->
   ?remove:('acc -> 'a -> 'acc) ->
   win_spec ->
   init:(unit -> 'acc) ->
@@ -490,7 +489,7 @@ val process_keyed :
   (module Keyed.S with type t = 'a) ->
   ?now_ms:(unit -> int) ->
   ?on_stat:(Process_fn.stat -> unit) ->
-  ?persistence:'st Persistence_backend.persist ->
+  ?name:string ->
   ?on_update:('out ctx -> string -> 'st -> old:'a -> new_value:'a -> unit) ->
   init:(unit -> 'st) ->
   on_event:('out ctx -> string -> 'st -> 'a -> unit) ->
