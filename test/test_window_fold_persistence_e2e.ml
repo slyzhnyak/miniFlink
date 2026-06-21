@@ -22,28 +22,21 @@ let pass name = Printf.printf "  OK %s\n%!" name
 let fail name = Printf.printf "  FAIL %s\n%!" name; exit 1
 let check name c = if c then pass name else fail name
 
-(* Аккумулятор окна: сумма voltage. Простой int для краткости
-   (умножаем на 100). *)
-let voltage_acc_to_json (s : int) : Yojson.Safe.t = `Int s
-let voltage_acc_of_json = function
-  | `Int n -> n
-  | _ -> failwith "voltage acc not int"
-
 (* Pipeline: window_fold (sliding 60s/15s) суммирует voltage*100
    per lamp. allowed_lateness=30с — чтобы FFired окна оставались в
-   backend в зоне допустимого опоздания. *)
-let voltage_window ?backend events =
+   backend в зоне допустимого опоздания.
+
+   ВАЖНО: пайплайн НЕ упоминает persistence. Один и тот же код
+   работает в ephemeral и durable — persistence задаётся снаружи
+   через Runtime_context.with_context на вызывающей стороне. Это и
+   есть цель ортогонального дизайна. *)
+let voltage_window events =
   events |> Stream.of_list
   |> Pipe.window_fold
        (module struct
          type t = Domain.packet
          let key (p : Domain.packet) = p.lamp
        end)
-       ?persistence:(Option.map (fun bk ->
-           { Persistence_backend.backend = bk;
-             name = "voltage_e2e";
-             serialize = (voltage_acc_to_json);
-             deserialize = (voltage_acc_of_json) }) backend)
        ~allowed_lateness:(Time.seconds 30)
        (Pipe.sliding (Time.seconds 60) (Time.seconds 15))
        ~init:(fun () -> 0)
@@ -81,8 +74,8 @@ let () =
   Printf.printf "  phase 1: %d events, phase 2: %d events\n"
     (List.length phase1_events) (List.length phase2_events);
 
-  (* ── Baseline: те же события подряд без crash ──────────────── *)
-  Printf.printf "\n-- Baseline: phase1+phase2 events concatenated\n";
+  (* ── Baseline: те же события подряд без crash (EPHEMERAL) ──── *)
+  Printf.printf "\n-- Baseline: phase1+phase2 events concatenated (ephemeral)\n";
 
   let combined = phase1_events @ phase2_with_wm in
   let baseline_stream = voltage_window combined in
@@ -92,14 +85,17 @@ let () =
   Printf.printf "  baseline total: %d\n" baseline_total;
   check "baseline produces emissions" (baseline_total >= 1);
 
-  (* ── Phase 1 ──────────────────────────────────────────────── *)
-  Printf.printf "\n-- Phase 1: run up to t=180s with backend\n";
+  (* ── Phase 1: ТОТ ЖЕ пайплайн, но в DURABLE-контексте ──────── *)
+  Printf.printf "\n-- Phase 1: run up to t=180s in durable context\n";
 
   let tbl = Hashtbl.create 64 in
   let backend = Persistence_backend.of_memory tbl in
+  let ctx = Runtime_context.durable backend in
 
-  let phase1_stream = voltage_window ~backend phase1_events in
-  let phase1_counts = count_per_key phase1_stream in
+  (* Тот же voltage_window, без изменений — persistence снаружи. *)
+  let phase1_counts =
+    Runtime_context.with_context ctx (fun () ->
+      count_per_key (voltage_window phase1_events)) in
   let phase1_total = Hashtbl.fold (fun _ v a -> a + v) phase1_counts 0 in
   Printf.printf "  phase 1 emits: %d\n" phase1_total;
 
@@ -107,29 +103,12 @@ let () =
   Printf.printf "  backend has %d window records\n" backend_records;
   check "phase 1: backend has window records" (backend_records >= 1);
 
-  (* Проверим что в backend есть и FOpen, и FFired окна *)
-  let has_open = Hashtbl.fold (fun _ v acc ->
-    let json = Yojson.Safe.from_string (Bytes.to_string v) in
-    match json with
-    | `Assoc kv ->
-      let st = Yojson.Safe.Util.to_string (List.assoc "state" kv) in
-      acc || st = "open"
-    | _ -> acc) tbl false in
-  let has_fired = Hashtbl.fold (fun _ v acc ->
-    let json = Yojson.Safe.from_string (Bytes.to_string v) in
-    match json with
-    | `Assoc kv ->
-      let st = Yojson.Safe.Util.to_string (List.assoc "state" kv) in
-      acc || st = "fired"
-    | _ -> acc) tbl false in
-  check "phase 1: backend has FOpen windows (not yet fired)" has_open;
-  check "phase 1: backend has FFired windows (already emitted)" has_fired;
+  (* ── Phase 2: новый window_fold в том же контексте → restore ── *)
+  Printf.printf "\n-- Phase 2: new window_fold picks up state from backend\n";
 
-  (* ── Phase 2 ──────────────────────────────────────────────── *)
-  Printf.printf "\n-- Phase 2: new window_fold picks up state\n";
-
-  let phase2_stream = voltage_window ~backend phase2_with_wm in
-  let phase2_counts = count_per_key phase2_stream in
+  let phase2_counts =
+    Runtime_context.with_context ctx (fun () ->
+      count_per_key (voltage_window phase2_with_wm)) in
   let phase2_total = Hashtbl.fold (fun _ v a -> a + v) phase2_counts 0 in
   Printf.printf "  phase 2 emits: %d\n" phase2_total;
 

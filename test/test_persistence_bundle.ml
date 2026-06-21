@@ -89,32 +89,8 @@ let () =
   check "process_keyed backend has key"
     (Hashtbl.mem tbl_pk "process_keyed:counter:A");
 
-  (* ── 5. window_fold via ?persistence ────────────────────── *)
-  Printf.printf "\n-- 5. window_fold via ?persistence\n";
-  let tbl_wf = Hashtbl.create 16 in
-  let pst : int Persistence_backend.persist = {
-    backend     = Persistence_backend.of_memory tbl_wf;
-    name        = "sum";
-    serialize   = (fun n -> `Int n);
-    deserialize = (function `Int n -> n | _ -> failwith "bad");
-  } in
-  let module K2 : Keyed.S with type t = string * int = struct
-    type t = string * int
-    let key (k, _) = k
-  end in
-  let events = [
-    Mf_event.data ("X", 5) 0;
-    Mf_event.data ("X", 7) 1000;
-    Mf_event.wm 5000;
-  ] in
-  let stream = events |> Stream.of_list
-    |> Pipe.window_fold (module K2)
-         ~persistence:pst
-         (Pipe.tumbling (Time.seconds 10))
-         ~init:(fun () -> 0)
-         ~add:(fun acc (_, n) -> acc + n) in
-  Pipe.iter_data (fun _ -> ()) stream;
-  check "window_fold backend has window record"
-    (Hashtbl.mem tbl_wf "window_fold:sum:X:0:10000");
+  (* window_fold перешёл на ортогональную persistence (Runtime_context
+     + Managed_state), поэтому ?persistence-bundle к нему больше не
+     применяется — его поведение покрыто test_window_fold_persistence. *)
 
   Printf.printf "\nAll persistence bundle tests passed.\n"

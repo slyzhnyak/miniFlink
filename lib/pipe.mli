@@ -248,7 +248,6 @@ val window_fold :
   (module Keyed.S with type t = 'a) ->
   ?latency:Time.t ->
   ?allowed_lateness:Time.t ->
-  ?persistence:'acc Persistence_backend.persist ->
   ?remove:('acc -> 'a -> 'acc) ->
   win_spec ->
   init:(unit -> 'acc) ->

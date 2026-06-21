@@ -370,11 +370,6 @@ let run_pipeline ?trigger_bk ?silence_bk ?process_bk ?window_bk
   let voltage_sum =
     voltage_stream
     |> Pipe.window_fold (module Voltage_keyed)
-         ?persistence:(Option.map (fun bk ->
-           { Persistence_backend.backend = bk;
-             name = "bench_vsum";
-             serialize = ((fun (f : float) -> `Float f));
-             deserialize = ((function `Float f -> f | _ -> 0.0)) }) window_bk)
          (Pipe.tumbling (Time.minutes 1))
          ~init:(fun () -> 0.0)
          ~add:(fun acc (_, v) -> acc +. v) in

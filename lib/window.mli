@@ -25,37 +25,22 @@ val window :
 val window_fold :
   (module Keyed.S with type t = 'a) ->
   ?latency:Time.t -> ?allowed_lateness:Time.t ->
-  ?persistence:'acc Persistence_backend.persist ->
   ?remove:('acc -> 'a -> 'acc) ->
   win_spec ->
   init:(unit -> 'acc) -> add:('acc -> 'a -> 'acc) ->
   'a Mf_event.t Stream.t -> (string * 'acc) Mf_event.t Stream.t
-(** {b [?backend]} — если передан, [window_fold] сохраняет per-window
-    state (аккумулятор + флаг nonempty + FOpen/FFired) в
-    [Persistence_backend] на каждый [Watermark] (т.н. checkpoint
-    barrier). На старте восстанавливает все окна из backend.
+(** Persistence ОРТОГОНАЛЬНА: [window_fold] не принимает persistence-
+    параметра. Состояние окон хранится в {!Managed_state}, чьё
+    поведение задаёт ambient {!Runtime_context}:
+    - вне [Runtime_context.with_context] (или в [ephemeral]) — состояние
+      только в памяти;
+    - в [durable]-контексте — состояние снапшотится в backend на каждый
+      [Watermark] (естественный checkpoint barrier) и восстанавливается
+      на старте.
 
-    Требует [?backend_name] + [?serialize_acc]/[?deserialize_acc] для
-    пользовательского типа аккумулятора. Если backend подключён, а
-    параметры отсутствуют — [Invalid_argument].
-
-    Backend-ключ:
-    [["window_fold:{backend_name}:{user_key}:{start}:{stop}"]].
-
-    Значение (JSON):
-    {[
-      {
-        "state":    "open" | "fired",
-        "acc":      <serialized 'acc>,
-        "nonempty": bool
-      }
-    ]}
-
-    Snapshot пишется {b на каждом watermark}, не на каждом event —
-    это естественный checkpoint barrier, который согласует все
-    окна одного watermark'а consistent. Это отличается от Trigger
-    (snapshot на transitions), silence_age (на каждый event +
-    tick), process_keyed (на каждый on_event/on_timer). *)
+    Один и тот же вызов [window_fold] работает в обоих режимах без
+    изменений. Сериализация — по codec-политике контекста (Marshal по
+    умолчанию). Namespace в backend: [["window_fold:{spec}:{key}:{start}:{stop}"]]. *)
 
 (** Спецификация count-окна. *)
 type count_spec
