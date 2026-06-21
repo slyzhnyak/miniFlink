@@ -260,42 +260,45 @@ let approx_median f =
 
    Retract: если inner retractable, group_by retractable. Применяем
    inner.remove к группе [key x]. Если inner None — group_by тоже None. *)
+module SMap = Map.Make (String)
+
 let group_by (type a) (type r)
     ~(key : a -> string)
     ~(inner : (a, r) t) : (a, (string * r) list) t =
   let Agg { init = inner_init; add = inner_add;
             remove = inner_remove; finish = inner_finish } = inner in
-  (* ВАЖНО: аккумулятор group_by (Hashtbl) обязан быть IMMUTABLE по
-     отношению к add/remove — они возвращают НОВЫЙ Hashtbl, не мутируя
-     входной. Иначе window_fold, делая `acc' = add acc v` для late
-     correction и эмитя Update{old=acc, new=acc'}, получил бы old и
-     new, указывающие на ОДИН мутированный объект → коррекция
-     выглядела бы как noop (finish old = finish new) и подавлялась
-     бы, а late data молча терялась. Копируем Hashtbl на каждое
-     изменение. *)
+  (* Аккумулятор group_by — IMMUTABLE Map (а не mutable Hashtbl).
+     Это критично: window_fold для late correction делает
+     `acc' = add acc v` и эмитит Update{old=acc, new=acc'}, поэтому
+     old и new обязаны быть НЕЗАВИСИМЫМИ снимками. С mutable Hashtbl
+     они указывали бы на один мутированный объект → finish old =
+     finish new → коррекция выглядела бы как noop, подавлялась, и
+     late data молча терялась.
+
+     Map даёт immutability ДЁШЕВО: Map.add/update — O(log n) со
+     структурным разделением (переиспользует неизменённые ветки
+     дерева), без полного копирования как Hashtbl.copy. Inner-
+     аккумуляторы (sum/mean/median/...) сами immutable, так что
+     общий acc полностью персистентный. *)
   let remove_opt = match inner_remove with
     | None -> None  (* если inner не retractable, group_by тоже *)
     | Some inner_rem ->
-      Some (fun tbl x ->
+      Some (fun m x ->
         let k = key x in
-        let tbl' = Hashtbl.copy tbl in
-        (match Hashtbl.find_opt tbl' k with
-         | Some acc -> Hashtbl.replace tbl' k (inner_rem acc x)
-         | None -> ());  (* нет такой группы — игнорируем *)
-        tbl')
+        match SMap.find_opt k m with
+        | Some acc -> SMap.add k (inner_rem acc x) m
+        | None -> m)  (* нет такой группы — игнорируем *)
   in
   Agg {
-    init = (fun () -> Hashtbl.create 8);
-    add = (fun tbl x ->
+    init = (fun () -> SMap.empty);
+    add = (fun m x ->
       let k = key x in
-      let tbl' = Hashtbl.copy tbl in
-      let acc = match Hashtbl.find_opt tbl' k with
+      let acc = match SMap.find_opt k m with
         | Some a -> a | None -> inner_init () in
-      Hashtbl.replace tbl' k (inner_add acc x);
-      tbl');
+      SMap.add k (inner_add acc x) m);
     remove = remove_opt;
-    finish = (fun tbl ->
-      Hashtbl.fold (fun k acc rest -> (k, inner_finish acc) :: rest) tbl []);
+    finish = (fun m ->
+      SMap.fold (fun k acc rest -> (k, inner_finish acc) :: rest) m []);
   }
 
 (* top_k_by: K элементов с наибольшим [by]; сортировка по убыванию.
