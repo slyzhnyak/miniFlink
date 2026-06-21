@@ -265,24 +265,34 @@ let group_by (type a) (type r)
     ~(inner : (a, r) t) : (a, (string * r) list) t =
   let Agg { init = inner_init; add = inner_add;
             remove = inner_remove; finish = inner_finish } = inner in
+  (* ВАЖНО: аккумулятор group_by (Hashtbl) обязан быть IMMUTABLE по
+     отношению к add/remove — они возвращают НОВЫЙ Hashtbl, не мутируя
+     входной. Иначе window_fold, делая `acc' = add acc v` для late
+     correction и эмитя Update{old=acc, new=acc'}, получил бы old и
+     new, указывающие на ОДИН мутированный объект → коррекция
+     выглядела бы как noop (finish old = finish new) и подавлялась
+     бы, а late data молча терялась. Копируем Hashtbl на каждое
+     изменение. *)
   let remove_opt = match inner_remove with
     | None -> None  (* если inner не retractable, group_by тоже *)
     | Some inner_rem ->
       Some (fun tbl x ->
         let k = key x in
-        (match Hashtbl.find_opt tbl k with
-         | Some acc -> Hashtbl.replace tbl k (inner_rem acc x)
+        let tbl' = Hashtbl.copy tbl in
+        (match Hashtbl.find_opt tbl' k with
+         | Some acc -> Hashtbl.replace tbl' k (inner_rem acc x)
          | None -> ());  (* нет такой группы — игнорируем *)
-        tbl)
+        tbl')
   in
   Agg {
     init = (fun () -> Hashtbl.create 8);
     add = (fun tbl x ->
       let k = key x in
-      let acc = match Hashtbl.find_opt tbl k with
+      let tbl' = Hashtbl.copy tbl in
+      let acc = match Hashtbl.find_opt tbl' k with
         | Some a -> a | None -> inner_init () in
-      Hashtbl.replace tbl k (inner_add acc x);
-      tbl);
+      Hashtbl.replace tbl' k (inner_add acc x);
+      tbl');
     remove = remove_opt;
     finish = (fun tbl ->
       Hashtbl.fold (fun k acc rest -> (k, inner_finish acc) :: rest) tbl []);

@@ -114,4 +114,48 @@ let () =
        (key = "D" && n = 0)
    | _ -> fail "expected 1 emission");
 
+  (* ── group_by + late data: НЕ должно молча теряться ──────────
+     Регрессия для бага mutable-accumulator: group_by использовал
+     Hashtbl, мутируемый на месте в add/remove. window_fold, делая
+     `acc' = add acc v` для late correction, получал old и new,
+     указывающие на ОДИН мутированный Hashtbl → finish old = finish
+     new → коррекция выглядела как noop и подавлялась, late data
+     терялась. После фикса (Hashtbl.copy) late data даёт реальный
+     Update. *)
+  Printf.printf "\n-- group_by + late data emits real Update (not lost)\n";
+  let module GK = struct
+    type t = { gk : string; gbeacon : string; grssi : float }
+    let key e = e.gk
+  end in
+  let mk k b r ts = Mf_event.data { GK.gk = k; gbeacon = b; grssi = r } ts in
+  let events = [
+    mk "M" "B3" (-49.) 100;
+    mk "M" "B4" (-51.) 200;
+    Mf_event.wm 2000;               (* закрывает [0,1000): top по median *)
+    mk "M" "B5" (-42.) 300;         (* late, сильный B5 в [0,1000) *)
+    Mf_event.wm 3000;
+  ] in
+  let out = events |> Stream.of_list
+    |> Pipe.window_agg (module GK) ~allowed_lateness:5000
+         (Pipe.tumbling 1000)
+         Agg.(group_by ~key:(fun e -> e.GK.gbeacon)
+                ~inner:(median (fun e -> e.GK.grssi)))
+    |> (fun s -> let a = ref [] in
+        let rec go () = match s () with None -> () | Some e -> a := e :: !a; go () in
+        go (); List.rev !a) in
+  let updates = List.filter_map (function
+    | Mf_event.Update { old = (_, o); new_value = (_, n); _ } -> Some (o, n)
+    | _ -> None) out in
+  Printf.printf "  updates: %d\n" (List.length updates);
+  check "late data into group_by produces a real Update (not silently lost)"
+    (List.length updates = 1);
+  (match updates with
+   | [(old_groups, new_groups)] ->
+     (* old: {B3,B4}; new: {B3,B4,B5}. B5 появился — old <> new. *)
+     check "Update reflects B5 appearing in the group set"
+       (old_groups <> new_groups
+        && List.mem_assoc "B5" new_groups
+        && not (List.mem_assoc "B5" old_groups))
+   | _ -> fail "expected exactly 1 update");
+
   Printf.printf "\nTest passed.\n"
