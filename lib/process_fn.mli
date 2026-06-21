@@ -81,13 +81,20 @@ val process_keyed :
   (module Keyed.S with type t = 'a) ->
   ?now_ms:(unit -> int) ->
   ?on_stat:(stat -> unit) ->
-  ?persistence:'st Persistence_backend.persist ->
+  ?name:string ->
   ?on_update:('out ctx -> string -> 'st -> old:'a -> new_value:'a -> unit) ->
   init:(unit -> 'st) ->
   on_event:('out ctx -> string -> 'st -> 'a -> unit) ->
   on_timer:('out ctx -> string -> 'st -> Time.t -> timer_kind -> unit) ->
   'a Mf_event.t Stream.t -> 'out Mf_event.t Stream.t
-(** {b [?on_update]} (Phase 3.3) — опциональный callback для
+(** Persistence ОРТОГОНАЛЬНА: задаётся ambient {!Runtime_context}, не
+    параметром. В durable-контексте per-key состояние (включая event-
+    и processing-таймеры) снапшотится в backend на каждое изменение и
+    восстанавливается на старте. [?name] — стабильный namespace
+    оператора (по умолчанию ["default"]); нужен если в пайплайне
+    несколько process_keyed, чтобы их ключи в backend не коллидировали.
+
+    {b [?on_update]} (Phase 3.3) — опциональный callback для
     атомарной обработки {!Mf_event.Update} событий. Если передан,
     вызывается на каждом Update с обоими значениями [old] и [new_value],
     позволяя выполнить atomic state transition — например, откатить
@@ -167,7 +174,7 @@ type ('a, 'st, 'out) spec = {
   on_timer    : 'out ctx -> string -> 'st -> Time.t -> timer_kind -> unit;
   now_ms      : (unit -> int) option;
   on_stat     : (stat -> unit) option;
-  persistence : 'st Persistence_backend.persist option;
+  name        : string option;
 }
 
 val default_spec :
@@ -177,7 +184,7 @@ val default_spec :
   on_timer:('out ctx -> string -> 'st -> Time.t -> timer_kind -> unit) ->
   ('a, 'st, 'out) spec
 (** Минимальный spec с обязательными полями. Defaults для
-    [now_ms], [on_stat], [persistence] — все [None]. *)
+    [now_ms], [on_stat], [name] — все [None]. *)
 
 val process_keyed_spec :
   ('a, 'st, 'out) spec ->

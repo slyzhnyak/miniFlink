@@ -61,36 +61,10 @@ let () =
     (Hashtbl.fold (fun k _ a -> k :: a) tbl_b []) in
   check "backend has keys" (List.length keys_b > 0);
 
-  (* ── 4. process_keyed via ?persistence ──────────────────── *)
-  Printf.printf "\n-- 4. process_keyed via ?persistence\n";
-  let tbl_pk = Hashtbl.create 16 in
-  let pst : int Persistence_backend.persist = {
-    backend     = Persistence_backend.of_memory tbl_pk;
-    name        = "counter";
-    serialize   = (fun n -> `Int n);
-    deserialize = (function `Int n -> n | _ -> failwith "bad");
-  } in
-  let module K : Keyed.S with type t = string * int = struct
-    type t = string * int
-    let key (k, _) = k
-  end in
-  let events = [
-    Mf_event.data ("A", 1) 0;
-    Mf_event.data ("A", 2) 1000;
-    Mf_event.wm 2000;
-  ] in
-  let stream = events |> Stream.of_list
-    |> Pipe.process_keyed (module K)
-         ~persistence:pst
-         ~init:(fun () -> 0)
-         ~on_event:(fun _ctx _k st _v -> ignore st)
-         ~on_timer:(fun _ _ _ _ _ -> ()) in
-  Pipe.iter_data (fun _ -> ()) stream;
-  check "process_keyed backend has key"
-    (Hashtbl.mem tbl_pk "process_keyed:counter:A");
-
-  (* window_fold перешёл на ортогональную persistence (Runtime_context
-     + Managed_state), поэтому ?persistence-bundle к нему больше не
-     применяется — его поведение покрыто test_window_fold_persistence. *)
+  (* process_keyed и window_fold перешли на ортогональную persistence
+     (Runtime_context + Managed_state) — bundle-параметр к ним больше
+     не применяется. Их поведение покрыто
+     test_process_keyed_persistence и test_window_fold_persistence.
+     Здесь остаётся только silence_age, ещё использующий bundle. *)
 
   Printf.printf "\nAll persistence bundle tests passed.\n"

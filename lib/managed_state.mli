@@ -36,6 +36,11 @@ val size : ('k, 'v) t -> int
     оператор зовёт безусловно. *)
 val checkpoint : ('k, 'v) t -> unit
 
+(** Снапшот ОДНОГО ключа (точечный checkpoint) — для операторов,
+    персистящих per-key на каждое изменение (process_keyed,
+    silence_age), а не batch'ем на watermark. В ephemeral — noop. *)
+val checkpoint_key : ('k, 'v) t -> 'k -> unit
+
 (** Удалить ключ из памяти И backend (eviction старых окон/ключей). *)
 val evict : ('k, 'v) t -> 'k -> unit
 

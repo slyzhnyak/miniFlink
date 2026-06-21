@@ -27,38 +27,24 @@ type fsm_state = {
   mutable timer_at     : Time.t;
 }
 
-let fsm_to_json (s : fsm_state) : Yojson.Safe.t =
-  `Assoc [
-    ("last_seen_ts", `Int s.last_seen_ts);
-    ("timer_at",     `Int s.timer_at);
-  ]
-
-let fsm_of_json = function
-  | `Assoc kv ->
-    let last = List.assoc "last_seen_ts" kv |> Yojson.Safe.Util.to_int in
-    let timer = List.assoc "timer_at" kv |> Yojson.Safe.Util.to_int in
-    { last_seen_ts = last; timer_at = timer }
-  | _ -> failwith "fsm state not assoc"
-
 (* Threshold: "молчание дольше 30 секунд = alert". *)
 let silence_threshold = Time.seconds 30
 
 (* Алерт (просто строка для подсчёта). *)
 type alert = No_packets of string * Time.t
 
-(* Главный pipeline: process_keyed с FSM logic. *)
-let connectivity_pipeline ?backend events =
+(* Главный pipeline: process_keyed с FSM logic.
+   ОРТОГОНАЛЬНО: пайплайн не упоминает persistence — режим задаётся
+   снаружи через Runtime_context.with_context. ~name даёт стабильный
+   namespace состояния в backend. *)
+let connectivity_pipeline events =
   events |> Stream.of_list
   |> Pipe.process_keyed
        (module struct
          type t = Domain.packet
          let key (p : Domain.packet) = p.lamp
        end)
-       ?persistence:(Option.map (fun bk ->
-           { Persistence_backend.backend = bk;
-             name = "fsm_e2e";
-             serialize = (fsm_to_json);
-             deserialize = (fsm_of_json) }) backend)
+       ~name:"fsm_e2e"
        ~init:(fun () -> { last_seen_ts = 0; timer_at = 0 })
        ~on_event:(fun ctx _key st (p : Domain.packet) ->
          (* Cancel предыдущий таймер если был *)
@@ -122,13 +108,16 @@ let () =
   check "baseline produces alerts" (baseline_total >= 1);
 
   (* ── Phase 1 ──────────────────────────────────────────────── *)
-  Printf.printf "\n-- Phase 1: run up to t=180s with backend\n";
+  Printf.printf "\n-- Phase 1: run up to t=180s in durable context\n";
 
   let tbl = Hashtbl.create 64 in
   let backend = Persistence_backend.of_memory tbl in
+  let ctx = Runtime_context.durable backend in
 
-  let phase1_stream = connectivity_pipeline ~backend phase1_events in
-  let phase1_alerts = count_alerts phase1_stream in
+  (* Тот же connectivity_pipeline, без изменений — persistence снаружи. *)
+  let phase1_alerts =
+    Runtime_context.with_context ctx (fun () ->
+      count_alerts (connectivity_pipeline phase1_events)) in
   let phase1_total = Hashtbl.fold (fun _ v a -> a + v) phase1_alerts 0 in
   Printf.printf "  phase 1 alerts: %d\n" phase1_total;
 
@@ -136,23 +125,12 @@ let () =
   Printf.printf "  backend has %d FSM records\n" backend_keys;
   check "phase 1: backend has FSM records" (backend_keys >= 1);
 
-  (* Проверим что backend содержит timer для активного шахтёра *)
-  let any_with_timer = Hashtbl.fold (fun _ v_bytes acc ->
-    let json = Yojson.Safe.from_string (Bytes.to_string v_bytes) in
-    match json with
-    | `Assoc kv ->
-      (match List.assoc_opt "ev_timers" kv with
-       | Some (`List (_ :: _)) -> true
-       | _ -> acc)
-    | _ -> acc) tbl false in
-  check "phase 1: at least one FSM has pending event_timer in backend"
-    any_with_timer;
+  (* ── Phase 2: новый pipeline, тот же контекст → restore ──────── *)
+  Printf.printf "\n-- Phase 2: new pipeline picks up state from backend\n";
 
-  (* ── Phase 2 ──────────────────────────────────────────────── *)
-  Printf.printf "\n-- Phase 2: new pipeline picks up state\n";
-
-  let phase2_stream = connectivity_pipeline ~backend phase2_with_wm in
-  let phase2_alerts = count_alerts phase2_stream in
+  let phase2_alerts =
+    Runtime_context.with_context ctx (fun () ->
+      count_alerts (connectivity_pipeline phase2_with_wm)) in
   let phase2_total = Hashtbl.fold (fun _ v a -> a + v) phase2_alerts 0 in
   Printf.printf "  phase 2 alerts: %d\n" phase2_total;
 

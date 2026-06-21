@@ -339,11 +339,7 @@ let run_pipeline ?trigger_bk ?silence_bk ?process_bk ?window_bk
   let evacuation_alerts =
     combined_stream
     |> Pipe.process_keyed (module Combined_keyed)
-         ?persistence:(Option.map (fun bk ->
-           { Persistence_backend.backend = bk;
-             name = "bench_combined_fsm";
-             serialize = combined_to_json;
-             deserialize = combined_of_json }) process_bk)
+         ~name:"bench_combined_fsm"
          ~init:(fun () ->
            { voltage = 4.0; co = 0.0; rssi = -50.0; critical_since = 0 })
          ~on_event:(fun ctx key st (_k, opts) ->

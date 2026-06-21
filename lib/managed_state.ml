@@ -106,6 +106,20 @@ let checkpoint t =
       be.Persistence_backend.set bk (t.codec.Runtime_context.to_bytes (Obj.repr v))
     ) t.tbl
 
+(* Снапшот ОДНОГО ключа в backend (точечный checkpoint). Для
+   операторов, которые персистят per-key на каждое изменение
+   (process_keyed, silence_age), а не batch'ем на watermark.
+   В ephemeral — noop. *)
+let checkpoint_key t k =
+  match t.durable with
+  | None -> ()
+  | Some be ->
+    let ks = t.key_str k in
+    match Hashtbl.find_opt t.tbl ks with
+    | Some v -> be.Persistence_backend.set (prefix t ^ ks)
+                  (t.codec.Runtime_context.to_bytes (Obj.repr v))
+    | None -> be.Persistence_backend.delete (prefix t ^ ks)
+
 (* Удалить запись и из backend (для eviction старых окон/ключей). *)
 let evict t k =
   let ks = t.key_str k in
