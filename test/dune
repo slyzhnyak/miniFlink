@@ -519,3 +519,11 @@
  (libraries miniflink)
  (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
  (modules test_event_semantics_coverage))
+
+
+
+(test
+ (name test_keyed_join_semantics)
+ (libraries miniflink)
+ (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
+ (modules test_keyed_join_semantics))
