@@ -165,8 +165,7 @@ let alert_to_json = function
 let alert_of_json _ = A_recovery ("?", 0)  (* placeholder for trigger param *)
 
 (* Низкое напряжение trigger spec. С backend если bk = Some, иначе без. *)
-let mk_low_voltage_trigger ?backend () =
-  let backend_opt = backend in
+let mk_low_voltage_trigger () =
   Trigger.create
     ~name:"low_voltage_bench"
     ~condition:(Trigger.less_than 3.5)
@@ -174,26 +173,10 @@ let mk_low_voltage_trigger ?backend () =
     ~severity:Trigger.Warning
     ~produce_alert:(fun ~key ~value ~ts -> A_low_voltage (key, value, ts))
     ~produce_recovery:(fun ~key ~ts -> A_recovery (key, ts))
-    ?serialize_key:(if backend_opt <> None
-                    then Some (fun k -> `String k) else None)
-    ?deserialize_key:(if backend_opt <> None
-                      then Some (fun j -> Yojson.Safe.Util.to_string j)
-                      else None)
-    ?serialize_value:(if backend_opt <> None
-                      then Some (fun v -> `Float v) else None)
-    ?deserialize_value:(if backend_opt <> None
-                        then Some (function `Float v -> v
-                                          | _ -> failwith "bad")
-                        else None)
-    ?serialize_alert:(if backend_opt <> None
-                      then Some alert_to_json else None)
-    ?deserialize_alert:(if backend_opt <> None
-                        then Some alert_of_json else None)
     ()
 
 (* CO trigger spec. *)
-let mk_co_trigger ?backend () =
-  let backend_opt = backend in
+let mk_co_trigger () =
   Trigger.create
     ~name:"high_co_bench"
     ~condition:(Trigger.greater_than 50.0)
@@ -201,21 +184,6 @@ let mk_co_trigger ?backend () =
     ~severity:Trigger.High
     ~produce_alert:(fun ~key ~value ~ts -> A_high_co (key, value, ts))
     ~produce_recovery:(fun ~key ~ts -> A_co_recovery (key, ts))
-    ?serialize_key:(if backend_opt <> None
-                    then Some (fun k -> `String k) else None)
-    ?deserialize_key:(if backend_opt <> None
-                      then Some (fun j -> Yojson.Safe.Util.to_string j)
-                      else None)
-    ?serialize_value:(if backend_opt <> None
-                      then Some (fun v -> `Float v) else None)
-    ?deserialize_value:(if backend_opt <> None
-                        then Some (function `Float v -> v
-                                          | _ -> failwith "bad")
-                        else None)
-    ?serialize_alert:(if backend_opt <> None
-                      then Some alert_to_json else None)
-    ?deserialize_alert:(if backend_opt <> None
-                        then Some alert_of_json else None)
     ()
 
 (* Pipeline (РЕАЛИСТИЧНЫЙ minePASS с триангуляцией и enriched gas):
@@ -253,6 +221,19 @@ let run_pipeline ?trigger_bk ?silence_bk ?process_bk ?window_bk
     (gas : Domain.gas_packet Mf_event.t list)
   : int =
   let open Ex07_location_lib in
+  (* Любой из *_bk задаёт durable-backend; persistence ортогональна,
+     поэтому собираем единый Runtime_context и оборачиваем им построение
+     и прогон пайплайна (namespace по имени оператора разводит их в
+     backend). *)
+  let backend_opt =
+    match trigger_bk, silence_bk, process_bk, window_bk with
+    | Some b, _, _, _ | _, Some b, _, _
+    | _, _, Some b, _ | _, _, _, Some b -> Some b
+    | None, None, None, None -> None in
+  let ctx = match backend_opt with
+    | Some b -> Runtime_context.durable b
+    | None -> Runtime_context.ephemeral in
+  Runtime_context.with_context ctx @@ fun () ->
   let find_beacon = match find_beacon with
     | Some f -> f
     | None -> !find_beacon_ref in
@@ -289,13 +270,11 @@ let run_pipeline ?trigger_bk ?silence_bk ?process_bk ?window_bk
 
   let voltage_alerts =
     voltage_stream
-    |> Trigger.of_stream ?backend:trigger_bk
-         (mk_low_voltage_trigger ?backend:trigger_bk ()) in
+    |> Trigger.of_stream (mk_low_voltage_trigger ()) in
 
   let co_alerts =
     co_stream
-    |> Trigger.of_stream ?backend:trigger_bk
-         (mk_co_trigger ?backend:trigger_bk ()) in
+    |> Trigger.of_stream (mk_co_trigger ()) in
 
   let silence_stream =
     packet_keyed

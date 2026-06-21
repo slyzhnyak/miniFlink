@@ -24,29 +24,6 @@ type alert =
   | Low_voltage of string * float * Time.t
   | Voltage_ok  of string * Time.t
 
-let alert_to_json = function
-  | Low_voltage (l, v, t) ->
-    `Assoc [("tag", `String "low_voltage"); ("lamp", `String l);
-            ("v", `Float v); ("ts", `Int t)]
-  | Voltage_ok (l, t) ->
-    `Assoc [("tag", `String "voltage_ok"); ("lamp", `String l);
-            ("ts", `Int t)]
-
-let alert_of_json = function
-  | `Assoc kv ->
-    let tag = List.assoc "tag" kv |> Yojson.Safe.Util.to_string in
-    (match tag with
-     | "low_voltage" ->
-       let l = List.assoc "lamp" kv |> Yojson.Safe.Util.to_string in
-       let v = List.assoc "v"    kv |> Yojson.Safe.Util.to_number in
-       let t = List.assoc "ts"   kv |> Yojson.Safe.Util.to_int in
-       Low_voltage (l, v, t)
-     | "voltage_ok" ->
-       let l = List.assoc "lamp" kv |> Yojson.Safe.Util.to_string in
-       let t = List.assoc "ts"   kv |> Yojson.Safe.Util.to_int in
-       Voltage_ok (l, t)
-     | other -> failwith ("unknown tag " ^ other))
-  | _ -> failwith "not assoc"
 
 let low_voltage_spec () =
   Trigger.create
@@ -56,30 +33,24 @@ let low_voltage_spec () =
     ~severity:Trigger.Warning
     ~produce_alert:(fun ~key ~value ~ts -> Low_voltage (key, value, ts))
     ~produce_recovery:(fun ~key ~ts -> Voltage_ok (key, ts))
-    ~serialize_key:(fun k -> `String k)
-    ~deserialize_key:(fun j -> Yojson.Safe.Util.to_string j)
-    ~serialize_value:(fun v -> `Float v)
-    ~deserialize_value:(fun j -> Yojson.Safe.Util.to_number j)
-    ~serialize_alert:alert_to_json
-    ~deserialize_alert:alert_of_json
     ()
 
 (* Offset commit/restore via backend.
    Ключ "consumer:offset" хранит string-представление int. *)
 let offset_key = "consumer:offset"
 
-let commit_offset (backend : Trigger.backend) (offset : int) =
-  backend.set offset_key (Bytes.of_string (string_of_int offset))
+let commit_offset (backend : Persistence_backend.t) (offset : int) =
+  backend.Persistence_backend.set offset_key (Bytes.of_string (string_of_int offset))
 
-let restore_offset (backend : Trigger.backend) : int =
-  match backend.get offset_key with
+let restore_offset (backend : Persistence_backend.t) : int =
+  match backend.Persistence_backend.get offset_key with
   | None -> 0
   | Some b -> int_of_string (Bytes.to_string b)
 
 (* Прогнать events до конца, считать alerts, периодически
    коммитить offset (каждые N events). *)
 let run_with_commits ~commit_every (stream : 'a Mf_event.t Stream.t)
-    (get_offset : unit -> int) (backend : Trigger.backend) =
+    (get_offset : unit -> int) (backend : Persistence_backend.t) =
   let alerts = ref 0 in
   let processed = ref 0 in
   let rec loop () = match stream () with
@@ -138,7 +109,8 @@ let () =
 
   let src = Replayable_source.of_list events in
   let tbl = Hashtbl.create 64 in
-  let backend = Trigger.backend_of_memory tbl in
+  let backend = Persistence_backend.of_memory tbl in
+  let ctx = Runtime_context.durable backend in
 
   (* === PHASE 1 ===
      Читаем половину events, commit'им offset периодически,
@@ -156,13 +128,14 @@ let () =
       raw_stream ()
     end
   in
-  let phase1_pipeline =
-    bounded_raw
-    |> Pipe.event_time ~lateness:(Time.seconds 1)
-    |> Pipe.map (fun (p : Ex07_location_lib.Domain.packet) -> (p.lamp, p.voltage))
-    |> Trigger.of_stream ~backend (low_voltage_spec ()) in
-  let phase1_alerts = run_with_commits ~commit_every:5
-                        phase1_pipeline get_offset backend in
+  let phase1_alerts =
+    Runtime_context.with_context ctx (fun () ->
+      let phase1_pipeline =
+        bounded_raw
+        |> Pipe.event_time ~lateness:(Time.seconds 1)
+        |> Pipe.map (fun (p : Ex07_location_lib.Domain.packet) -> (p.lamp, p.voltage))
+        |> Trigger.of_stream (low_voltage_spec ()) in
+      run_with_commits ~commit_every:5 phase1_pipeline get_offset backend) in
   let committed = restore_offset backend in
   Printf.printf "  phase 1: %d alerts emitted, offset committed = %d (of %d)\n"
     phase1_alerts committed (List.length events);
@@ -180,13 +153,14 @@ let () =
   let restored_off = restore_offset backend in
   Printf.printf "  recovery: read offset %d from backend\n" restored_off;
   let raw_stream2, get_offset2 = Replayable_source.read_from ~offset:restored_off src in
-  let phase2_pipeline =
-    raw_stream2
-    |> Pipe.event_time ~lateness:(Time.seconds 1)
-    |> Pipe.map (fun (p : Ex07_location_lib.Domain.packet) -> (p.lamp, p.voltage))
-    |> Trigger.of_stream ~backend (low_voltage_spec ()) in
-  let phase2_alerts = run_with_commits ~commit_every:5
-                        phase2_pipeline get_offset2 backend in
+  let phase2_alerts =
+    Runtime_context.with_context ctx (fun () ->
+      let phase2_pipeline =
+        raw_stream2
+        |> Pipe.event_time ~lateness:(Time.seconds 1)
+        |> Pipe.map (fun (p : Ex07_location_lib.Domain.packet) -> (p.lamp, p.voltage))
+        |> Trigger.of_stream (low_voltage_spec ()) in
+      run_with_commits ~commit_every:5 phase2_pipeline get_offset2 backend) in
   Printf.printf "  phase 2: %d alerts emitted, final offset=%d\n"
     phase2_alerts (restore_offset backend);
 

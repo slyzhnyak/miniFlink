@@ -30,19 +30,11 @@ let severity_name = function
   | Disaster -> "DISASTER"
 
 (* ────────────────────────────────────────────────────────────────────
-   Backend для persistence — алиас на общий Persistence_backend.t
+   Persistence — ортогональная, через Runtime_context + Managed_state.
+   Триггер больше не объявляет свой backend-тип и не носит
+   сериализаторы: состояние (closure-free вариант) Marshal'ится
+   автоматически.
    ──────────────────────────────────────────────────────────────────── *)
-
-type backend = Persistence_backend.t = {
-  get    : string -> bytes option;
-  set    : string -> bytes -> unit;
-  delete : string -> unit;
-  keys   : unit -> string list;
-}
-
-(* Обёртка над state_backend_memory (Hashtbl) — для тестов и
-   простых случаев. Алиас для Persistence_backend.of_memory. *)
-let backend_of_memory = Persistence_backend.of_memory
 
 (* ────────────────────────────────────────────────────────────────────
    Условие
@@ -100,15 +92,6 @@ type ('key, 'v, 'alert) spec = {
   s_severity         : severity;
   s_produce_alert    : key:'key -> value:'v -> ts:Time.t -> 'alert;
   s_produce_recovery : key:'key -> ts:Time.t -> 'alert;
-  (* Опциональные сериализаторы для persistence. Если хотя бы один
-     None, использовать backend в [of_stream] нельзя — получим
-     Invalid_argument. *)
-  s_serialize_key      : ('key -> Yojson.Safe.t) option;
-  s_deserialize_key    : (Yojson.Safe.t -> 'key) option;
-  s_serialize_value    : ('v -> Yojson.Safe.t) option;
-  s_deserialize_value  : (Yojson.Safe.t -> 'v) option;
-  s_serialize_alert    : ('alert -> Yojson.Safe.t) option;
-  s_deserialize_alert  : (Yojson.Safe.t -> 'alert) option;
 }
 
 let create
@@ -119,12 +102,6 @@ let create
     ?(severity     = Not_classified)
     ~produce_alert
     ~produce_recovery
-    ?serialize_key
-    ?deserialize_key
-    ?serialize_value
-    ?deserialize_value
-    ?serialize_alert
-    ?deserialize_alert
     () =
   {
     s_name              = name;
@@ -134,12 +111,6 @@ let create
     s_severity          = severity;
     s_produce_alert     = produce_alert;
     s_produce_recovery  = produce_recovery;
-    s_serialize_key     = serialize_key;
-    s_deserialize_key   = deserialize_key;
-    s_serialize_value   = serialize_value;
-    s_deserialize_value = deserialize_value;
-    s_serialize_alert   = serialize_alert;
-    s_deserialize_alert = deserialize_alert;
   }
 
 let name     s = s.s_name
@@ -149,15 +120,6 @@ let severity s = s.s_severity
    Backwards-compat: оригинальный Trigger.create остаётся; of_config
    просто разворачивает record в вызов create. *)
 
-type ('key, 'v, 'alert) serdes_config = {
-  serialize_key     : 'key -> Yojson.Safe.t;
-  deserialize_key   : Yojson.Safe.t -> 'key;
-  serialize_value   : 'v -> Yojson.Safe.t;
-  deserialize_value : Yojson.Safe.t -> 'v;
-  serialize_alert   : 'alert -> Yojson.Safe.t;
-  deserialize_alert : Yojson.Safe.t -> 'alert;
-}
-
 type ('key, 'v, 'alert) config = {
   name             : string;
   condition        : 'v condition;
@@ -166,7 +128,6 @@ type ('key, 'v, 'alert) config = {
   problem_for      : Time.t;
   recovery_for     : Time.t;
   severity         : severity;
-  serdes           : ('key, 'v, 'alert) serdes_config option;
 }
 
 let default_config ~name ~condition ~produce_alert ~produce_recovery = {
@@ -174,37 +135,18 @@ let default_config ~name ~condition ~produce_alert ~produce_recovery = {
   problem_for  = 0;
   recovery_for = 0;
   severity     = Warning;
-  serdes       = None;
 }
 
 let of_config (cfg : ('key, 'v, 'alert) config) : ('key, 'v, 'alert) spec =
-  match cfg.serdes with
-  | None ->
-    create
-      ~name:cfg.name
-      ~condition:cfg.condition
-      ~problem_for:cfg.problem_for
-      ~recovery_for:cfg.recovery_for
-      ~severity:cfg.severity
-      ~produce_alert:cfg.produce_alert
-      ~produce_recovery:cfg.produce_recovery
-      ()
-  | Some s ->
-    create
-      ~name:cfg.name
-      ~condition:cfg.condition
-      ~problem_for:cfg.problem_for
-      ~recovery_for:cfg.recovery_for
-      ~severity:cfg.severity
-      ~produce_alert:cfg.produce_alert
-      ~produce_recovery:cfg.produce_recovery
-      ~serialize_key:s.serialize_key
-      ~deserialize_key:s.deserialize_key
-      ~serialize_value:s.serialize_value
-      ~deserialize_value:s.deserialize_value
-      ~serialize_alert:s.serialize_alert
-      ~deserialize_alert:s.deserialize_alert
-      ()
+  create
+    ~name:cfg.name
+    ~condition:cfg.condition
+    ~problem_for:cfg.problem_for
+    ~recovery_for:cfg.recovery_for
+    ~severity:cfg.severity
+    ~produce_alert:cfg.produce_alert
+    ~produce_recovery:cfg.produce_recovery
+    ()
 
 (* ────────────────────────────────────────────────────────────────────
    Внутреннее состояние per-key
@@ -288,229 +230,49 @@ let key_to_string : 'k -> string = fun k ->
 
 let of_stream
     (type k v a)
-    ?(backend : backend option)
     (spec : (k, v, a) spec)
     (source : (k * v) Mf_event.t Stream.t)
   : a Mf_event.t Stream.t =
-
-  (* Если backend подключён, обязательны сериализаторы для всех трёх
-     параметров. Иначе Invalid_argument в момент создания stream'а
-     (не на первом event'е). *)
-  (match backend with
-   | None -> ()
-   | Some _ ->
-     let missing =
-       (if spec.s_serialize_key     = None then ["serialize_key"]     else []) @
-       (if spec.s_deserialize_key   = None then ["deserialize_key"]   else []) @
-       (if spec.s_serialize_value   = None then ["serialize_value"]   else []) @
-       (if spec.s_deserialize_value = None then ["deserialize_value"] else []) @
-       (if spec.s_serialize_alert   = None then ["serialize_alert"]   else []) @
-       (if spec.s_deserialize_alert = None then ["deserialize_alert"] else [])
-     in
-     if missing <> [] then
-       invalid_arg (Printf.sprintf
-         "Trigger.of_stream: backend provided but missing serializers: %s"
-         (String.concat ", " missing)));
 
   let states : (string, (k, v, a) state * k) Hashtbl.t = Hashtbl.create 64 in
   let last_event_ts : (string, Time.t) Hashtbl.t = Hashtbl.create 64 in
   let timers = Timers.create () in
   let out_buf : a Mf_event.t Queue.t = Queue.create () in
 
-  (* Локальный key_to_string. Без backend'а используем Hashtbl.hash
-     (быстрее), с backend'ом — JSON-сериализованный ключ (детерминирован,
-     корректно работает с restore). *)
-  let key_to_string (key : k) : string =
-    match backend, spec.s_serialize_key with
-    | Some _, Some sk -> Yojson.Safe.to_string (sk key)
-    | _ -> string_of_int (Hashtbl.hash key)
-  in
+  let key_to_string (key : k) : string = string_of_int (Hashtbl.hash key) in
 
   (* ════════════════════════════════════════════════════════════════
-     PERSISTENCE LAYER (Step 2)
+     PERSISTENCE — ортогональная, через Managed_state.
 
-     Сериализация state-машины в JSON, запись в backend на каждом
-     изменении state. Реализована только если [backend] передан;
-     иначе persist_state и restore_all — no-op.
-
-     Формат backend-ключа:
-       "trigger:{spec.name}:" ^ Yojson.to_string (serialize_key user_key)
-
-     Формат значения (JSON в bytes):
-       {
-         "key": <serialized 'k>,
-         "state": <tagged state>,
-         "last_event_ts": int
-       }
-
-     Tagged state:
-       {"tag":"ok"}
-       {"tag":"pending_problem", "since":int, "last_value":<v>, "fire_at":int}
-       {"tag":"problem", "since":int, "last_alert":<a>, "last_alert_ts":int}
-       {"tag":"pending_ok", "problem_since":int, "last_alert":<a>,
-        "last_alert_ts":int, "recovery_since":int, "fire_at":int}
+     Persistence решается ambient Runtime_context, не параметром.
+     Рабочие структуры (states + last_event_ts + timers) остаются для
+     скорости; managed-state — durable-зеркало. Значение per-ключ
+     упаковывает (state, исходный ключ, last_event_ts). state —
+     closure-free вариант, Marshal'ится автоматически, поэтому 6
+     сериализаторов больше не нужны. Таймеры derive'ятся при restore
+     из Pending-состояний.
      ════════════════════════════════════════════════════════════════ *)
-
-  let key_prefix = "trigger:" ^ spec.s_name ^ ":" in
-
-  (* Безопасные дёрнут-сериализаторы. Вызываются только когда backend
-     подключён, т.е. сериализаторы заведомо Some после валидации. *)
-  let ser_v v =
-    match spec.s_serialize_value with
-    | Some f -> f v
-    | None -> invalid_arg "Trigger: (de)serializer missing — backend set but spec lacks it (invariant violated)"
-  in
-  let ser_a a =
-    match spec.s_serialize_alert with
-    | Some f -> f a
-    | None -> invalid_arg "Trigger: (de)serializer missing — backend set but spec lacks it (invariant violated)"
-  in
-  let ser_k k =
-    match spec.s_serialize_key with
-    | Some f -> f k
-    | None -> invalid_arg "Trigger: (de)serializer missing — backend set but spec lacks it (invariant violated)"
-  in
-
-  let state_to_json (s : (k, v, a) state) : Yojson.Safe.t =
-    match s with
-    | S_ok ->
-      `Assoc [("tag", `String "ok")]
-    | S_pending_problem { since; last_value; fire_at } ->
-      `Assoc [
-        ("tag",        `String "pending_problem");
-        ("since",      `Int since);
-        ("last_value", ser_v last_value);
-        ("fire_at",    `Int fire_at);
-      ]
-    | S_problem { since; last_alert; last_alert_ts } ->
-      `Assoc [
-        ("tag",            `String "problem");
-        ("since",          `Int since);
-        ("last_alert",     ser_a last_alert);
-        ("last_alert_ts",  `Int last_alert_ts);
-      ]
-    | S_pending_ok { problem_since; last_alert; last_alert_ts;
-                     recovery_since; fire_at } ->
-      `Assoc [
-        ("tag",             `String "pending_ok");
-        ("problem_since",   `Int problem_since);
-        ("last_alert",      ser_a last_alert);
-        ("last_alert_ts",   `Int last_alert_ts);
-        ("recovery_since",  `Int recovery_since);
-        ("fire_at",         `Int fire_at);
-      ]
-  in
-
-  let backend_key_for_user_key (key : k) : string =
-    key_prefix ^ Yojson.Safe.to_string (ser_k key)
-  in
+  let mstate : (string, (k, v, a) state * k * Time.t) Managed_state.t =
+    Managed_state.create_string ~name:("trigger:" ^ spec.s_name) () in
 
   let persist_state (ks : string) (key : k) (st : (k, v, a) state) : unit =
-    match backend with
-    | None -> ()
-    | Some be ->
-      let last_ts =
-        match Hashtbl.find_opt last_event_ts ks with
-        | Some t -> t | None -> 0
-      in
-      let json =
-        `Assoc [
-          ("key",            ser_k key);
-          ("state",          state_to_json st);
-          ("last_event_ts",  `Int last_ts);
-        ] in
-      let bk = backend_key_for_user_key key in
-      be.set bk (Bytes.of_string (Yojson.Safe.to_string json))
+    let last_ts = match Hashtbl.find_opt last_event_ts ks with
+      | Some t -> t | None -> 0 in
+    Managed_state.set mstate ks (st, key, last_ts);
+    Managed_state.checkpoint_key mstate ks
   in
 
-  (* Десериализация одного state-значения из JSON. *)
-  let deser_v j =
-    match spec.s_deserialize_value with
-    | Some f -> f j
-    | None -> invalid_arg "Trigger: (de)serializer missing — backend set but spec lacks it (invariant violated)"
-  in
-  let deser_a j =
-    match spec.s_deserialize_alert with
-    | Some f -> f j
-    | None -> invalid_arg "Trigger: (de)serializer missing — backend set but spec lacks it (invariant violated)"
-  in
-  let deser_k j =
-    match spec.s_deserialize_key with
-    | Some f -> f j
-    | None -> invalid_arg "Trigger: (de)serializer missing — backend set but spec lacks it (invariant violated)"
-  in
-  let state_of_json (j : Yojson.Safe.t) : (k, v, a) state =
-    match j with
-    | `Assoc kv ->
-      let tag = Yojson.Safe.Util.to_string (List.assoc "tag" kv) in
-      (match tag with
-       | "ok" -> S_ok
-       | "pending_problem" ->
-         let since      = Yojson.Safe.Util.to_int   (List.assoc "since" kv) in
-         let last_value = deser_v (List.assoc "last_value" kv) in
-         let fire_at    = Yojson.Safe.Util.to_int   (List.assoc "fire_at" kv) in
-         S_pending_problem { since; last_value; fire_at }
-       | "problem" ->
-         let since         = Yojson.Safe.Util.to_int (List.assoc "since" kv) in
-         let last_alert    = deser_a (List.assoc "last_alert" kv) in
-         let last_alert_ts = Yojson.Safe.Util.to_int (List.assoc "last_alert_ts" kv) in
-         S_problem { since; last_alert; last_alert_ts }
-       | "pending_ok" ->
-         let problem_since   = Yojson.Safe.Util.to_int (List.assoc "problem_since" kv) in
-         let last_alert      = deser_a (List.assoc "last_alert" kv) in
-         let last_alert_ts   = Yojson.Safe.Util.to_int (List.assoc "last_alert_ts" kv) in
-         let recovery_since  = Yojson.Safe.Util.to_int (List.assoc "recovery_since" kv) in
-         let fire_at         = Yojson.Safe.Util.to_int (List.assoc "fire_at" kv) in
-         S_pending_ok { problem_since; last_alert; last_alert_ts;
-                        recovery_since; fire_at }
-       | other -> failwith ("Trigger.restore: unknown state tag: " ^ other))
-    | _ -> failwith "Trigger.restore: state JSON not object"
-  in
-
-  (* На старте, если backend подключён, восстанавливаем все per-key
-     state из его записей. Заодно re-register'им pending timers
-     (они derive'ятся из Pending_* состояний). *)
+  (* Восстановление per-key state из managed-state на старте.
+     Заодно re-register'им pending timers из Pending-состояний. *)
   let restore_all () =
-    match backend with
-    | None -> ()
-    | Some be ->
-      let all_keys = be.keys () in
-      List.iter (fun bk ->
-        (* Фильтр по нашему префиксу — backend может содержать ключи
-           других триггеров на той же backend-таблице. *)
-        let plen = String.length key_prefix in
-        if String.length bk >= plen
-           && String.sub bk 0 plen = key_prefix
-        then begin
-          match be.get bk with
-          | None -> ()  (* race с delete? игнорируем *)
-          | Some v_bytes ->
-            (try
-               let json = Yojson.Safe.from_string (Bytes.to_string v_bytes) in
-               match json with
-               | `Assoc kv ->
-                 let key       = deser_k (List.assoc "key" kv) in
-                 let st        = state_of_json (List.assoc "state" kv) in
-                 let last_ts   = Yojson.Safe.Util.to_int (List.assoc "last_event_ts" kv) in
-                 let ks        = key_to_string key in
-                 Hashtbl.replace states ks (st, key);
-                 if last_ts > 0 then
-                   Hashtbl.replace last_event_ts ks last_ts;
-                 (* Pending state'ы → восстанавливаем timer *)
-                 (match st with
-                  | S_pending_problem { fire_at; _ }
-                  | S_pending_ok { fire_at; _ } ->
-                    Timers.insert timers
-                      { t_fire_at = fire_at; t_key = ks }
-                  | _ -> ())
-               | _ -> failwith "Trigger.restore: top-level JSON not object"
-             with
-             | Yojson.Json_error msg ->
-               failwith ("Trigger.restore: invalid JSON in backend (key=" ^ bk ^ "): " ^ msg)
-             | Not_found ->
-               failwith ("Trigger.restore: missing field in backend record (key=" ^ bk ^ ")"))
-        end
-      ) all_keys
+    Managed_state.iter mstate (fun ks (st, key, last_ts) ->
+      Hashtbl.replace states ks (st, key);
+      if last_ts > 0 then Hashtbl.replace last_event_ts ks last_ts;
+      (match st with
+       | S_pending_problem { fire_at; _ }
+       | S_pending_ok { fire_at; _ } ->
+         Timers.insert timers { t_fire_at = fire_at; t_key = ks }
+       | _ -> ()))
   in
   restore_all ();
 
@@ -673,7 +435,6 @@ let of_stream
 
 let combine
     (type k v a)
-    ?(backend : backend option)
     (specs : (k, v, a) spec list)
     (source : (k * v) Mf_event.t Stream.t)
   : a Mf_event.t Stream.t =
@@ -686,15 +447,15 @@ let combine
      прочитаны другой. Это даёт O(buffer_size) памяти вместо
      O(total_stream_size), и работает на бесконечных источниках.
 
-     Если backend подключён — передаётся каждому триггеру; они
-     различаются по [name] и не интерферируют в backend по ключам. *)
+     Триггеры различаются по [name] и не интерферируют в backend по
+     ключам (managed-state namespace = "trigger:{name}"). *)
   match specs with
   | [] -> Stream.empty
-  | [s] -> of_stream ?backend s source
+  | [s] -> of_stream s source
   | _ ->
     let copies = Stream.split (List.length specs) source in
     let trigger_streams = List.map2
-      (fun spec copy -> of_stream ?backend spec copy)
+      (fun spec copy -> of_stream spec copy)
       specs copies in
     match trigger_streams with
     | [] -> Stream.empty  (* unreachable: specs non-empty *)
