@@ -50,19 +50,23 @@ let () =
     | Mf_event.Retract _ -> true | _ -> false) locations in
   let updates = List.filter (function
     | Mf_event.Update { old; new_value; _ } -> old <> new_value | _ -> false) locations in
-  (* window_agg подавляет noop-коррекции: late packet эмитит Update
-     только если итоговый результат (top-2 маяков по median RSSI)
-     реально изменился. В этом источнике late-пакеты не меняют top-2
-     (median устойчив к одиночным поздним значениям), поэтому
-     корректное поведение — НОЛЬ corrections, а не Update{x→x}.
+  (* В этом источнике есть опоздавший пакет M2 с необычно сильным B5,
+     который переоткрывает уже закрытое окно и меняет top-2 маяков →
+     реальная атомарная коррекция позиции (Update). Пример был бы
+     нереалистичным без них: late-data correction — ключевая
+     возможность библиотеки.
 
-     Инвариант: любой эмитнутый Update несёт реальное изменение
-     (old <> new); noop-Update'ов быть не должно. *)
+     Два инварианта:
+     1. Коррекции реально происходят (есть Update'ы).
+     2. Каждый Update несёт настоящее изменение (old <> new) —
+        noop-коррекции подавляются window_agg. *)
+  check "late packets produce real corrections (Update events exist)"
+    (List.length updates > 0);
   check "no noop corrections (every Update changes the result)"
     (List.for_all (function
        | Mf_event.Update { old; new_value; _ } -> old <> new_value
        | _ -> true) locations);
-  ignore retracts; ignore updates;
+  ignore retracts;
 
   (* Пайплайн алертов *)
   let alerts =

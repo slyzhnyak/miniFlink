@@ -88,10 +88,22 @@ let depot_metrics source =
   |> Pipe.window_agg_keyed ~by:(fun t -> t.depot)
        ~allowed_lateness:(seconds 30)
        (Pipe.tumbling (seconds 10))
+       (* Все три агрегата retractable, поэтому опоздавшая телеметрия
+          (приходит из сети вразнобой) атомарно корректирует уже
+          закрытое окно — Update вниз по конвейеру, а не молчаливая
+          потеря. ВАЖНО: min_charge считается через retractable
+          [to_list]+минимум, а НЕ через min_by (min_by не retractable —
+          нельзя пересчитать минимум после удаления без полной
+          истории — и сделал бы весь агрегат не-retractable, отkey
+          убив late-коррекции). *)
        Agg.(let+ avg_speed  = mean   (fun t -> t.speed)
-            and+ min_charge = min_by (fun t -> t.charge)
+            and+ charges    = contramap (fun t -> t.charge) to_list
             and+ low_count  = count_if (fun t -> t.charge < low_charge_threshold)
-            in (avg_speed, min_charge, low_count))
+            in
+            let min_charge = match charges with
+              | [] -> None
+              | c :: cs -> Some (List.fold_left min c cs) in
+            (avg_speed, min_charge, low_count))
 
 (* ── Сервис 2: накопительная статистика по депо (exactly-once) ─ *)
 (* Суммарная статистика по депо ведётся с exactly-once и durable

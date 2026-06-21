@@ -51,6 +51,11 @@ let avg_rssi_item
   |> Pipe.event_time ~lateness:(Time.seconds 1)
   |> Pipe.window_agg_keyed
        ~by:fst
+       ~allowed_lateness:(Time.minutes 1)
+       (* mean retractable + allowed_lateness ⇒ опоздавший RSSI-замер
+          (радио в шахте теряет пакеты) атомарно уточняет среднее уже
+          закрытого окна. Это меняет, дозрело ли условие avg_rssi<-75,
+          т.е. влияет на эвакуационный триггер. *)
        (Pipe.sliding (Time.minutes 5) (Time.seconds 30))
        Agg.(mean (fun (_lamp, r) -> r))
   |> Pipe.flat_map (fun (lamp, avg_opt) ->

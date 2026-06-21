@@ -105,8 +105,17 @@ let with_late_and_dups (base : packet list) : packet list =
     seconds 210, { lamp = "M1"; ts = seconds 118;
                    readings = [ "B1", -44.; "B2", -53. ];
                    voltage = m1_voltage 8; moving = true; sos = false };
-    seconds 180, { lamp = "M2"; ts = seconds 88;
-                   readings = [ "B3", -49.; "B4", -51.; "B5", -73. ];
+    (* M2: опоздавший замер с НЕОБЫЧНО сильным B5 (-42 вместо
+       привычных -72). Физически: шахтёр на миг прошёл вплотную к
+       маяку B5, но пакет опоздал ОЧЕНЬ сильно (UDP-радио в штреке
+       потеряло его на минуты). Вставлен после ts=300, тогда как его
+       event-time ts=88 — к этому моменту окна, покрывающие 88с, уже
+       закрыты (fired). Поэтому замер переоткрывает закрытое окно:
+       median RSSI маяка B5 подскакивает, B5 вытесняет B4 из top-2,
+       и конвейер эмитит АТОМАРНУЮ коррекцию (Update) пересчитанной
+       позиции — реальная демонстрация late-data correction, не noop. *)
+    seconds 300, { lamp = "M2"; ts = seconds 88;
+                   readings = [ "B3", -49.; "B4", -51.; "B5", -42. ];
                    voltage = 4.0; moving = true; sos = false };
     seconds 165, { lamp = "M3"; ts = seconds 73;
                    readings = [ "B1", -62. ]; voltage = 4.0;
