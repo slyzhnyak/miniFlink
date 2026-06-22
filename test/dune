@@ -539,3 +539,15 @@
  (libraries miniflink)
  (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
  (modules test_managed_state))
+
+(test
+ (name test_trigger_key_collision)
+ (libraries miniflink)
+ (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
+ (modules test_trigger_key_collision))
+
+(test
+ (name test_fan_out_block_contract)
+ (libraries miniflink threads.posix)
+ (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
+ (modules test_fan_out_block_contract))

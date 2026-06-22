@@ -236,6 +236,15 @@ let buffered_sink (publish : 'b list -> unit) : 'b transactional_sink =
         | Some r -> publish (List.rev !r); Hashtbl.remove buffers epoch
         | None -> ()));
     ts_abort = (fun epoch ->
+      (* R7 (внешний bug-report) — НЕ баг: abort семантически верен.
+         Между barrier'ами результаты epoch'и копятся в buffers и
+         наружу НЕ публикуются (publish зовётся только в ts_commit).
+         abort просто выбрасывает незакоммиченный буфер этой epoch'и —
+         поэтому при переобработке после сбоя они не доедут до publish
+         (exactly-once на выходной стороне). Удаление буфера ДРУГОЙ,
+         уже закоммиченной epoch'и невозможно: ts_commit удаляет свой
+         буфер сразу после publish, так что abort не может «отменить»
+         опубликованное. См. test/test_2pc_sink_abort.ml. *)
       with_mutex mu (fun () -> Hashtbl.remove buffers epoch));
     ts_flush = (fun () ->
       (* Штатное завершение: опубликовать все оставшиеся epoch по порядку.
@@ -333,6 +342,14 @@ let run_exactly_once
      ts_commit чтобы не держать мьютекс координатора. *)
   let committed_upto = ref 0 in
   let committer_stop = ref false in
+  (* committer_stop разрывает ожидание ниже даже когда НИ ОДИН
+     checkpoint не зафиксирован — это и закрывает сценарий внешнего
+     R2 («all workers die before barrier»). Если все воркеры упали до
+     barrier'а, latest_checkpoint так и останется пустым, но финальная
+     секция run_exactly_once ставит committer_stop := true и делает
+     broadcast co_done; цикл while завершается по `not committer_stop`,
+     committer доделывает пустой for-коммит и Thread.join возвращается.
+     Поэтому R2 — НЕ дедлок; см. test/test_checkpoint_all_die.ml. *)
   let committer = Thread.create (fun () ->
     let rec loop () =
       Mutex.lock coord.co_mu;
