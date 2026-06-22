@@ -1,8 +1,13 @@
-\documentclass[acmsmall,review]{acmart}
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
 \usepackage{listings}
 \usepackage{xcolor}
 \usepackage{booktabs}
-\usepackage{microtype}
 
 % OCaml listings style
 \lstdefinelanguage{OCaml}{
@@ -35,9 +40,11 @@
 \title{miniFlink: Declarative Stream Processing Semantics in OCaml}
 
 \author{miniFlink Project}
-\affiliation{%
-  \institution{Independent}
-  \country{Russia}}
+\date{}
+
+
+\begin{document}
+\maketitle
 
 \begin{abstract}
 We present miniFlink, a functional implementation of Apache Flink semantics
@@ -74,8 +81,6 @@ and OCaml~5 (Domain + Atomic) with measured speedup of $2.48\times$ on
 4 workers and $2.87\times$ on 8 (OCaml~4, bounded by the runtime lock).
 \end{abstract}
 
-\begin{document}
-\maketitle
 
 %%% ── 0. Declarativity ────────────────────────────────────────────────────
 \section{Declarativity as a First Principle}
