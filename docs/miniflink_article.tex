@@ -55,14 +55,23 @@ library of composable aggregators, stateful
 operators, exactly-once checkpointing (single-thread and parallel via
 Chandy-Lamport barrier snapshots, with source-offset recovery and a
 transactional sink), table and join semantics with TTL eviction,
-retractions for late data, and production layers (dead letter queue with
-retry/backoff, graceful shutdown, Prometheus metrics, structured logging,
-health and config as values, RocksDB-backed persistent state via C FFI)
-in approximately 3000 lines, validated by 27 test suites including
-composition-invariant property tests, replay-determinism, fuzzing, and
-soak tests. A parallel backend supports both OCaml~4 (Thread + Mutex)
+retractions and atomic updates for late data, and production layers
+(dead letter queue with retry/backoff, graceful shutdown, Prometheus
+metrics, structured logging, health and config as values, RocksDB-backed
+persistent state via C FFI). A second design contribution is
+\emph{orthogonal persistence}: every stateful operator runs unchanged
+with or without durability, the mode being selected from outside the
+pipeline through an ambient runtime context, with serialization handled
+by default and never appearing in operator code. The library is
+approximately 5{,}500 lines across 41 modules with 34 interface files;
+it is validated by 105 test suites, of which 7 are property-based
+(29 QCheck invariants with independent oracles) covering retract/update
+consistency, FSM invariants, and crash-recovery transparency, alongside
+replay-determinism, fuzzing, and soak tests. The test code (about
+12{,}500 lines) exceeds the library itself by more than a factor of two.
+A parallel backend supports both OCaml~4 (Thread + Mutex)
 and OCaml~5 (Domain + Atomic) with measured speedup of $2.48\times$ on
-4 workers (1 CPU).
+4 workers and $2.87\times$ on 8 (OCaml~4, bounded by the runtime lock).
 \end{abstract}
 
 \begin{document}
@@ -545,16 +554,70 @@ closes the database. State persists across process restarts, verified
 by a test that writes, closes, reopens the same path, and reads the
 values back.
 
-%%% ── 10. Testing ─────────────────────────────────────────────────────────
+\subsection{Orthogonal Persistence}
+
+The backend above answers \emph{where} state is stored. A second,
+independent question is \emph{whether} a given pipeline persists at
+all --- and the central design goal is that answering it requires
+\emph{no change to the pipeline}. The same operator graph must run
+identically with durability and without it; persistence and
+serialization are deployment decisions, not properties of operators.
+
+Two notions realize this. A \texttt{Runtime\_context} is an ambient
+policy, installed for a dynamic extent by \texttt{with\_context}:
+either \texttt{Ephemeral} (state lives in memory, nothing is written)
+or \texttt{Durable} (state is snapshotted to a
+\texttt{Persistence\_backend} and restored on start). A
+\texttt{Managed\_state} is the keyed state an operator uses in place
+of a bare \texttt{Hashtbl}: on creation it reads the ambient context
+and, when durable, restores its entries from the backend by name
+prefix; its \texttt{checkpoint} is a no-op under \texttt{Ephemeral},
+so operators call it unconditionally and follow a single code path in
+both modes.
+
+\begin{lstlisting}
+let pipeline src =
+  src |> window_agg (module K) (tumbling 60000) (mean speed)
+      |> Trigger.of_stream alert_spec
+
+(* no persistence *)  pipeline source
+(* with persistence *)
+  with_context (durable backend) (fun () -> pipeline source)
+\end{lstlisting}
+
+Serialization is orthogonal as well. Operator state is closure-free
+data, so \texttt{Marshal} serializes it automatically; the default
+durable context needs no user-supplied codecs, which is ideal for
+crash recovery (the same binary writes and reads the same format).
+For schema evolution across deployments a name-keyed codec registry
+can be supplied in the context, again without touching the pipeline.
+All four stateful operators (windowed fold, \texttt{process\_keyed},
+silence-age, and the trigger FSM) use this model; migrating them
+removed roughly 1{,}800 lines of per-operator persistence machinery
+--- bespoke JSON codecs, save/restore loops, and key parsing that each
+operator had reimplemented.
+
+A subtlety worth recording is key derivation. An earlier version
+derived the string state key with \texttt{Hashtbl.hash}, a 30-bit
+hash; two distinct keys could collide and collapse their state
+machines into one slot, silently corrupting state. The fix keys by a
+128-bit digest (\texttt{Marshal} then MD5), deterministic and
+collision-free at any realistic key count. This is the kind of defect
+that example-based tests miss and property-based tests catch
+(Section~10).
+
+%%% \u2500\u2500 10. Testing ─────────────────────────────────────────────────────────
 \section{Testing}
 
 \textbf{Harness.} A deterministic test context \texttt{('a,'b) t}
 feeds events via \texttt{push}/\texttt{push\_wm} and collects
 output via \texttt{run}. No broker, no threads, no wall clock.
 
-Thirteen test suites run under \texttt{dune test}. Beyond the
-operator-correctness unit tests and QCheck property tests, the suite
-targets the failure modes specific to stream engines:
+The suite comprises 105 test executables run under
+\texttt{dune test}; the test code (about 12{,}500 lines) is more than
+twice the size of the library. Beyond operator-correctness unit tests
+and the property tests below, the suite targets the failure modes
+specific to stream engines:
 
 \begin{description}
 \item[Determinism] replay determinism (same input twice yields
@@ -573,19 +636,51 @@ targets the failure modes specific to stream engines:
   validating dedup and window eviction.
 \end{description}
 
-\textbf{Property tests} (QCheck, 100--500 cases each):
+\textbf{Property tests.} Seven property suites (29 QCheck
+invariants, with thousands of generated cases each) check general laws
+rather than specific inputs. Every property is checked against an
+\emph{independent oracle} --- a separate, simpler computation of the
+expected answer --- rather than a restatement of the implementation,
+and the bug-finding ones were validated by sabotage: the operator is
+deliberately broken, the property is confirmed to fail with a
+counterexample, and the operator is then restored.
+
+A first group establishes structural laws on append-only streams:
+windows preserve all events ($\sum_w \mathtt{count}(w) = |\mathtt{input}|$),
+\texttt{dedup} is idempotent, watermarks are monotone for any event
+order, and \texttt{map}/\texttt{filter} preserve or shrink the event
+count as expected.
+
+A second, larger group targets the retract/update and persistence
+semantics that example-based tests structurally miss:
 
 \begin{enumerate}
-\item $\sum_w \mathtt{count}(w) = |\mathtt{input}|$
-  — window preserves all events.
-\item $\mathtt{dedup}(\mathtt{dedup}(s)) = \mathtt{dedup}(s)$
-  — dedup is idempotent.
-\item Watermarks are monotone for any event order.
-\item \texttt{enrich} preserves event count (left join).
-\item $\mathtt{critical} \Leftrightarrow \mathtt{speed} > 1.3 \times \mathtt{limit}$
-  — for all \texttt{float} pairs.
-\item \texttt{map} preserves event count.
-\item $|\mathtt{filter}(s)| \leq |s|$.
+\item \textbf{Aggregate retraction.} For a retractable aggregate, an
+  arbitrary add/remove sequence equals the batch aggregation of only
+  the remaining (non-retracted) elements --- for count, sum, mean,
+  count-if, to-list, median, and combined aggregates.
+\item \textbf{Window retraction.} For an arbitrary Data+Retract
+  stream, a window's final value equals the batch aggregate of the
+  elements remaining in that window. Sabotaging the open-window
+  retract path makes this fail immediately.
+\item \textbf{Update equivalence.} For the stateless combinators and
+  their exception-safe variants, an atomic $\mathtt{Update}\,(o
+  \to n)$ is equivalent to $\mathtt{Retract}(o)$ followed by
+  $\mathtt{Data}(n)$, compared as multisets of normalized output. This
+  property caught a real asymmetry in \texttt{safe\_filter} that
+  manual review had missed.
+\item \textbf{Trigger FSM.} With no debounce the trigger is a
+  deterministic per-key state machine: active alerts equal the keys
+  whose latest value crosses the threshold, retractions never exceed
+  prior alerts, and at most one alert is active per key.
+\item \textbf{Timers and counters.} A \texttt{process\_keyed} counter
+  matches an oracle, and an event-time timer fires exactly once when
+  the watermark passes it.
+\item \textbf{Crash-recovery transparency.} For an arbitrary stream
+  and an arbitrary crash point, a durable run --- phase one, crash,
+  phase two on a shared backend --- yields the same per-window result
+  as a continuous ephemeral run. Sabotaging the restore loop makes the
+  property fail.
 \end{enumerate}
 
 %%% ── 10. Conclusion ──────────────────────────────────────────────────────
@@ -598,7 +693,8 @@ exactly-once (single-thread and parallel via barrier snapshots, with
 recovery and a transactional sink), table/join with TTL eviction,
 retractions, and production layers (DLQ with retry, graceful shutdown,
 Prometheus metrics, structured logging, health/config, RocksDB-backed
-state) — fit in $\sim$3000 lines of OCaml across 27 test suites. Two
+state) --- fit in roughly 5{,}500 lines of OCaml, validated by 105 test
+suites whose code more than doubles the size of the library. Three
 design decisions proved most consequential:
 
 \begin{enumerate}
@@ -607,6 +703,10 @@ design decisions proved most consequential:
 \item The \texttt{(type a)} locally abstract type annotation in
   \texttt{Pipe.window} avoids the recursive type $\alpha = \mathtt{string}
   \times \alpha\ \mathtt{list}$ that otherwise requires \texttt{Obj.magic}.
+\item Orthogonal persistence --- an ambient \texttt{Runtime\_context}
+  plus per-operator \texttt{Managed\_state} --- lets one pipeline run
+  with or without durability unchanged, keeping persistence and
+  serialization out of operator code entirely.
 \end{enumerate}
 
 The OCaml module system's ability to accept modules as runtime values
@@ -614,8 +714,10 @@ The OCaml module system's ability to accept modules as runtime values
 without metaprogramming or code generation.
 
 Deliberate non-goals keep the ``mini'' honest: distributed execution,
-remote shuffle, end-to-end exactly-once across an external source/sink,
-and incremental checkpointing are out of scope. The project targets the
+remote shuffle, and incremental (delta) checkpointing are out of scope.
+End-to-end exactly-once is supported on a single node through
+source-offset recovery and a transactional sink, but not across a
+distributed external source/sink. The project targets the
 {\it semantics} of stream processing on a single node, not the
 distributed infrastructure of a production cluster.
 
