@@ -32,4 +32,4 @@ let to_json c =
   Printf.sprintf
     "{\"workers\":%d,\"capacity\":%d,\"checkpoint_every\":%d,\"watermark_latency_ms\":%d,\"watermark_interval_ms\":%d,\"state_dir\":\"%s\",\"metrics_interval_s\":%d}"
     c.workers c.capacity c.checkpoint_every c.watermark_latency_ms
-    c.watermark_interval_ms c.state_dir c.metrics_interval_s
+    c.watermark_interval_ms (Log.json_escape c.state_dir) c.metrics_interval_s

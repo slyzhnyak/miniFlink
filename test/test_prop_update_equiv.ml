@@ -119,12 +119,31 @@ let prop_map_then_filter =
     (fun evs -> equivalence_holds
         (fun s -> s |> Pipe.map (fun x -> x + 5) |> Pipe.filter (fun x -> x < 25)) evs)
 
+(* safe_-варианты должны соблюдать ту же эквивалентность: их обработка
+   Retract/Update симметрична обычным map/filter/flat_map (регрессия на
+   баг, где safe_map/safe_flat_map молча теряли Retract). on_error не
+   вызывается — функции тотальные. *)
+let nop_err _ = ()
+
+let prop_safe_map =
+  Test.make ~count:1000 ~name:"safe_map: Update ≡ Retract+Data" arb_stream
+    (fun evs -> equivalence_holds (Pipe.safe_map ~on_error:nop_err (fun x -> x * 2 + 1)) evs)
+
+let prop_safe_filter =
+  Test.make ~count:1000 ~name:"safe_filter: Update ≡ Retract+Data" arb_stream
+    (fun evs -> equivalence_holds (Pipe.safe_filter ~on_error:nop_err (fun x -> x mod 2 = 0)) evs)
+
+let prop_safe_flat_map =
+  Test.make ~count:1000 ~name:"safe_flat_map: Update ≡ Retract+Data" arb_stream
+    (fun evs -> equivalence_holds (Pipe.safe_flat_map ~on_error:nop_err (fun x -> [x; x + 100])) evs)
+
 let () =
   Printf.printf "==========================================\n";
   Printf.printf "  Property: Update ≡ Retract+Data\n";
   Printf.printf "==========================================\n";
   let suites = [ prop_map; prop_filter; prop_filter_high;
-                 prop_flat_map; prop_map_then_filter ] in
+                 prop_flat_map; prop_map_then_filter;
+                 prop_safe_map; prop_safe_filter; prop_safe_flat_map ] in
   let ok = QCheck_runner.run_tests ~verbose:false suites in
   if ok = 0 then (Printf.printf "\nAll Update-equivalence properties passed.\n"; exit 0)
   else (Printf.printf "\nSOME PROPERTIES FAILED.\n"; exit 1)
