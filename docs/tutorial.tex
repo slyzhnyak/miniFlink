@@ -1,0 +1,432 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T2A]{fontenc}
+\usepackage[english,russian]{babel}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+
+\hypersetup{colorlinks=true, linkcolor=blue!50!black,
+            urlcolor=blue!50!black, citecolor=blue!50!black}
+
+% OCaml listings style
+\lstdefinelanguage{OCaml}{
+  keywords={let,in,fun,match,with,type,module,sig,struct,
+            and,or,not,if,then,else,begin,end,val,mutable,
+            open,include,functor,of,rec,when},
+  keywordstyle=\color[rgb]{0.0,0.4,0.7}\bfseries,
+  commentstyle=\color[rgb]{0.4,0.4,0.4}\itshape,
+  stringstyle=\color[rgb]{0.2,0.6,0.2},
+  morecomment=[s]{(*}{*)},
+  morestring=[b]",
+  sensitive=true
+}
+\lstset{
+  language=OCaml,
+  basicstyle=\ttfamily\small,
+  frame=single,
+  framerule=0.4pt,
+  rulecolor=\color[rgb]{0.8,0.8,0.8},
+  backgroundcolor=\color[rgb]{0.97,0.97,0.97},
+  xleftmargin=1em,
+  xrightmargin=1em,
+  aboveskip=0.8em,
+  belowskip=0.8em,
+  breaklines=true,
+  showstringspaces=false,
+  tabsize=2,
+  extendedchars=true,
+  literate=%
+    {а}{{\cyra}}1 {б}{{\cyrb}}1 {в}{{\cyrv}}1 {г}{{\cyrg}}1
+    {д}{{\cyrd}}1 {е}{{\cyre}}1 {ж}{{\cyrzh}}1 {з}{{\cyrz}}1
+    {и}{{\cyri}}1 {й}{{\cyrishrt}}1 {к}{{\cyrk}}1 {л}{{\cyrl}}1
+    {м}{{\cyrm}}1 {н}{{\cyrn}}1 {о}{{\cyro}}1 {п}{{\cyrp}}1
+    {р}{{\cyrr}}1 {с}{{\cyrs}}1 {т}{{\cyrt}}1 {у}{{\cyru}}1
+    {ф}{{\cyrf}}1 {х}{{\cyrh}}1 {ц}{{\cyrc}}1 {ч}{{\cyrch}}1
+    {ш}{{\cyrsh}}1 {щ}{{\cyrshch}}1 {ъ}{{\cyrhrdsn}}1 {ы}{{\cyrery}}1
+    {ь}{{\cyrsftsn}}1 {э}{{\cyrerev}}1 {ю}{{\cyryu}}1 {я}{{\cyrya}}1
+    {А}{{\CYRA}}1 {Б}{{\CYRB}}1 {В}{{\CYRV}}1 {Г}{{\CYRG}}1
+    {Д}{{\CYRD}}1 {Е}{{\CYRE}}1 {Ж}{{\CYRZH}}1 {З}{{\CYRZ}}1
+    {И}{{\CYRI}}1 {Й}{{\CYRISHRT}}1 {К}{{\CYRK}}1 {Л}{{\CYRL}}1
+    {М}{{\CYRM}}1 {Н}{{\CYRN}}1 {О}{{\CYRO}}1 {П}{{\CYRP}}1
+    {Р}{{\CYRR}}1 {С}{{\CYRS}}1 {Т}{{\CYRT}}1 {У}{{\CYRU}}1
+    {Ф}{{\CYRF}}1 {Х}{{\CYRH}}1 {Ц}{{\CYRC}}1 {Ч}{{\CYRCH}}1
+    {Ш}{{\CYRSH}}1 {Щ}{{\CYRSHCH}}1 {Ъ}{{\CYRHRDSN}}1 {Ы}{{\CYRERY}}1
+    {Ь}{{\CYRSFTSN}}1 {Э}{{\CYREREV}}1 {Ю}{{\CYRYU}}1 {Я}{{\CYRYA}}1
+}
+
+\title{miniFlink: руководство для начала работы\\
+\large Сквозной разбор от потока-функции до durable-пайплайна}
+\author{Проект miniFlink}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Это пошаговое руководство для тех, кто впервые видит miniFlink. Мы
+строим один пайплайн от начала до конца на сквозном примере ---
+телеметрии температурных датчиков --- и на каждом шаге добавляем ровно
+одно понятие: поток, событие и время, watermark, ключ группировки,
+окна, агрегацию, stateful-правила, дедупликацию и, наконец,
+персистентность. Все листинги взяты из компилируемого кода. Прочитав
+руководство сверху вниз, вы сможете читать и писать пайплайны miniFlink
+и будете знать, куда смотреть дальше. Примеры по возрастанию сложности
+живут в каталоге \texttt{examples/} (\texttt{ex01}--\texttt{ex10}); это
+руководство --- сквозная нить, связывающая их.
+\end{abstract}
+
+\tableofcontents
+\bigskip
+
+%%% ──────────────────────────────────────────────────────────────────────
+\section{Прежде чем начать}
+
+miniFlink --- это библиотека потоковой обработки на OCaml,
+реализующая ядро семантики Apache Flink на одном узле: событийное
+время, watermarks, окна, stateful-операторы, retract/update для
+поздних данных и exactly-once. Никакого брокера, планировщика или
+фонового цикла; весь пайплайн --- это композиция обычных функций,
+которую можно читать как спецификацию.
+
+Чтобы запускать примеры, нужен OCaml (4.14+ или 5.x) и Dune~3.0+.
+Соберите проект командой \texttt{dune build} и прогоните тесты ---
+\texttt{dune test}. Каждый листинг ниже предполагает, что в начале
+файла стоит \texttt{open Miniflink}.
+
+\paragraph{Сквозной пример.} На протяжении всего руководства мы
+обрабатываем поток показаний температурных датчиков и хотим в итоге:
+считать среднюю температуру по датчику в окне, поднимать тревогу при
+перегреве и переживать перезапуск процесса без потери состояния.
+Доменная модель проста:
+
+\begin{lstlisting}
+type reading = { sensor : string; celsius : float }
+\end{lstlisting}
+
+%%% ──────────────────────────────────────────────────────────────────────
+\section{Шаг 1. Поток как функция}
+
+Центральная абстракция --- \texttt{Stream.t}, и она устроена предельно
+просто:
+
+\begin{lstlisting}
+type 'a t = unit -> 'a option
+\end{lstlisting}
+
+Поток --- это функция без аргументов, которая при каждом вызове
+возвращает либо следующий элемент (\texttt{Some x}), либо
+\texttt{None}, если элементы кончились. Это \emph{pull}-модель:
+ничего не происходит, пока потребитель не «потянет» следующее
+значение. Весь граф обработки --- это стопка таких функций, обёрнутых
+одна вокруг другой.
+
+\begin{lstlisting}
+let nats : int Stream.t =
+  let i = ref 0 in
+  fun () -> let v = !i in incr i; if v < 5 then Some v else None
+
+let doubled = Stream.map (fun x -> x * 2) nats
+\end{lstlisting}
+
+\texttt{Stream.map}, \texttt{Stream.filter} и \texttt{Stream.flat\_map}
+--- это операторы преобразования: каждый принимает поток и возвращает
+новый поток, не вычисляя ничего заранее. Композиция через оператор
+\texttt{|>} читается естественно слева направо.
+
+%%% ──────────────────────────────────────────────────────────────────────
+\section{Шаг 2. Событие и время}
+
+Голый поток значений ничего не знает о времени. В потоковой обработке
+время --- первоклассное понятие, поэтому miniFlink оборачивает значения
+в \texttt{Mf\_event.t} с четырьмя вариантами:
+
+\begin{itemize}
+\item \texttt{Data (value, ts)} --- значение с временной меткой
+  (event-time);
+\item \texttt{Watermark ts} --- отметка прогресса времени (см.\ шаг~3);
+\item \texttt{Retract (value, ts)} --- отмена ранее выданного
+  результата;
+\item \texttt{Update \{old; new\_value; ts\}} --- атомарная замена
+  старого результата новым.
+\end{itemize}
+
+Последние два понадобятся, когда мы дойдём до поздних данных; пока что
+работаем с \texttt{Data}. Превратим наши показания в event-time поток
+--- пусть каждое следующее чтение приходит на секунду позже:
+
+\begin{lstlisting}
+let event_stream : reading Mf_event.t Stream.t =
+  readings
+  |> List.mapi (fun i r -> Mf_event.data r (i * 1000))
+  |> Stream.of_list
+\end{lstlisting}
+
+Временные метки здесь в миллисекундах; \texttt{Time} --- это просто
+\texttt{int} мс с удобными конструкторами (\texttt{Time.seconds},
+\texttt{Time.minutes}).
+
+%%% ──────────────────────────────────────────────────────────────────────
+\section{Шаг 3. Watermarks}
+
+Событийное время порождает вопрос: когда можно считать, что «все
+события до момента $t$ уже пришли»? В распределённой системе данные
+опаздывают и приходят не по порядку. \emph{Watermark} --- это обещание
+системы: «событий с меткой меньше $t$ больше не будет». Операторы окон
+используют его, чтобы понять, когда окно можно закрывать и эмитить
+результат.
+
+\begin{lstlisting}
+let with_wm =
+  Mf_event.with_watermarks ~latency:(Time.seconds 1) event_stream
+\end{lstlisting}
+
+Параметр \texttt{\textasciitilde{}latency} задаёт допуск на опоздание:
+watermark отстаёт от максимальной увиденной метки на эту величину, что
+оставляет опоздавшим событиям шанс прийти. Чем больше latency, тем
+устойчивее к опозданиям, но тем позже закрываются окна --- это прямой
+компромисс между полнотой и задержкой.
+
+%%% ──────────────────────────────────────────────────────────────────────
+\section{Шаг 4. Ключ группировки через \texttt{KEYED}}
+
+Почти все интересные операторы работают \emph{по ключу}: окно «на
+датчик», агрегат «на пользователя». В большинстве фреймворков ключ
+передаётся параметром в каждый оператор. miniFlink кодирует ключ
+\emph{один раз} в типе через first-class-модуль \texttt{Keyed.S}:
+
+\begin{lstlisting}
+module By_sensor : Keyed.S with type t = reading = struct
+  type t = reading
+  let key r = r.sensor
+end
+\end{lstlisting}
+
+Теперь \texttt{By\_sensor} можно передавать операторам как значение, и
+им не нужен отдельный параметр \texttt{\textasciitilde{}key:}. Для
+разовых случаев есть \texttt{Keyed.of\_fun (fun r -> r.sensor)}, не
+требующий объявления модуля. Этот приём и делает пайплайны похожими на
+спецификацию: ключ виден один раз, а не повторяется в каждом вызове.
+
+%%% ──────────────────────────────────────────────────────────────────────
+\section{Шаг 5. Окна и агрегация}
+
+Окно режет бесконечный поток на конечные куски, к которым можно
+применить агрегат. Простейшее --- \emph{тумблинг}: неперекрывающиеся
+окна фиксированного размера. Посчитаем среднюю температуру по каждому
+датчику в окнах по три секунды:
+
+\begin{lstlisting}
+let avg_per_sensor =
+  event_stream
+  |> Pipe.window_agg (module By_sensor)
+       (Pipe.tumbling (Time.seconds 3))
+       (Agg.mean (fun r -> r.celsius))
+\end{lstlisting}
+
+\texttt{Pipe.window\_agg} принимает модуль ключа, спецификацию окна
+(\texttt{tumbling}, \texttt{sliding}, и т.\,д.) и \emph{агрегат}.
+Агрегаты --- это композируемая библиотека: \texttt{count},
+\texttt{sum}, \texttt{mean}, \texttt{count\_if}, а также комбинаторы
+вроде \texttt{both} (считать два агрегата сразу) и \texttt{contramap}
+(адаптировать входной тип). На выходе --- поток
+\texttt{(string * 'r)}: ключ и результат агрегата за закрытое окно.
+Результат появляется, когда watermark пересекает границу окна --- вот
+зачем был нужен шаг~3.
+
+%%% ──────────────────────────────────────────────────────────────────────
+\section{Шаг 6. Stateful-правила: триггеры}
+
+Окна отвечают на «сколько/какое среднее», но для системы оповещения
+нужен \emph{stateful}-автомат: поднять тревогу, когда значение
+пересекает порог, и снять её, когда вернулось в норму, не дёргая
+оператора на каждом событии. Это \texttt{Trigger}:
+
+\begin{lstlisting}
+let alert_spec =
+  Trigger.create
+    ~name:"overheat"
+    ~condition:(Trigger.greater_than 90.0)
+    ~produce_alert:(fun ~key ~value ~ts:_ ->
+      Printf.sprintf "ALERT %s=%.0f" key value)
+    ~produce_recovery:(fun ~key ~ts:_ ->
+      Printf.sprintf "OK %s" key)
+    ()
+
+let alerts =
+  event_stream
+  |> Stream.map (Mf_event.map_value (fun r -> (r.sensor, r.celsius)))
+  |> Trigger.of_stream alert_spec
+\end{lstlisting}
+
+Триггер --- это конечный автомат на ключ. Когда температура датчика
+превышает 90, он эмитит \texttt{Data} с алертом; когда падает обратно
+--- \texttt{Retract} прежнего алерта и \texttt{Data} с recovery. Можно
+задать debounce (\texttt{\textasciitilde{}problem\_for}), гистерезис
+(\texttt{greater\_than\_with\_hysteresis}) и произвольные условия
+(\texttt{custom}). Важное свойство, проверенное property-тестами:
+активных алертов на ключ не больше одного, а каждый recovery парен
+своему алерту --- автомат не «залипает».
+
+%%% ──────────────────────────────────────────────────────────────────────
+\section{Шаг 7. Дедупликация поздних дублей}
+
+Семантика at-least-once у источников означает дубли: один пакет может
+прийти дважды. \texttt{Pipe.dedup} подавляет повторы с одним ключом в
+пределах окна \texttt{cooldown}:
+
+\begin{lstlisting}
+module By_pair : Keyed.S with type t = string * float = struct
+  type t = string * float
+  let key (k, _) = k
+end
+
+let deduped =
+  event_stream
+  |> Stream.map (Mf_event.map_value (fun r -> (r.sensor, r.celsius)))
+  |> Pipe.dedup (module By_pair)
+       ~rule:(fun (k, _) -> k)
+       ~cooldown:(Time.seconds 5)
+\end{lstlisting}
+
+Свойство, зафиксированное property-тестом: между двумя прошедшими
+событиями одного ключа разрыв по времени не меньше \texttt{cooldown},
+и каждое прошедшее событие действительно было во входе.
+
+%%% ──────────────────────────────────────────────────────────────────────
+\section{Шаг 8. Поздние данные: retract и update}
+
+Вернёмся к четырёхвариантному событию из шага~2. Что, если событие
+опоздало и пришло уже после закрытия его окна? Наивный вариант ---
+выбросить его (потеря данных) или выдать новый результат поверх
+старого (дашборд «мигает» промежуточным состоянием). miniFlink делает
+третье: атомарно \emph{корректирует} результат.
+
+Когда в уже закрытое окно приходит позднее значение, оператор эмитит
+\texttt{Update}\,$(o \to n)$ --- одно событие, заменяющее старый
+результат $o$ новым $n$ без промежуточного состояния. Для потребителя
+это выглядит как мгновенный переход, без «мигания». Фундаментальный
+закон, который мы проверяем property-тестами для всех stateless-операторов:
+
+\[
+\mathtt{Update}\,(o \to n) \;\equiv\;
+\mathtt{Retract}(o)\;\text{затем}\;\mathtt{Data}(n),
+\]
+
+то есть атомарный \texttt{Update} --- это в точности пара
+«отозвать старое, выдать новое», только без промежуточного шага.
+Писать обработку \texttt{Retract}/\texttt{Update} вручную обычно не
+нужно: операторы (\texttt{map}, \texttt{filter}, \texttt{window\_agg},
+\texttt{trigger}) делают это сами и согласованно.
+
+%%% ──────────────────────────────────────────────────────────────────────
+\section{Шаг 9. Персистентность без изменения пайплайна}
+
+Финальное требование: пережить перезапуск процесса. Активная тревога
+не должна исчезнуть из-за рестарта --- иначе диспетчер увидит мнимое
+снятие.
+
+Ключевая идея miniFlink --- \emph{ортогональная} персистентность: один
+и тот же пайплайн работает с durability и без неё, режим выбирается
+\emph{снаружи}, а не вшит в операторы. Сначала пишем пайплайн как
+обычно:
+
+\begin{lstlisting}
+let pipeline src =
+  src
+  |> Stream.map (Mf_event.map_value (fun r -> (r.sensor, r.celsius)))
+  |> Trigger.of_stream alert_spec
+\end{lstlisting}
+
+Без персистентности --- просто запускаем. С персистентностью ---
+оборачиваем тот же вызов в durable-контекст:
+
+\begin{lstlisting}
+(* в памяти, ничего не сохраняется *)
+let ephemeral () = pipeline event_stream
+
+(* то же самое, но состояние durable *)
+let durable () =
+  let backend = Persistence_backend.of_memory (Hashtbl.create 16) in
+  Runtime_context.with_context
+    (Runtime_context.durable backend)
+    (fun () -> pipeline event_stream)
+\end{lstlisting}
+
+Пайплайн не изменился ни на строку --- разница только в обёртке
+\texttt{with\_context}. Сериализация тоже ортогональна: состояние
+операторов сериализуется по умолчанию (через \texttt{Marshal}), так что
+для crash-recovery не нужно писать ни одного кодека; для эволюции
+схемы между деплоями можно задать реестр кодеков в контексте, опять же
+не трогая пайплайн. В продакшене вместо in-memory backend подставляется
+RocksDB; пайплайн при этом снова не меняется.
+
+Это свойство --- что durable-прогон с «крашем» посередине даёт тот же
+результат, что непрерывный --- мы проверяем property-тестом на сотнях
+случайных потоков и точек краша.
+
+%%% ──────────────────────────────────────────────────────────────────────
+\section{Шаг 10. Масштабирование и exactly-once}
+
+Всё выше --- однопоточный пайплайн. Для пропускной способности
+\texttt{Parallel.run\_parallel\_simple} шардирует поток по ключу на $N$
+воркеров. Когда нужна не просто параллельность, а \emph{exactly-once}
+с восстановлением после сбоя, используется
+\texttt{Checkpoint\_parallel.run\_exactly\_once}: координатор
+инжектирует barrier-маркеры (снимок в стиле Chandy--Lamport), каждый
+воркер снапшотит своё состояние, а checkpoint фиксируется атомарно,
+когда снимки собраны со всех воркеров. Транзакционный sink и
+восстановление source по offset замыкают exactly-once на одном узле.
+
+\begin{lstlisting}
+Checkpoint_parallel.run_exactly_once
+  ~workers:4 ~capacity:256 ~checkpoint_every:1000
+  ~key_of ~make_state ~process ~source ~sink ~store ()
+\end{lstlisting}
+
+Это другой, более высокий уровень гарантий, чем per-operator
+персистентность из шага~9: тот отвечает за восстановление состояния
+оператора, этот --- за end-to-end exactly-once со стороны источника и
+приёмника. Выбирайте по задаче: для большинства пайплайнов достаточно
+ортогональной персистентности.
+
+\paragraph{Замечание про параллелизм.} На OCaml~4 истинной
+параллельности нет (runtime-lock), но конвейеризация через каналы
+прячет задержки; измеренное ускорение --- $2.48\times$ на 4 воркерах.
+На OCaml~5 с \texttt{Domain} появляется реальный параллелизм, и тот же
+код пользуется им без изменений.
+
+%%% ──────────────────────────────────────────────────────────────────────
+\section{Что дальше}
+
+Вы прошли путь от потока-функции до durable-пайплайна с тревогами.
+Дальнейшие шаги:
+
+\begin{itemize}
+\item \textbf{Примеры.} Каталог \texttt{examples/} (\texttt{ex01}--%
+  \texttt{ex10}) идёт по возрастанию сложности; \texttt{ex07} ---
+  полноценный сервис мониторинга шахты с триангуляцией и
+  retract-пайплайном газовых тревог.
+\item \textbf{Справочник API.} Интерфейсные файлы \texttt{.mli}
+  (особенно \texttt{pipe.mli} и \texttt{trigger.mli}) написаны как
+  самостоятельные руководства с разбором краевых случаев.
+\item \textbf{Глубже в семантику.} Статья \texttt{miniflink\_article}
+  разбирает устройство движка; \texttt{docs/orthogonal-persistence.md}
+  --- модель персистентности; \texttt{docs/atomic-update-event.md} ---
+  семантику \texttt{Update}.
+\item \textbf{Прикладной разбор.} Статья по \texttt{ex07}
+  (\texttt{docs/ex07\_article}) показывает, как из этих операторов
+  собирается реальная система безопасности.
+\end{itemize}
+
+Главная мысль, которую стоит унести: пайплайн miniFlink читается как
+спецификация. Ключ объявлен один раз, время и поздние данные обработаны
+операторами, а решения о персистентности и параллелизме приняты
+снаружи и не засоряют логику. Это и есть та декларативность, ради
+которой всё затевалось.
+
+\end{document}
