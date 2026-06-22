@@ -605,3 +605,15 @@
  (libraries miniflink qcheck-core qcheck-core.runner qcheck)
  (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70 -alert -deprecated))
  (modules test_prop_trigger))
+
+(test
+ (name test_prop_process_keyed)
+ (libraries miniflink qcheck-core qcheck-core.runner qcheck)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70 -alert -deprecated))
+ (modules test_prop_process_keyed))
+
+(test
+ (name test_prop_item_dedup_join)
+ (libraries miniflink qcheck-core qcheck-core.runner qcheck)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70 -alert -deprecated))
+ (modules test_prop_item_dedup_join))
