@@ -12,6 +12,7 @@
  (wrapped true)
  (libraries unix threads.posix yojson ppx_deriving_yojson.runtime)
  (preprocess (pps ppx_deriving_yojson ppx_deriving.show))
+ (instrumentation (backend bisect_ppx))
  (flags (:standard -w +a-27-32-33-37-39-69-70))
  (foreign_stubs (language c) (names rocksdb_stubs))
  (c_library_flags (-lrocksdb))
