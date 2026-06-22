@@ -407,20 +407,41 @@ let safe_map ~on_error f upstream =
       (try [Mf_event.update (f old) (f new_value) ts]
        with e -> on_error e; [])
     | Mf_event.Watermark wm -> [Mf_event.wm wm]
-    | Mf_event.Retract (_, _) -> [])   (* retract входного типа не транслируется *)
+    | Mf_event.Retract (v, t) ->
+      (* Retract транслируется через f — симметрично обычному map и
+         safe_filter. Раньше он молча терялся, и поздняя коррекция
+         (отзыв ранее эмитированного значения) пропадала, оставляя
+         downstream с устаревшим значением. *)
+      (try [Mf_event.retract (f v) t]
+       with e -> on_error e; []))
     upstream
 
 (** [safe_filter ~on_error p] как [filter p], но исключение из [p]
     перехватывается: [on_error exn], событие отбрасывается. *)
 let safe_filter ~on_error p upstream =
   Stream.flat_map (function
-    | Mf_event.Data (v, _) as ev ->
-      (try if p v then [ev] else []
+    | Mf_event.Data (v, t) ->
+      (try if p v then [Mf_event.data v t] else []
        with e -> on_error e; [])
-    | Mf_event.Update { new_value = v; _ } as ev ->
-      (try if p v then [ev] else []
+    | Mf_event.Update { old; new_value; ts } ->
+      (* Та же 4-case семантика, что в обычном filter (efilt):
+         (p old, p new): TT→Update, FT→Data new (появление),
+         TF→Retract old (исчезновение), FF→drop. Раньше safe_filter
+         проверял только p(new) и пропускал/дропал весь Update — та же
+         асимметрия, что была багом R4 в обычном filter. *)
+      (try
+         (match p old, p new_value with
+          | true,  true  -> [Mf_event.update old new_value ts]
+          | false, true  -> [Mf_event.data new_value ts]
+          | true,  false -> [Mf_event.retract old ts]
+          | false, false -> [])
        with e -> on_error e; [])
-    | Mf_event.Watermark _ | Mf_event.Retract _ as ev -> [ev])
+    | Mf_event.Retract (v, t) ->
+      (* Retract пропускается только если p(v) — симметрично efilt;
+         раньше пропускался безусловно. *)
+      (try if p v then [Mf_event.retract v t] else []
+       with e -> on_error e; [])
+    | Mf_event.Watermark _ as ev -> [ev])
     upstream
 
 (** [safe_flat_map ~on_error f] как [flat_map f], но исключение из [f]
@@ -442,7 +463,11 @@ let safe_flat_map ~on_error f upstream =
         in zip olds news
        with e -> on_error e; [])
     | Mf_event.Watermark wm -> [Mf_event.wm wm]
-    | Mf_event.Retract (_, _) -> [])
+    | Mf_event.Retract (v, t) ->
+      (* Retract транслируется через f — симметрично обычному flat_map
+         (один Retract → N синхронных Retract'ов). Раньше терялся. *)
+      (try List.map (fun out -> Mf_event.retract out t) (f v)
+       with e -> on_error e; []))
     upstream
 
 (* ── Sink helpers ─────────────────────────────────────────── *)

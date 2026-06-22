@@ -83,10 +83,12 @@ let () =
     |> Pipe.safe_map ~on_error (fun x -> if x = 1 then failwith "boom" else x) |> drain in
   check "safe_map: failing element dropped" (List.length sm_err = 1);
   check "safe_map: on_error called once" (!errs = 1);
-  (* safe_filter: Update-ветка *)
+  (* safe_filter: Update с 4-case семантикой (как обычный filter).
+     5→20, p=(>10): old=5 не проходит, new=20 проходит → (F,T) →
+     Data 20 (появление), НЕ Update. *)
   let sf = [ Mf_event.update 5 20 0 ]
     |> Stream.of_list |> Pipe.safe_filter ~on_error (fun x -> x > 10) |> drain |> List.map tag in
-  check "safe_filter Update (new passes) → kept" (sf = [`U (5, 20)]);
+  check "safe_filter Update (F,T) → Data 20 (appearance)" (sf = [`D 20]);
   (* safe_flat_map: Update zip *)
   let sfm = [ Mf_event.update 2 3 0 ]
     |> Stream.of_list |> Pipe.safe_flat_map ~on_error (fun x -> [x; x*10]) |> drain |> List.map tag in
