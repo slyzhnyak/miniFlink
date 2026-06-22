@@ -581,3 +581,45 @@
  (libraries miniflink)
  (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
  (modules test_window_fired_late_coverage))
+
+(test
+ (name test_prop_agg_retract)
+ (libraries miniflink qcheck-core qcheck-core.runner qcheck)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70 -alert -deprecated))
+ (modules test_prop_agg_retract))
+
+(test
+ (name test_prop_window_retract)
+ (libraries miniflink qcheck-core qcheck-core.runner qcheck)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70 -alert -deprecated))
+ (modules test_prop_window_retract))
+
+(test
+ (name test_prop_update_equiv)
+ (libraries miniflink qcheck-core qcheck-core.runner qcheck)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70 -alert -deprecated))
+ (modules test_prop_update_equiv))
+
+(test
+ (name test_prop_trigger)
+ (libraries miniflink qcheck-core qcheck-core.runner qcheck)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70 -alert -deprecated))
+ (modules test_prop_trigger))
+
+(test
+ (name test_prop_process_keyed)
+ (libraries miniflink qcheck-core qcheck-core.runner qcheck)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70 -alert -deprecated))
+ (modules test_prop_process_keyed))
+
+(test
+ (name test_prop_item_dedup_join)
+ (libraries miniflink qcheck-core qcheck-core.runner qcheck)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70 -alert -deprecated))
+ (modules test_prop_item_dedup_join))
+
+(test
+ (name test_prop_persistence)
+ (libraries miniflink qcheck-core qcheck-core.runner qcheck)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70 -alert -deprecated))
+ (modules test_prop_persistence))
