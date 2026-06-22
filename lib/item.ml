@@ -46,11 +46,21 @@ module Timers = struct
     Hashtbl.remove tm key_str
 end
 
-(* Сериализация ключа через Hashtbl.hash. См. ту же стратегию в
-   trigger.ml — храним вместе с last_seen в таблице сам ключ,
-   чтобы вернуть его при срабатывании таймера. *)
+(* Сериализация ключа в строку для строковых Hashtbl (состояние +
+   таймеры).
+
+   НЕ Hashtbl.hash: он 30-битный, поэтому два разных ключа могут дать
+   одну строку и схлопнуть свои записи в одну ячейку (silent state
+   corruption — второй replace затирает первый; хранение исходного
+   ключа рядом не спасает, коллизия в самом ключе таблицы). Это тот
+   же баг, что был исправлен в trigger.ml (R3).
+
+   Marshal + 128-битный MD5-дайджест: детерминированно, без параметров
+   от пользователя, пространство коллизий 2^128 вместо 2^30 — на любом
+   реальном числе ключей коллизий нет. Состояние ключа closure-free,
+   поэтому Marshal безопасен. Тест: test/test_item_key_collision.ml. *)
 let default_key_to_string : 'k -> string = fun k ->
-  string_of_int (Hashtbl.hash k)
+  Digest.string (Marshal.to_string k []) |> Digest.to_hex
 
 let silence_age
     (type ev k)
