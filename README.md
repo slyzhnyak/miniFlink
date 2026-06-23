@@ -922,6 +922,10 @@ API-документация генерируется через odoc:
 [docs/miniflink_api.pdf](docs/miniflink_api.pdf) (41 стр., все модули).
 
 Тематические документы:
+- [docs/tutorial.tex](docs/tutorial.tex) — **сквозной getting-started
+  туториал**: от потока-функции до durable-пайплайна на одном примере
+  (телеметрия датчиков), 10 шагов. Лучшая точка входа для новых
+  пользователей; связывает примеры ex01–ex10 единой нитью.
 - [docs/expressiveness.md](docs/expressiveness.md) — улучшения выразительности
   API: `Pipe.iter_data` family, `Pipe.keyed_join` (multi-stream join по ключу)
 - [docs/orthogonal-persistence.md](docs/orthogonal-persistence.md) —
