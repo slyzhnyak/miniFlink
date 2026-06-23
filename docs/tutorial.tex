@@ -9,6 +9,13 @@
 \usepackage{listings}
 \usepackage{xcolor}
 \usepackage{booktabs}
+\usepackage{url}
+% Моноширинная команда для длинных идентификаторов/путей, которая умеет
+% переноситься на . _ / (обычный \texttt их не ломает и вылезает за поля).
+\makeatletter
+\DeclareUrlCommand\pathtt{\urlstyle{tt}}
+\g@addto@macro\UrlBreaks{\do\.\do\_\do\/\do\-}
+\makeatother
 
 \hypersetup{colorlinks=true, linkcolor=blue!50!black,
             urlcolor=blue!50!black, citecolor=blue!50!black}
@@ -623,10 +630,10 @@ RocksDB; пайплайн при этом снова не меняется.
 \section{Шаг 10. Масштабирование и exactly-once}
 
 Всё выше --- однопоточный пайплайн. Для пропускной способности
-\texttt{Parallel.run\_parallel\_simple} шардирует поток по ключу на $N$
+\pathtt{Parallel.run_parallel_simple} шардирует поток по ключу на $N$
 воркеров. Когда нужна не просто параллельность, а \emph{exactly-once}
 с восстановлением после сбоя, используется
-\texttt{Checkpoint\_parallel.run\_exactly\_once}: координатор
+\pathtt{Checkpoint_parallel.run_exactly_once}: координатор
 инжектирует barrier-маркеры (снимок в стиле Chandy--Lamport), каждый
 воркер снапшотит своё состояние, а checkpoint фиксируется атомарно,
 когда снимки собраны со всех воркеров. Транзакционный sink и
@@ -664,12 +671,12 @@ Checkpoint_parallel.run_exactly_once
 \item \textbf{Справочник API.} Интерфейсные файлы \texttt{.mli}
   (особенно \texttt{pipe.mli} и \texttt{trigger.mli}) написаны как
   самостоятельные руководства с разбором краевых случаев.
-\item \textbf{Глубже в семантику.} Статья \texttt{miniflink\_article}
-  разбирает устройство движка; \texttt{docs/orthogonal-persistence.md}
-  --- модель персистентности; \texttt{docs/atomic-update-event.md} ---
+\item \textbf{Глубже в семантику.} Статья \pathtt{miniflink_article}
+  разбирает устройство движка; \pathtt{docs/orthogonal-persistence.md}
+  --- модель персистентности; \pathtt{docs/atomic-update-event.md} ---
   семантику \texttt{Update}.
 \item \textbf{Прикладной разбор.} Статья по \texttt{ex07}
-  (\texttt{docs/ex07\_article}) показывает, как из этих операторов
+  (\pathtt{docs/ex07_article}) показывает, как из этих операторов
   собирается реальная система безопасности.
 \end{itemize}
 
