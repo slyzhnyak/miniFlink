@@ -17,7 +17,7 @@ Apache Flink **на одном узле**. Акцент — на чистоте 
 operators, exactly-once (end-to-end: offset, 2PC sink, recovery, durable),
 table/join с TTL (+ temporal as-of join), union потоков, retractions — плюс production-слои
 (DLQ + retry/backoff, graceful shutdown, Prometheus metrics, структурированные
-логи, health, config, RocksDB state). ~5700 строк OCaml, 88 тест-сюит.
+логи, health, config, RocksDB state). ~5500 строк OCaml, 105 тест-сюит.
 
 ## Почему декларативно
 
@@ -99,7 +99,7 @@ variants/            — реализации channel/parallel по версии
 bin/    main.ml        демо pipeline
 examples/              самодостаточные примеры (см. examples/README.md)
 bench/  bench.ml bench_parallel.ml bench_ex07.ml soak.ml
-test/   88 тест-сюит (core, props, invariants, reliability, metrics,
+test/   105 тест-сюит (core, props, invariants, reliability, metrics,
                      retract, sliding, count_window, session_window,
                      global_window, window_fold, agg, union, safe, parallel_retract,
                      side_output, ttl_state, nexmark, watermark_fuzz, timers,
@@ -381,7 +381,7 @@ dune exec bench/bench_ex07_parallel.exe
 | Graceful Shutdown           | ✓ реализовано (SIGTERM/INT)   |
 | Prometheus Metrics          | ✓ реализовано (HTTP :9090)    |
 | Изоляция исключений         | ✓ safe_map / safe_filter (битое событие → on_error, не падение) |
-| Unit + Property тесты       | ✓ 88 сюит, QCheck-инварианты  |
+| Unit + Property тесты       | ✓ 105 сюит, 29 QCheck-инвариантов |
 | CI                          | ⚠ workflow написан (docs/ci/ci.yml: сборка + тесты на OCaml 4.14/5.2), но НЕ активен: токен автоматизации без workflow-scope не может пушить в .github/workflows/ — скопируйте файл туда вручную |
 | Exactly-once parallel       | ✓ реализовано (barrier + snapshot) |
 | Exactly-once end-to-end     | ✓ offset + 2PC sink + recovery + durable (E2E recovery harness: kill→recover→output совпадает) |
@@ -595,11 +595,11 @@ Baseline для регрессий теперь даёт `bench/bench_ex07.ml` (
     не были в scope изначального TODO, но имеют per-key state. Та же
     схема (Persistence_backend + JSON) применима если понадобится.
 
-- [ ] **Kafka EOS: транзакции в C-слое.** `kafka_rdkafka.ml` имеет
-  заглушки `begin_txn`/`commit_txn` (через flush); для полного
-  exactly-once через Kafka-sink нужны `rd_kafka_init_transactions` /
-  `begin` / `commit` в kafka_stubs.c и реализация `transactional_sink`
-  поверх. Требует среды с живым брокером для integration-теста.
+- [ ] **Kafka EOS: транзакции в C-слое.** Kafka-адаптеров пока нет
+  (источник/sink подключает приложение). Для полного exactly-once через
+  Kafka-sink нужны `rd_kafka_init_transactions` / `begin` / `commit` в
+  C-слое (`kafka_stubs.c`) и реализация `transactional_sink` поверх.
+  Требует среды с живым брокером для integration-теста.
   Средняя сложность, чисто транспортный слой (семантика 2PC в ядре
   готова и протестирована на in-memory sink).
 - [ ] **Композитные ключи: безопасная склейка.** Сейчас составной ключ
