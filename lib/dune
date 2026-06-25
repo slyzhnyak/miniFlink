@@ -35,6 +35,15 @@
  (enabled_if (< %{ocaml_version} 5.0.0))
  (action (copy ../variants/parallel_v4.ml parallel.ml)))
 
+; ── ctx_store.ml по версии OCaml ──────────────────────────────
+;  v5 → Domain.DLS (domain-local), v4 → простой ref (безопасно под GIL)
+(rule
+ (enabled_if (>= %{ocaml_version} 5.0.0))
+ (action (copy ../variants/ctx_store_v5.ml ctx_store.ml)))
+(rule
+ (enabled_if (< %{ocaml_version} 5.0.0))
+ (action (copy ../variants/ctx_store_v4.ml ctx_store.ml)))
+
 ; ── odoc документация ─────────────────────────────────────────
 (documentation
  (package miniflink)

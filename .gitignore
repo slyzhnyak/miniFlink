@@ -10,6 +10,7 @@ miniflink
 miniflink_*
 channel.ml
 parallel.ml
+ctx_store.ml
 _build/
 .merlin
 *.install
