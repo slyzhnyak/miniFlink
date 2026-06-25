@@ -48,17 +48,25 @@ type t = { mode : mode }
    [with_context], всё работает как «без persistence». *)
 let default = { mode = Ephemeral }
 
-(* Текущий ambient-контекст (динамический scope). *)
-let current : t ref = ref default
+(* Ambient-контекст хранится в Ctx_store — на OCaml 5 это
+   domain-local (каждый домен свой контекст, без гонок), на OCaml 4 —
+   простой ref. Значение хранится как Obj.t (Ctx_store не знает наш
+   тип, чтобы не было цикла зависимостей); приведение скрыто здесь и
+   безопасно, потому что только этот модуль кладёт/читает ячейку. *)
+let get () : t =
+  match Ctx_store.get () with
+  | Some o -> (Obj.obj o : t)
+  | None -> default
+
+let set_current (ctx : t) : unit =
+  Ctx_store.set (Some (Obj.repr ctx))
 
 (* Выполнить [f] с заданным контекстом, восстановив предыдущий после
    (в т.ч. при исключении). Вложенность поддерживается. *)
 let with_context ctx f =
-  let saved = !current in
-  current := ctx;
-  Fun.protect ~finally:(fun () -> current := saved) f
-
-let get () = !current
+  let saved = Ctx_store.get () in        (* Obj.t option — сырое, без приведения *)
+  set_current ctx;
+  Fun.protect ~finally:(fun () -> Ctx_store.set saved) f
 
 (* ── Конструкторы режимов ──────────────────────────────────── *)
 
