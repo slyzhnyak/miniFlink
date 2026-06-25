@@ -926,6 +926,10 @@ API-документация генерируется через odoc:
   туториал**: от потока-функции до durable-пайплайна на одном примере
   (телеметрия датчиков), 10 шагов. Лучшая точка входа для новых
   пользователей; связывает примеры ex01–ex10 единой нитью.
+- [docs/literate-pipelines/](docs/literate-pipelines/) — эксперимент по
+  грамотному описанию пайплайнов (literate programming в духе Кнута):
+  сравнение двух подходов (код-первичен vs noweb) на примере газовых
+  тревог, с обоснованием выбора для minePASS
 - [docs/expressiveness.md](docs/expressiveness.md) — улучшения выразительности
   API: `Pipe.iter_data` family, `Pipe.keyed_join` (multi-stream join по ключу)
 - [docs/orthogonal-persistence.md](docs/orthogonal-persistence.md) —
