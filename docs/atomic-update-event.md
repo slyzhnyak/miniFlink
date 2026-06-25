@@ -34,7 +34,7 @@ callback для opt-in atomic native handling. Тест
 total после Data(10) + Update(10→15) = 25, с callback = 15
 (atomic rollback+apply).
 
-**Итого:** 88 тестов, 10 примеров, end-to-end атомарная коррекция
+**Итого:** 105 тестов, 10 примеров, end-to-end атомарная коррекция
 (семантика выверена аудитом раундов 4-5 — см. ниже).
 
 ---
