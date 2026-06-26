@@ -143,12 +143,12 @@ val create :
     на Recovery-переходе [Mf_event.retract] последнего Problem-alert'а
     плюс [Mf_event.data] от [produce_recovery].
 
-    {b Опциональные сериализаторы} ([serialize_*]/[deserialize_*])
-    необходимы, если триггер запускается с persistence (см.
-    [?backend] параметр в [of_stream]). Без backend'а они
-    игнорируются. Если backend подключён, а хотя бы один
-    сериализатор отсутствует — [of_stream] выбросит
-    [Invalid_argument]. *)
+    {b Persistence ортогональна.} Триггер не принимает сериализаторов
+    или backend-параметров: его FSM-состояние (по ключу, плюс
+    last_event_ts и pending-таймеры) — closure-free, поэтому в
+    durable-контексте ([Runtime_context]) снапшотится через [Marshal]
+    автоматически, а вне его живёт в памяти. Тот же триггер работает в
+    обоих режимах без изменений. *)
 
 val name     : ('key, 'v, 'alert) spec -> string
 val severity : ('key, 'v, 'alert) spec -> severity
@@ -158,8 +158,8 @@ val severity : ('key, 'v, 'alert) spec -> severity
     Альтернатива {!create} с 13 параметрами. Удобен для:
     - {b Trigger templates:} зафиксировать общую часть в переменной
       и override'ить пару полей через [with]
-    - {b Group serdes:} 6 сериализаторов идут в один subrecord
-      {!serdes_config} как опциональный bundle
+    - {b Шаблоны спецификаций:} общую часть в переменную, частные
+      поля — через [with]
 
     Пример template'а:
     {[
@@ -256,6 +256,6 @@ val combine :
     Под капотом — независимые per-(trigger, key) state-таблицы;
     триггеры не интерферируют.
 
-    [?backend], если передан, разделяется всеми триггерами в списке.
-    Они различаются по [name] и не интерферируют в backend'е по
+    В durable-контексте все триггеры списка снапшотятся в общий
+    backend. Они различаются по [name] и не интерферируют в backend'е по
     ключам. *)

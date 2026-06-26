@@ -27,37 +27,18 @@ val of_memory : (string, bytes) Hashtbl.t -> t
 
 (** {1 Bundle для persistence-параметров}
 
-    Когда оператор использует persistence, ему нужны четыре связанные
-    вещи: backend, namespace в нём, и пара (де)сериализаторов для
-    пользовательского типа. Эти параметры всегда идут вместе — если
-    есть один, нужны все. Тип [persist] объединяет их в один
-    record чтобы передавать одним именованным параметром вместо
-    четырёх:
+    {b Историческая заметка.} Раньше каждый stateful-оператор принимал
+    persistence явным параметром [~persistence] — пакетом из backend,
+    namespace и пары (де)сериализаторов (тип [persist] ниже). Эта схема
+    {e устарела}: persistence стала ортогональной. Операторы
+    ([Item.silence_age], [Pipe.process_keyed], [Pipe.window_fold],
+    [Trigger.of_stream]) больше НЕ принимают [~persistence] и НЕ требуют
+    сериализаторов — их состояние closure-free и снапшотится через
+    [Marshal] автоматически, когда пайплайн обёрнут в durable
+    [Runtime_context]. См. docs/orthogonal-persistence.md.
 
-    {[
-      (* Раньше: *)
-      Item.silence_age
-        ~backend
-        ~backend_name:"no_packets"
-        ~serialize_key:(fun k -> `String k)
-        ~deserialize_key:(fun j -> Yojson.Safe.Util.to_string j)
-        ~by:... ~tick:... source
-
-      (* Теперь: *)
-      let pst = {
-        backend; name = "no_packets";
-        serialize = (fun k -> `String k);
-        deserialize = (fun j -> Yojson.Safe.Util.to_string j);
-      } in
-      Item.silence_age ~persistence:pst ~by:... ~tick:... source
-    ]}
-
-    Тип [persist] параметризован типом сериализуемой сущности:
-    - [Item.silence_age] — ключ ({!Item} [.silence_age ~persistence:string persist])
-    - [Pipe.process_keyed] — состояние (per-user-defined type)
-    - [Pipe.window_fold] — accumulator (per-user-defined type)
-    - {!Trigger.of_stream} — отдельная, более сложная схема (см. документацию Trigger)
-    *)
+    Тип [persist] оставлен для обратной совместимости и как описание
+    backend-контракта; новый код его не использует. *)
 
 type 'v persist = {
   backend     : t;
@@ -65,10 +46,10 @@ type 'v persist = {
   serialize   : 'v -> Yojson.Safe.t;
   deserialize : Yojson.Safe.t -> 'v;
 }
-(** Пакет параметров persistence для одного оператора.
+(** {b Legacy.} Пакет параметров persistence старой (не ортогональной)
+    модели. Операторы больше его не принимают; см. историческую заметку
+    выше. Сохранён для обратной совместимости.
 
     - [backend] — KV-хранилище
-    - [name] — namespace, идентифицирующий конкретный instance оператора
-      в этом backend'е (например, ["no_packets"] vs ["gas_silence"])
-    - [serialize]/[deserialize] — конвертация значения в JSON и обратно
-    *)
+    - [name] — namespace оператора в backend'е
+    - [serialize]/[deserialize] — конвертация значения в JSON и обратно *)
