@@ -128,17 +128,22 @@ val process_keyed :
         on_timer = (fun ctx key st t kind -> ...);
         now_ms = None;
         on_stat = None;
-        persistence = None;
+        name = Some "voltage";   (* namespace состояния в backend *)
       }
 
-      let persisted_voltage = Pipe.process_keyed_spec
-        { base with persistence = Some voltage_persist }
+      let voltage = Pipe.process_keyed_spec base
 
-      let persisted_co = Pipe.process_keyed_spec
+      let co = Pipe.process_keyed_spec
         { base with
-            persistence = Some co_persist;
+            name = Some "co";
             on_event = my_co_handler  (* overrides *) }
-    ]} *)
+    ]}
+
+    Persistence НЕ задаётся в spec — она ортогональна: тот же spec
+    работает durable или нет в зависимости от внешнего
+    [Runtime_context] (см. [?name] выше и docs/orthogonal-persistence.md).
+    [name] лишь даёт префикс для namespace состояния в backend, чтобы
+    разные процессоры не пересекались по ключам. *)
 
 type ('a, 'st, 'out) spec = {
   keyed       : (module Keyed.S with type t = 'a);
