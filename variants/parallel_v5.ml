@@ -24,12 +24,9 @@ type worker_stats = {
 
 let make_stats () = { processed = 0; emitted = 0; wm_seen = 0 }
 
-let hash_key key n =
-  if n <= 0 then
-    invalid_arg "hash_key: число шардов должно быть > 0";
-  let h = ref 5381 in
-  String.iter (fun c -> h := !h * 33 + Char.code c) key;
-  (!h land max_int) mod n
+(* Шардирование по ключу — общий djb2 из модуля Hash (4.6). Алиас,
+   т.к. hash_key объявлен в parallel.mli. *)
+let hash_key = Hash.key
 
 let run_parallel_simple
     ?(sink_factory : (int -> ('b -> unit)) option)

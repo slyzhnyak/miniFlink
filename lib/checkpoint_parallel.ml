@@ -179,12 +179,10 @@ let wait_committed c ~epoch =
 
 (* ── Hash-шардирование (как в parallel) ──────────────────── *)
 
-let hash_key key n =
-  if n <= 0 then
-    invalid_arg "hash_key: число шардов должно быть > 0";
-  let h = ref 5381 in
-  String.iter (fun ch -> h := !h * 33 + Char.code ch) key;
-  (!h land max_int) mod n
+(* Шардирование по ключу — общий djb2 из модуля Hash (см. 4.6: раньше
+   эта функция дублировалась здесь и в parallel_v4/v5). Оставлена как
+   тонкий алиас, т.к. входит в публичный API (используется в тестах). *)
+let hash_key = Hash.key
 
 (* ── Транзакционный sink (2PC поверх barrier) ─────────────── *)
 
