@@ -53,11 +53,33 @@ let test_histogram () =
   Metrics_log.observe h 50.0;    (* 50 мкс — бакет ≤100 *)
   Metrics_log.observe h 500.0;   (* 500 мкс — бакет ≤1000 *)
   Metrics_log.observe h 5000.0;  (* 5 мс — бакет ≤10000 *)
+  (* значение больше самого верхнего бакета (1_000_000 мкс) — overflow
+     в последний +Inf bucket; покрывает ветку «не нашли подходящий» *)
+  Metrics_log.observe h 5_000_000.0;
   let d = Metrics_log.dump () in
   check "histogram in dump" (
-    let re = Str.regexp "test_hist_count.*4" in
+    let re = Str.regexp "test_hist_count.*5" in
     try ignore (Str.search_forward re d 0); true
     with Not_found -> false)
+
+(* ── histogram overflow + counter.add + set_gauge ───────── *)
+let test_metric_extras () =
+  Printf.printf "\n-- add / set_gauge\n";
+  (* counter.add: прибавляет произвольное n, не только +1 *)
+  let c = Metrics_log.counter ~name:"extra_counter" ~labels:[] in
+  Metrics_log.add c 7;
+  Metrics_log.add c 3;
+  let d = Metrics_log.dump () in
+  check "counter.add gave 10"
+    (try ignore (Str.search_forward (Str.regexp "extra_counter.*10") d 0);
+       true with Not_found -> false);
+  (* set_gauge: устанавливает абсолютное значение *)
+  let g = Metrics_log.gauge ~name:"extra_gauge" ~labels:[] in
+  Metrics_log.set_gauge g 42.0;
+  let d2 = Metrics_log.dump () in
+  check "set_gauge gave 42"
+    (try ignore (Str.search_forward (Str.regexp "extra_gauge.*42") d2 0);
+       true with Not_found -> false)
 
 (* ── 4. Dump format — Prometheus exposition ─────────────── *)
 let test_dump_format () =
@@ -125,6 +147,7 @@ let () =
   test_counter ();
   test_gauge ();
   test_histogram ();
+  test_metric_extras ();
   test_dump_format ();
   test_runtime_metrics ();
   Printf.printf "\nAll metrics tests passed.\n"
