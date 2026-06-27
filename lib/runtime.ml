@@ -167,15 +167,22 @@ let run ?(label="default") cfg
 
 let make_stream_with_dlq cfg ~topic ~codec ~ts_of raw_source =
   let (send_dlq, _, _) = make_dlq cfg.mode in
-  fun () ->
+  (* Битый payload уже ушёл в DLQ внутри safe_decode и должен быть
+     ПРОПУЩЕН — поток продолжается со следующего элемента. Только
+     raw_source () = None означает настоящий конец потока. Раньше эти
+     два случая смешивались (оба возвращали None), и одно битое
+     сообщение в середине обрывало весь источник. *)
+  let rec next () =
     match raw_source () with
-    | None -> None
+    | None -> None                       (* настоящий конец потока *)
     | Some (topic_actual, payload) ->
       (match safe_decode ~send_dlq
                ~topic:(if topic_actual = "" then topic else topic_actual)
                ~codec ~attempt:1 payload with
-       | None   -> None
-       | Some v -> Some (Mf_event.data v (ts_of v)))
+       | Some v -> Some (Mf_event.data v (ts_of v))
+       | None   -> next ())              (* битый → в DLQ, читаем дальше *)
+  in
+  next
 
 (* мост из Config.t (расширенная запись приложения) в runtime-конфиг:
    workers→parallelism, capacity→capacity; mode задаётся параметром
