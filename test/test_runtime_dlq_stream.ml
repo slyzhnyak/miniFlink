@@ -32,32 +32,43 @@ let source_of items =
     | x :: rest -> r := rest; Some x
 
 let run_mode cfg label =
-  (* Хорошие payload'ы декодируются; битый в СЕРЕДИНЕ обрывает поток.
-     Это фактическое поведение make_stream_with_dlq: на ошибке
-     декодирования возвращается None, что Stream трактует как конец
-     потока, поэтому хвост после битого элемента не читается. (Поведение
-     спорное — битое сообщение в середине глотает остаток, — но тест
-     фиксирует реальность; изменение семантики — отдельное решение.) *)
+  (* Битый payload в СЕРЕДИНЕ уходит в DLQ и ПРОПУСКАЕТСЯ — поток
+     продолжается со следующего элемента, а не обрывается. (Это и есть
+     исправленное поведение: одно битое сообщение от датчика не должно
+     глушить весь источник.) *)
   let items = [ ("t", Bytes.of_string "10");
                 ("t", Bytes.of_string "20");
-                ("t", Bytes.of_string "oops");   (* битый → DLQ + конец *)
+                ("t", Bytes.of_string "oops");   (* битый → DLQ, skip *)
                 ("t", Bytes.of_string "30") ] in
   let stream =
     Runtime.make_stream_with_dlq cfg
       ~topic:"t" ~codec:int_codec ~ts_of:(fun _ -> 0)
       (source_of items) in
   let got = drain stream in
-  check (label ^ ": хороший префикс декодирован до битого (10,20)")
-    (got = [10; 20])
+  check (label ^ ": битый пропущен, поток продолжен (10,20,30)")
+    (got = [10; 20; 30])
 
-(* отдельно: одиночный битый payload в начале → пустой поток *)
-let run_bad_first cfg label =
-  let items = [ ("t", Bytes.of_string "nope") ] in
+(* несколько битых подряд тоже пропускаются, хороший хвост доходит *)
+let run_many_bad cfg label =
+  let items = [ ("t", Bytes.of_string "bad1");
+                ("t", Bytes.of_string "bad2");
+                ("t", Bytes.of_string "7");
+                ("t", Bytes.of_string "bad3") ] in
   let stream =
     Runtime.make_stream_with_dlq cfg
       ~topic:"t" ~codec:int_codec ~ts_of:(fun _ -> 0)
       (source_of items) in
-  check (label ^ ": битый первым → пустой поток") (drain stream = [])
+  check (label ^ ": битые в начале/конце пропущены, хороший дошёл (7)")
+    (drain stream = [7])
+
+(* поток из одних битых → пустой выход, но не падение/зависание *)
+let run_all_bad cfg label =
+  let items = [ ("t", Bytes.of_string "x"); ("t", Bytes.of_string "y") ] in
+  let stream =
+    Runtime.make_stream_with_dlq cfg
+      ~topic:"t" ~codec:int_codec ~ts_of:(fun _ -> 0)
+      (source_of items) in
+  check (label ^ ": все битые → пустой поток") (drain stream = [])
 
 let () =
   Printf.printf "==========================================\n";
@@ -67,6 +78,6 @@ let () =
   run_mode Runtime.log_cfg "log";
   (* noop → ветка _ в make_dlq (Dlq_noop) *)
   run_mode Runtime.noop "noop";
-  run_bad_first Runtime.log_cfg "log";
-  run_bad_first Runtime.noop "noop";
+  run_many_bad Runtime.log_cfg "log";
+  run_all_bad Runtime.noop "noop";
   Printf.printf "\nRuntime DLQ-stream tests passed.\n"

@@ -52,6 +52,12 @@ val safe_decode :
   codec:(bytes -> ('a, string) result) ->
   attempt:int ->
   bytes -> 'a option
+(** [make_stream_with_dlq cfg ~topic ~codec ~ts_of raw_source] —
+    источник событий поверх сырого [raw_source], декодирующий каждый
+    payload через [codec]. Битый payload отправляется в DLQ (по
+    [cfg.mode]) и {b пропускается} — поток продолжается со следующего
+    элемента, а не обрывается. Конец потока — только когда [raw_source]
+    вернул [None]. Так одно битое сообщение не глушит весь источник. *)
 val make_stream_with_dlq :
   config ->
   topic:string ->
