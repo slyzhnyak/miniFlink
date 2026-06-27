@@ -80,8 +80,15 @@ let test_recovery_with_offset () =
         | Some v -> a + int_of_string (Bytes.to_string v) | None -> a)
         acc (State_backend_memory.keys b)) 0 backends in
     check "restored state non-empty" (total > 0);
-    check "restored count = events before barrier (offset)"
-      (total = cp.Checkpoint_parallel.cp_offset)
+    (* Корректный инвариант exactly-once: восстановленное состояние =
+       числу Data в префиксе потока [0, cp_offset). Раньше тут стояло
+       total = cp_offset, что держалось лишь на баге §4.1. *)
+    let arr = Array.of_list events in
+    let data_in_prefix = let c = ref 0 in
+      for i = 0 to min cp.Checkpoint_parallel.cp_offset (Array.length arr) - 1 do
+        (match arr.(i) with Mf_event.Data _ -> incr c | _ -> ()) done; !c in
+    check "restored count = Data in prefix [0, cp_offset)"
+      (total = data_in_prefix)
   )
 
 (* ── 3. Транзакционный sink: commit делает видимым ────────── *)
