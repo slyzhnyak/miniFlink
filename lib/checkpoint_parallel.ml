@@ -114,6 +114,15 @@ type coordinator = {
   alive     : bool array;        (* воркер ещё жив? упавших не ждём *)
   co_mu     : Mutex.t;
   co_done   : Condition.t;
+  data_positions : (int, offset) Hashtbl.t;
+    (* data_count -> позиция в потоке СРАЗУ ПОСЛЕ этого по счёту Data.
+       [data_positions.(k)] = source.position() в момент, когда
+       координатор разослал k-е Data-событие. cp_offset для чекпойнта
+       со снапшотом из N обработанных Data берётся как
+       data_positions.(N): это позиция в полном потоке (Data+WM+...),
+       соответствующая ровно N обработанным Data, поэтому offset
+       СОГЛАСОВАН со снапшотом независимо от того, сколько событий было
+       in-flight в момент инжекта барьера (см. §4.1). *)
 }
 
 let make_coordinator ~workers ~store = {
@@ -123,6 +132,7 @@ let make_coordinator ~workers ~store = {
   alive   = Array.make workers true;
   co_mu   = Mutex.create ();
   co_done = Condition.create ();
+  data_positions = Hashtbl.create 16;
 }
 
 (* Пометить воркера выбывшим (после краха) — определено ниже, после
@@ -145,10 +155,32 @@ let try_close c =
       |> List.filter_map (fun x -> x)
       |> Array.of_list in
     let epoch = snapshots.(0).epoch in
-    let total_processed =
+    (* snap_processed — число Data, реально вошедших в снапшот (сумма
+       processed по воркерам). cp_offset = позиция в потоке СРАЗУ ПОСЛЕ
+       snap_processed-го Data (из data_positions). Это согласует offset
+       со снапшотом: seek(cp_offset) при recovery встанет ровно туда,
+       где обработано snap_processed Data, и replay доиграет остаток без
+       потерь и дублей — независимо от того, сколько событий было
+       in-flight в момент инжекта барьера и есть ли watermark-и между
+       Data (см. §4.1). *)
+    let snap_processed =
       Array.fold_left (fun a s -> a + s.processed) 0 snapshots in
+    let cp_offset =
+      if snap_processed = 0 then 0
+      else match Hashtbl.find_opt c.data_positions snap_processed with
+        | Some off -> off
+        | None -> snap_processed  (* подстраховка (не должно случаться) *)
+    in
+    (* Очистка: записи для data_count < snap_processed больше не нужны.
+       Следующий чекпойнт будет иметь snap_processed не меньше текущего
+       (число обработанных Data монотонно растёт), а recover читает
+       только latest_checkpoint. Без очистки data_positions рос бы на
+       каждое Data — утечка на long-running прогоне (4096 ламп). *)
+    Hashtbl.filter_map_inplace
+      (fun k v -> if k < snap_processed then None else Some v)
+      c.data_positions;
     commit c.store { cp_epoch = epoch;
-                     cp_offset = total_processed;
+                     cp_offset;
                      cp_snapshots = snapshots };
     Array.fill c.pending 0 c.workers None;
     Condition.broadcast c.co_done
@@ -376,6 +408,15 @@ let run_exactly_once
     Array.iteri (fun i ch ->
       if not failed.(i) then ignore (Channel.try_push ch (Barrier e))) in_chans
   in
+  (* счётчик разосланных Data и запись data_count -> позиция в потоке.
+     Ведём здесь (главный drive-поток), читаем в try_close под co_mu. *)
+  let data_count = ref 0 in
+  let record_data_position () =
+    incr data_count;
+    Mutex.lock coord.co_mu;
+    Hashtbl.replace coord.data_positions !data_count (source.position ());
+    Mutex.unlock coord.co_mu
+  in
   (* Блокирующая отправка живому воркеру: для exactly-once нельзя
      терять события (try_push роняет при полном канале). push даёт
      backpressure. Проверка failed чтобы не зависнуть на упавшем. *)
@@ -392,6 +433,7 @@ let run_exactly_once
        | Mf_event.Data (v, _) ->
          let shard = hash_key (key_of v) workers in
          send_to shard in_chans.(shard) (Event ev);
+         record_data_position ();
          incr since_checkpoint;
          if !since_checkpoint >= checkpoint_every then begin
            inject_barrier (); since_checkpoint := 0
@@ -408,6 +450,7 @@ let run_exactly_once
          (* Update шардируем по ключу new_value, как Data *)
          let shard = hash_key (key_of v) workers in
          send_to shard in_chans.(shard) (Event ev);
+         record_data_position ();
          incr since_checkpoint;
          if !since_checkpoint >= checkpoint_every then begin
            inject_barrier (); since_checkpoint := 0
