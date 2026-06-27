@@ -17,6 +17,43 @@ let enriched stream =
   Stream.to_list stream
   |> List.filter_map (function Mf_event.Data (r,_) -> Some r | _ -> None)
 
+(* собрать ВСЕ события (для проверки проброса Update/Retract) *)
+let all_events stream = Stream.to_list stream
+
+(* ── temporal_join пробрасывает Update/Retract из main-потока ──
+   Update — атомарная коррекция, Retract — отзыв; оба должны пройти
+   насквозь (downstream разберётся), а Data — обогатиться как обычно. *)
+let test_join_update_retract () =
+  Printf.printf "\n-- temporal_join passes Update/Retract through, enriches Data\n";
+  let updates = Stream.of_list [
+    Mf_event.data { uid="B1"; udepot="north"; ufrom=0 } 0;
+    Mf_event.wm 100;
+  ] in
+  let main = Stream.of_list [
+    Mf_event.data { rid="B1"; depot="?"; rts=10 } 10;       (* → north *)
+    Mf_event.update { rid="B1"; depot="old"; rts=20 }
+                    { rid="B1"; depot="new"; rts=20 } 20;   (* проброс *)
+    Mf_event.retract { rid="B1"; depot="gone"; rts=30 } 30; (* проброс *)
+    Mf_event.wm 100;
+  ] in
+  let out = main
+    |> Temporal.temporal_join
+         ~key_main:(fun r -> r.rid) ~key_upd:(fun u -> u.uid)
+         ~valid_from:(fun u -> u.ufrom)
+         ~merge:(fun r d -> match d with Some u -> { r with depot=u.udepot } | None -> r)
+         ~updates
+    |> all_events in
+  let has_update = List.exists
+    (function Mf_event.Update _ -> true | _ -> false) out in
+  let has_retract = List.exists
+    (function Mf_event.Retract _ -> true | _ -> false) out in
+  let data_enriched = List.exists
+    (function Mf_event.Data (r,_) -> r.depot = "north" | _ -> false) out in
+  check "Update проброшен насквозь" has_update;
+  check "Retract проброшен насквозь" has_retract;
+  check "Data обогащён (north)" data_enriched
+
+
 (* ── as_of: чистая логика версий ──────────────────────────── *)
 let test_as_of () =
   Printf.printf "\n-- as_of picks the version valid at the query time\n";
@@ -185,6 +222,7 @@ let () =
   test_as_of ();
   test_out_of_order_versions ();
   test_join_basic ();
+  test_join_update_retract ();
   test_late_update ();
   test_waits_for_watermark ();
   test_determinism ();

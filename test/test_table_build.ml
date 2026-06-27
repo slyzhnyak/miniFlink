@@ -69,4 +69,18 @@ let () =
   check "empty → all lookups None"
     (table "anything" = None);
 
+  (* ── 5. Update и Watermark в потоке ───────────────── *)
+  Printf.printf "\n-- 5. Update writes new_value, watermark ignored\n";
+  let configs = [
+    Mf_event.data { cfg_id = "ch4"; threshold = 2.0 } 0;
+    Mf_event.wm 50;                                       (* игнор *)
+    Mf_event.update { cfg_id = "ch4"; threshold = 2.0 }
+                    { cfg_id = "ch4"; threshold = 9.0 } 100;  (* new wins *)
+  ] in
+  let table = Table.build
+    ~key:(fun c -> c.cfg_id)
+    (Stream.of_list configs) in
+  check "ch4 = 9.0 (Update new_value)" (match table "ch4" with
+    | Some c -> c.threshold = 9.0 | None -> false);
+
   Printf.printf "\nTest passed.\n"
