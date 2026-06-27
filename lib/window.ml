@@ -482,33 +482,36 @@ let count_window
      if n <= 0 then invalid_arg "count_sliding: размер должен быть > 0";
      if step <= 0 then invalid_arg "count_sliding: шаг должен быть > 0");
   (* буфер на ключ: список накопленных значений (в обратном порядке) +
-     счётчик с последней эмиссии (для sliding) *)
-  let buffers : (string, a list * int) Hashtbl.t = Hashtbl.create 16 in
+     счётчик с последней эмиссии (для sliding) + длина буфера (чтобы не
+     звать List.length на каждое событие — O(n) → O(1)) *)
+  let buffers : (string, a list * int * int) Hashtbl.t = Hashtbl.create 16 in
   let out : (string * a list) Mf_event.t Queue.t = Queue.create () in
   let emit k vs = Queue.push (Mf_event.data (k, vs) 0) out in
   let push_value k v =
-    let (buf, since) = match Hashtbl.find_opt buffers k with
-      | Some x -> x | None -> ([], 0) in
+    let (buf, since, len) = match Hashtbl.find_opt buffers k with
+      | Some x -> x | None -> ([], 0, 0) in
     let buf = v :: buf in
     let since = since + 1 in
+    let len = len + 1 in
     match spec with
     | CountTumbling n ->
-      if List.length buf >= n then begin
+      if len >= n then begin
         emit k (List.rev buf);
-        Hashtbl.replace buffers k ([], 0)
+        Hashtbl.replace buffers k ([], 0, 0)
       end else
-        Hashtbl.replace buffers k (buf, since)
+        Hashtbl.replace buffers k (buf, since, len)
     | CountSliding (n, step) ->
       (* держим максимум n последних; эмитим каждые step событий когда
          накоплено >= n *)
-      let buf = if List.length buf > n
-        then (match List.rev buf with _ :: rest -> List.rev rest | [] -> [])
-        else buf in
-      if List.length buf >= n && since >= step then begin
+      let (buf, len) = if len > n
+        then (match List.rev buf with _ :: rest -> (List.rev rest, len - 1)
+                                     | [] -> ([], 0))
+        else (buf, len) in
+      if len >= n && since >= step then begin
         emit k (List.rev buf);
-        Hashtbl.replace buffers k (buf, 0)   (* сдвиг: считаем step заново *)
+        Hashtbl.replace buffers k (buf, 0, len)   (* сдвиг: считаем step заново *)
       end else
-        Hashtbl.replace buffers k (buf, since)
+        Hashtbl.replace buffers k (buf, since, len)
   in
   fun () ->
     let rec pull () =
