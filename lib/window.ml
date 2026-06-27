@@ -699,6 +699,12 @@ let session_window
 
   (* закрыть сессии ключа, у которых last + gap <= wm *)
   let close_ready wm =
+    (* Собираем изменения, потом применяем — нельзя мутировать sessions
+       во время Hashtbl.iter по нему. Раньше тут стоял Hashtbl.copy
+       (копия всей таблицы на каждый watermark, O(ключей)); вместо неё
+       копим список отложенных правок (только затронутые ключи). *)
+    let to_remove = ref [] in
+    let to_replace = ref [] in
     Hashtbl.iter (fun k sess ->
       let (ready, still) = List.partition (fun s -> s.s_last + gap <= wm) sess in
       List.iter (fun s ->
@@ -706,9 +712,12 @@ let session_window
         let vs = List.sort (fun (a,_) (b,_) -> compare a b) s.s_vals
                  |> List.map snd in
         Queue.push (Mf_event.data (k, vs) s.s_last) out) ready;
-      if still = [] then Hashtbl.remove sessions k
-      else Hashtbl.replace sessions k still
-    ) (Hashtbl.copy sessions)
+      if ready <> [] then
+        (if still = [] then to_remove := k :: !to_remove
+         else to_replace := (k, still) :: !to_replace)
+    ) sessions;
+    List.iter (Hashtbl.remove sessions) !to_remove;
+    List.iter (fun (k, still) -> Hashtbl.replace sessions k still) !to_replace
   in
 
   fun () ->
