@@ -10,11 +10,11 @@
     - thresholds: ppm < warn → silent; ppm ≥ warn → Gas_alert(Warning);
       ppm ≥ crit → Gas_alert(Critical)
     - sticky: повторный gas в пределах 20% не эмитит ничего
-    - level transition: Warning→Critical → retract+data
-    - ppm refresh: изменение >20% при том же уровне → retract+data
-    - resolved: возврат в норму → retract+Gas_resolved
+    - level transition: Warning→Critical → атомарный Update
+    - ppm refresh: изменение >20% при том же уровне → атомарный Update
+    - resolved: возврат в норму → Retract + Gas_resolved (исчезновение)
     - position arrives later (ГЛАВНЫЙ КЕЙС из ТЗ): gas первый, RSSI
-      позже → retract+data с новой position *)
+      позже → Update с новой position *)
 
 open Miniflink
 open Ex07_location_lib
@@ -65,6 +65,13 @@ let get_alert_info = function
 let get_retract_info = function
   | Mf_event.Retract (Gas_alert a, _) ->
     Some (a.ga_lamp, a.ga_gas, a.ga_level, a.ga_ppm, a.ga_position)
+  | _ -> None
+
+(* Update несёт old+new атомарно: возвращаем (old_info, new_info). *)
+let get_update_info = function
+  | Mf_event.Update { old = Gas_alert o; new_value = Gas_alert n; _ } ->
+    Some ((o.ga_lamp, o.ga_gas, o.ga_level, o.ga_ppm, o.ga_position),
+          (n.ga_lamp, n.ga_gas, n.ga_level, n.ga_ppm, n.ga_position))
   | _ -> None
 
 let is_resolved = function
@@ -127,17 +134,18 @@ let () =
       mk_gas "M1" 11000 ~co:(Some 120.) (); (* Critical *)
     ] () in
   (match data_retract_only events with
-   | [d1; r2; d3] ->
+   | [d1; u2] ->
+     (* Теперь level transition — атомарный Update (Warning→Critical),
+        а не пара Retract+Data: downstream видит коррекцию за один шаг. *)
      let ok1 = (match get_alert_info d1 with
                 | Some (_, Gas_CO, Warning, _, _) -> true | _ -> false) in
-     let ok2 = (match get_retract_info r2 with
-                | Some (_, Gas_CO, Warning, _, _) -> true | _ -> false) in
-     let ok3 = (match get_alert_info d3 with
-                | Some (_, Gas_CO, Critical, _, _) -> true | _ -> false) in
-     check "W→C: Data(W), Retract(W), Data(C)" (ok1 && ok2 && ok3)
+     let ok2 = (match get_update_info u2 with
+                | Some ((_, Gas_CO, Warning, _, _), (_, Gas_CO, Critical, _, _)) -> true
+                | _ -> false) in
+     check "W→C: Data(W), Update(W→C)" (ok1 && ok2)
    | other ->
      Printf.printf "  unexpected events: %d\n" (List.length other);
-     fail "W→C: expected 3 events (Data,Retract,Data)");
+     fail "W→C: expected 2 events (Data, Update)");
 
   (* ─── 4. ppm refresh при том же уровне ──────────────────────── *)
   Printf.printf "\n-- 4. ppm refresh on >20%% change\n";
@@ -148,8 +156,8 @@ let () =
       mk_gas "M1" 11000 ~co:(Some 90.) ();   (* +50%, тот же Warning *)
     ] () in
   let n = List.length (data_retract_only events) in
-  check (Printf.sprintf "ppm change 60→90: 3 events (D,R,D) (got %d)" n)
-    (n = 3);
+  check (Printf.sprintf "ppm change 60→90: 2 events (Data, Update) (got %d)" n)
+    (n = 2);
 
   (* ─── 5. Gas_resolved при возврате в норму ──────────────────── *)
   Printf.printf "\n-- 5. Gas_resolved\n";
@@ -183,26 +191,27 @@ let () =
       mk_packet "M1" 5000 [("B1", -50.)];
     ] () in
   let alerts = data_retract_only events in
-  (* Ожидаем: Data(no pos) → Retract(no pos) → Data(with pos) *)
+  (* Ожидаем: Data(no pos) → Update(no pos → with pos). Позиция
+     приехала позже газа — алерт обогащается координатами атомарно,
+     без промежуточного «алерт исчез». *)
   (match alerts with
-   | [d1; r2; d3] ->
+   | [d1; u2] ->
      let pos1 = (match get_alert_info d1 with
                  | Some (_, _, _, _, p) -> p | _ -> None) in
-     let pos_after_retract = (match get_retract_info r2 with
-                              | Some (_, _, _, _, p) -> p | _ -> None) in
-     let pos_after = (match get_alert_info d3 with
-                      | Some (_, _, _, _, p) -> p | _ -> None) in
+     let (pos_old, pos_new) = (match get_update_info u2 with
+       | Some ((_,_,_,_,po), (_,_,_,_,pn)) -> (po, pn)
+       | None -> (None, None)) in
      check "first alert has no position" (pos1 = None);
-     check "retract matches the first (no position)" (pos_after_retract = None);
-     check "new emission has position from raw RSSI"
-       (pos_after <> None);
-     (match pos_after with
+     check "Update.old matches first (no position)" (pos_old = None);
+     check "Update.new_value has position from raw RSSI"
+       (pos_new <> None);
+     (match pos_new with
       | Some (x, y, _) ->
         Printf.printf "    enriched position: (x=%.0f, y=%.0f)\n" x y
       | None -> ())
    | other ->
      Printf.printf "  unexpected: %d events\n" (List.length other);
-     fail "expected 3 events (D-no-pos, R, D-with-pos)");
+     fail "expected 2 events (Data-no-pos, Update-with-pos)");
 
   (* ─── 7. Position update от точной локации ──────────────────── *)
   Printf.printf "\n-- 7. Window location updates position (precise > rough)\n";
@@ -218,20 +227,25 @@ let () =
       mk_location "M1" 10000 (Some (200.0, 300.0, -160));  (* точная *)
     ] () in
   let alerts = data_retract_only events in
-  (* Ожидаем как минимум:
-     Data(no pos) → R → Data(rough from B1) → R → Data(precise 200,300) *)
-  check (Printf.sprintf "5 events: D, R, D-rough, R, D-precise (got %d)"
+  (* Ожидаем: Data(no pos) → Update(→ rough from B1) → Update(→ precise).
+     Каждый refresh — атомарный Update, а не пара Retract+Data, поэтому
+     3 события вместо 5. *)
+  check (Printf.sprintf "3 events: Data, Update(rough), Update(precise) (got %d)"
            (List.length alerts))
-    (List.length alerts >= 5);
+    (List.length alerts = 3);
 
-  (* Последнее Data должно иметь точную позицию из location *)
-  let last_data = List.fold_left (fun acc ev ->
-    match get_alert_info ev with
-    | Some _ as x -> x
-    | None -> acc) None alerts in
-  (match last_data with
-   | Some (_, _, _, _, Some (200.0, 300.0, -160)) ->
-     pass "last alert has precise position from window"
+  (* Последнее событие — Update; его new_value должен нести точную
+     позицию из location. *)
+  let last_pos = match List.rev alerts with
+    | last :: _ ->
+      (match get_update_info last with
+       | Some (_, (_, _, _, _, p)) -> p
+       | None -> (match get_alert_info last with
+                  | Some (_, _, _, _, p) -> p | None -> None))
+    | [] -> None in
+  (match last_pos with
+   | Some (200.0, 300.0, -160) ->
+     pass "last alert (Update.new_value) has precise position from window"
    | _ ->
      fail "last alert should have precise position from location");
 
