@@ -119,4 +119,57 @@ let () =
   check "results differ — proving native callback runs"
     true;  (* доказано в 1 vs 2 *)
 
+  (* ── 4. on_retract: откат значения из состояния ──────────── *)
+  Printf.printf "\n-- 4a. Without on_retract: Retract dropped (default)\n";
+  let events = [
+    Mf_event.data { m_lamp = "L3"; m_value = 10.0 } 0;
+    Mf_event.data { m_lamp = "L3"; m_value = 20.0 } 100;
+    Mf_event.retract { m_lamp = "L3"; m_value = 20.0 } 200;  (* отзыв *)
+    Mf_event.wm 300;
+  ] in
+  let outs_default = events |> Stream.of_list
+    |> Pipe.process_keyed (module ByLamp)
+         ~init:(fun () -> { history = []; total = 0.0 })
+         ~on_event:(fun ctx _key st m ->
+           st.history <- m.m_value :: st.history;
+           st.total <- st.total +. m.m_value;
+           ctx.emit (Total_emit (m.m_lamp, st.total)))
+         ~on_timer:(fun _ _ _ _ _ -> ())
+    |> collect_data in
+  (* Без on_retract: Retract отброшен, total остаётся 30 (10+20). *)
+  check "default: Retract dropped, total stays 30"
+    (match outs_default with
+     | [Total_emit ("L3", 10.0); Total_emit ("L3", 30.0)] -> true
+     | _ -> false);
+
+  Printf.printf "\n-- 4b. With on_retract: value rolled back from state\n";
+  let events = [
+    Mf_event.data { m_lamp = "L4"; m_value = 10.0 } 0;
+    Mf_event.data { m_lamp = "L4"; m_value = 20.0 } 100;
+    Mf_event.retract { m_lamp = "L4"; m_value = 20.0 } 200;
+    Mf_event.wm 300;
+  ] in
+  let retract_seen = ref false in
+  let outs_retract = events |> Stream.of_list
+    |> Pipe.process_keyed (module ByLamp)
+         ~init:(fun () -> { history = []; total = 0.0 })
+         ~on_event:(fun ctx _key st m ->
+           st.history <- m.m_value :: st.history;
+           st.total <- st.total +. m.m_value;
+           ctx.emit (Total_emit (m.m_lamp, st.total)))
+         ~on_retract:(fun ctx _key st m ->
+           (* откатываем отозванное значение из total *)
+           retract_seen := true;
+           st.total <- st.total -. m.m_value;
+           ctx.emit (Total_emit (m.m_lamp, st.total)))
+         ~on_timer:(fun _ _ _ _ _ -> ())
+    |> collect_data in
+  check "on_retract called" !retract_seen;
+  (* С on_retract: 10 → 30 → откат 20 → 10 *)
+  check "on_retract: total rolled back to 10"
+    (match outs_retract with
+     | [Total_emit ("L4", 10.0); Total_emit ("L4", 30.0);
+        Total_emit ("L4", 10.0)] -> true
+     | _ -> false);
+
   Printf.printf "\nAll process_keyed on_update tests passed.\n"

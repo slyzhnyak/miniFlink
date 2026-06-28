@@ -488,6 +488,7 @@ val process_keyed :
   ?on_stat:(Process_fn.stat -> unit) ->
   ?name:string ->
   ?on_update:('out ctx -> string -> 'st -> old:'a -> new_value:'a -> unit) ->
+  ?on_retract:('out ctx -> string -> 'st -> 'a -> unit) ->
   init:(unit -> 'st) ->
   on_event:('out ctx -> string -> 'st -> 'a -> unit) ->
   on_timer:('out ctx -> string -> 'st -> Time.t -> timer_kind -> unit) ->

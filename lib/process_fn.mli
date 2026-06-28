@@ -83,6 +83,7 @@ val process_keyed :
   ?on_stat:(stat -> unit) ->
   ?name:string ->
   ?on_update:('out ctx -> string -> 'st -> old:'a -> new_value:'a -> unit) ->
+  ?on_retract:('out ctx -> string -> 'st -> 'a -> unit) ->
   init:(unit -> 'st) ->
   on_event:('out ctx -> string -> 'st -> 'a -> unit) ->
   on_timer:('out ctx -> string -> 'st -> Time.t -> timer_kind -> unit) ->
@@ -106,6 +107,16 @@ val process_keyed :
     читают только current value; opt-in [on_update] нужен только
     когда state зависит от {e предыдущего} значения и atomic
     rollback важен.
+
+    {b [?on_retract]} — опциональный callback для обработки
+    {!Mf_event.Retract} событий (отзыв ранее эмитированного значения).
+    Если передан, вызывается на каждый Retract с отзываемым значением,
+    позволяя пользователю откатить его эффект в состоянии. Если {b не}
+    передан, Retract отбрасывается (историческое поведение по
+    умолчанию) — это безопасно для processors, чьё состояние не зависит
+    от отозванных значений, но несогласованно с {!window} и
+    {!keyed_join}, которые Retract обрабатывают; [?on_retract]
+    устраняет эту несогласованность для тех, кому она важна.
 
     Persistence ортогональна (см. выше про [?name]): per-key state
     (включая event/processing таймеры) снапшотится в durable-контексте
