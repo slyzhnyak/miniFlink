@@ -51,6 +51,7 @@ let process_keyed
     ?(on_stat : stat -> unit = fun _ -> ())
     ?(name = "default")
     ?(on_update : (out ctx -> string -> st -> old:a -> new_value:a -> unit) option)
+    ?(on_retract : (out ctx -> string -> st -> a -> unit) option)
     ~(init : unit -> st)
     ~(on_event : out ctx -> string -> st -> a -> unit)
     ~(on_timer : out ctx -> string -> st -> Time.t -> timer_kind -> unit)
@@ -171,7 +172,19 @@ let process_keyed
           fire_due pt_timers Processing_time (now_ms ());
           Queue.push (Mf_event.wm wm) out_q;
           pull ()
-        | Some (Mf_event.Retract _) -> pull ()
+        | Some (Mf_event.Retract (v, ts)) ->
+          (* По умолчанию Retract отбрасывается (исторически). Если
+             передан ?on_retract — пользователь реагирует на отзыв
+             значения (например, удаляет его из своего состояния),
+             симметрично ?on_update. *)
+          (match on_retract with
+           | Some cb ->
+             let key = K.key v in
+             cb (ctx_for key ~emit_ts:ts) key (state_of key) v;
+             persist_key key;
+             fire_due pt_timers Processing_time (now_ms ())
+           | None -> ());
+          pull ()
         | Some (Mf_event.Update { old; new_value; ts }) ->
           (* Phase 3.3: если ?on_update передан — atomic native handling.
              Иначе Phase 1 conservative fallback: обработать Update
