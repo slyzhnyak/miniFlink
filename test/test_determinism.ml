@@ -126,6 +126,91 @@ let test_parallel_eq_sequential () =
   done;
   check "20 streams: parallel multiset = sequential multiset" !ok
 
+(* ── 2b. Результат инвариантен к числу воркеров ──────────────
+   Сильнее, чем parallel=sequential при фиксированных 4 воркерах: для
+   ОДНОГО входа прогон с 1, 2, 4, 8 воркерами должен дать ИДЕНТИЧНЫЙ
+   результат. Если key-affinity (шардирование по ключу) корректна под
+   конкуренцией, степень параллелизма не влияет на итог. Гонка в
+   диспетчере или шардировании проявилась бы как расхождение между
+   разным числом воркеров. Прогоняем многократно — гонки недетерминированы. *)
+let run_parallel_with_workers telemetries workers =
+  let buffers = Array.init workers (fun _ -> ref []) in
+  let mu = Array.init workers (fun _ -> Mutex.create ()) in
+  Parallel.run_parallel_simple
+    ~sink_factory:(fun i -> fun a ->
+      Mutex.lock mu.(i);
+      buffers.(i) := (a.device_id ^ "/" ^ a.rule) :: !(buffers.(i));
+      Mutex.unlock mu.(i))
+    ~workers ~capacity:256
+    ~key_of:(fun (t:telemetry) -> t.device_id)
+    ~pipeline
+    ~source:(Stream.of_list
+               (List.map (fun (t:telemetry) -> Mf_event.data t t.ts) telemetries))
+    ~sink:(fun _ -> ())
+    ();
+  multiset (Array.fold_left (fun acc r -> !r @ acc) [] buffers)
+
+let test_worker_count_invariance () =
+  Printf.printf "\n-- 2b. Result invariant to worker count (1,2,4,8)\n";
+  Random.self_init ();
+  let ok = ref true in
+  (* несколько случайных потоков × несколько прогонов (гонки редки) *)
+  for _ = 1 to 10 do
+    let st = Random.State.make_self_init () in
+    let telemetries = (gen_stream 300) st in
+    (* эталон — однопоточный прогон через тот же параллельный путь *)
+    let base = run_parallel_with_workers telemetries 1 in
+    List.iter (fun w ->
+      (* по 3 прогона на каждое число воркеров, чтобы поймать гонку *)
+      for _ = 1 to 3 do
+        let r = run_parallel_with_workers telemetries w in
+        if r <> base then begin
+          ok := false;
+          Printf.printf "    workers=%d: %d событий vs base %d MISMATCH\n%!"
+            w (List.length r) (List.length base)
+        end
+      done) [2; 4; 8]
+  done;
+  check "результат идентичен для 1/2/4/8 воркеров (key-affinity корректна)" !ok
+
+(* ── 2c. Общий sink под высокой контенцией: без потерь ───────
+   Предыдущий тест использует per-worker sink (без contention). Здесь —
+   ОБЩИЙ sink (под мьютексом внутри run_parallel_simple), много воркеров
+   и малые каналы → форсируем contention и backpressure. Проверяем, что
+   ВСЕ выходные события доходят (нет потерь/дублей при конкурентной
+   записи в один sink и блокировках каналов). *)
+let test_shared_sink_no_loss () =
+  Printf.printf "\n-- 2c. Shared sink under contention: no loss/dup\n";
+  Random.self_init ();
+  let ok = ref true in
+  for _ = 1 to 5 do
+    let st = Random.State.make_self_init () in
+    let telemetries = (gen_stream 400) st in
+    (* эталон — сколько алертов даёт последовательный прогон *)
+    let expected = multiset (run_alerts telemetries) in
+    (* общий sink под мьютексом, 8 воркеров, МАЛЫЙ канал (16) → backpressure *)
+    let collected = ref [] in
+    let mu = Mutex.create () in
+    Parallel.run_parallel_simple
+      ~workers:8 ~capacity:16
+      ~key_of:(fun (t:telemetry) -> t.device_id)
+      ~pipeline
+      ~source:(Stream.of_list
+                 (List.map (fun (t:telemetry) -> Mf_event.data t t.ts) telemetries))
+      ~sink:(fun a ->
+        Mutex.lock mu;
+        collected := (a.device_id ^ "/" ^ a.rule) :: !collected;
+        Mutex.unlock mu)
+      ();
+    let got = multiset !collected in
+    if got <> expected then begin
+      ok := false;
+      Printf.printf "    shared sink: got %d vs expected %d MISMATCH\n%!"
+        (List.length got) (List.length expected)
+    end
+  done;
+  check "общий sink под контенцией: все алерты доходят (нет потерь/дублей)" !ok
+
 (* ── 3. Watermark fuzzing ───────────────────────────────── *)
 
 let test_watermark_fuzz () =
@@ -220,6 +305,8 @@ let () =
   Printf.printf "==========================================\n";
   test_replay_determinism ();
   test_parallel_eq_sequential ();
+  test_worker_count_invariance ();
+  test_shared_sink_no_loss ();
   test_watermark_fuzz ();
   test_watermark_monotone_fuzz ();
   test_permutation_invariance ();
