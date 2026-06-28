@@ -469,17 +469,18 @@ let process_one_gas
       let new_aa = { aa_level = level; aa_ppm = ppm;
                      aa_position = st.position } in
       Hashtbl.replace st.active g new_aa;
-      let retract_ev = Mf_event.retract
-        (Gas_alert {
-           ga_lamp = lamp; ga_ts = ts; ga_gas = g;
-           ga_level = old.aa_level; ga_ppm = old.aa_ppm;
-           ga_position = old.aa_position }) ts in
-      let data_ev = Mf_event.data
-        (Gas_alert {
-           ga_lamp = lamp; ga_ts = ts; ga_gas = g;
-           ga_level = level; ga_ppm = ppm;
-           ga_position = st.position }) ts in
-      [retract_ev; data_ev]
+      (* Замена old→new одного и того же алерта — атомарный Update, а не
+         пара Retract+Data: downstream видит коррекцию за один шаг, без
+         промежуточного «алерт исчез» (None-flicker). *)
+      let old_alert = Gas_alert {
+        ga_lamp = lamp; ga_ts = ts; ga_gas = g;
+        ga_level = old.aa_level; ga_ppm = old.aa_ppm;
+        ga_position = old.aa_position } in
+      let new_alert = Gas_alert {
+        ga_lamp = lamp; ga_ts = ts; ga_gas = g;
+        ga_level = level; ga_ppm = ppm;
+        ga_position = st.position } in
+      [ Mf_event.update old_alert new_alert ts ]
     end
 
 (** При обновлении позиции — пройтись по активным алертам и для каждого
@@ -491,17 +492,17 @@ let refresh_alerts_for_new_position
   let to_emit = ref [] in
   Hashtbl.iter (fun g old ->
     if st.position <> old.aa_position then begin
-      let retract_ev = Mf_event.retract
-        (Gas_alert {
-           ga_lamp = lamp; ga_ts = ts; ga_gas = g;
-           ga_level = old.aa_level; ga_ppm = old.aa_ppm;
-           ga_position = old.aa_position }) ts in
-      let data_ev = Mf_event.data
-        (Gas_alert {
-           ga_lamp = lamp; ga_ts = ts; ga_gas = g;
-           ga_level = old.aa_level; ga_ppm = old.aa_ppm;
-           ga_position = st.position }) ts in
-      to_emit := data_ev :: retract_ev :: !to_emit;
+      (* Тот же алерт, но с обновлённой позицией — атомарный Update
+         (замена), а не Retract+Data. *)
+      let old_alert = Gas_alert {
+        ga_lamp = lamp; ga_ts = ts; ga_gas = g;
+        ga_level = old.aa_level; ga_ppm = old.aa_ppm;
+        ga_position = old.aa_position } in
+      let new_alert = Gas_alert {
+        ga_lamp = lamp; ga_ts = ts; ga_gas = g;
+        ga_level = old.aa_level; ga_ppm = old.aa_ppm;
+        ga_position = st.position } in
+      to_emit := Mf_event.update old_alert new_alert ts :: !to_emit;
       Hashtbl.replace st.active g { old with aa_position = st.position }
     end
   ) st.active;
