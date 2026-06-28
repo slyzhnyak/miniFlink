@@ -17,6 +17,8 @@
 | [`ex09_complex_trigger/`](ex09_complex_trigger/) | **Multi-condition trigger через композицию items** — живой пример сложного триггерного выражения. Сценарий «критическая эвакуация» с условием `CO>50ppm И voltage<3.5В И avg_rssi_5m<-75dBm, дольше 1мин`. В Zabbix писалось бы inline-DSL, у нас — композиция операторов: `voltage_item` + `co_item` + `avg_rssi_item` (через `window_agg_keyed` sliding 5min/30s, `allowed_lateness` 1мин — опоздавшие RSSI-замеры атомарно уточняют среднее закрытого окна) объединяются в `combined_item` через `Mf_event.union` + `Pipe.process_keyed`. Триггер использует `Trigger.custom ~problem ~recovery` с произвольным OCaml-predicate (multi-dimensional hysteresis: CO 50→45, voltage 3.5→3.7, rssi -75→-70). Has-флаги защищают от ложных срабатываний на init-значениях до получения первых данных. 4 unit-теста проверяют семантику. Контраст с ex08 (простые threshold-триггеры): здесь сложная корреляция нескольких метрик без расширения библиотечного API. См. также `docs/triggers-cookbook.md` для разбора подхода. |
 | [`ex10_keyed_join/`](ex10_keyed_join/) | **Multi-stream join по ключу + атомарный Update** — `Pipe.keyed_join` объединяет потоки трёх датчиков (температура/влажность/давление) в единый snapshot «последние значения на станцию». Условие тревоги — все три вне нормы одновременно. **Ключевой кейс**: калибровочная коррекция датчика приходит как атомарный `Update` (38.0→31.5) — `keyed_join` обновляет slot и эмитит целостный snapshot **без промежуточного `None`**, так что тревога не «мигает» между old и new. Это и есть смысл варианта `Update` против пары `Retract`+`Data`: вся магия — одна строка `keyed_join` против ~30 строк ручного управления состоянием в ex09. |
 
+| [`ex11_presence.ml`](ex11_presence.ml) | **Когда нужен именно `Retract`** — учёт присутствия людей в зонах шахты. Три корректирующих события на одном потоке: появление → `Data`, переход между зонами → атомарный `Update` (замена `old.zone → new.zone`), выход/потеря связи → `Retract`. Ключевая мысль: «человек покинул шахту» — это **исчезновение без замены**, и его нельзя выразить через `Update` (тот требует `new_value`, которого нет); поэтому `Retract` здесь не легаси-приём, а единственно корректное событие. Downstream материализует live-карту «кто где сейчас»: `Data`/`Update` ставят, `Retract` убирает — при ЧП диспетчер не видит фантомов. Контраст с ex07/ex10 (где коррекции — это замена → `Update`): показывает, **когда** какой конструктор уместен. |
+
 ## Запуск
 
 ```bash
@@ -30,6 +32,7 @@ dune exec examples/ex07_location/ex07_location.exe
 dune exec examples/ex08_triggers/ex08_triggers.exe
 dune exec examples/ex09_complex_trigger/ex09_complex_trigger.exe
 dune exec examples/ex10_keyed_join/ex10_keyed_join.exe
+dune exec examples/ex11_presence.exe
 ```
 
 ## С чего начать своё
