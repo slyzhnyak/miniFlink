@@ -707,3 +707,10 @@
  (libraries miniflink qcheck-core qcheck-core.runner qcheck unix)
  (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70 -alert -deprecated))
  (modules test_prop_exactly_once))
+
+(test
+ (name test_ex11_smoke)
+ (libraries unix)
+ (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
+ (modules test_ex11_smoke)
+ (deps ../examples/ex11_presence.exe))
