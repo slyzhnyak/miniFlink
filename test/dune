@@ -714,3 +714,9 @@
  (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
  (modules test_ex11_smoke)
  (deps ../examples/ex11_presence.exe))
+
+(test
+ (name test_union_merge_membounds)
+ (libraries miniflink unix)
+ (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
+ (modules test_union_merge_membounds))
