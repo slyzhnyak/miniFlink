@@ -212,46 +212,49 @@ let union (a : 'v t Stream.t) (b : 'v t Stream.t) : 'v t Stream.t =
     match !pb with Some _ -> () | None ->
       (match b () with None -> b_done := true | Some ev -> pb := Some ev) in
   fun () ->
-    let rec step () =
+    (* Цикл вместо рекурсии: при потоке из многих watermark-ов подряд
+       (например, один вход исчерпан, другой шлёт серию watermark, не
+       продвигающих общую границу) рекурсивный step себя вызывал —
+       глубина = числу таких watermark, риск stack overflow на
+       adversarial input (N-5). Явный цикл с [result] держит O(1) стек. *)
+    let result = ref None in
+    let continue = ref true in
+    while !continue do
       pull_a (); pull_b ();
       match !pa, !pb with
-      (* watermarks потребляем отдельно: обновляем границу входа и
-         эмитим объединённый wm = min, только если он продвинулся *)
       | Some (Watermark w), _ ->
         pa := None; wm_a := w;
-        (* B исчерпан → его данные больше не придут, ограничивает только A.
-           Но watermark не должен откатываться ниже уже эмитированного
-           (монотонность) — иначе закрытые окна «переоткроются». *)
         if !b_done then
-          (if w > !emitted_wm then (emitted_wm := w; Some (Watermark w))
-           else step ())
+          (if w > !emitted_wm then
+             (emitted_wm := w; result := Some (Watermark w); continue := false))
         else
           let m = min !wm_a !wm_b in
-          if m > !emitted_wm then (emitted_wm := m; Some (Watermark m))
-          else step ()
+          if m > !emitted_wm then
+            (emitted_wm := m; result := Some (Watermark m); continue := false)
       | _, Some (Watermark w) ->
         pb := None; wm_b := w;
         if !a_done then
-          (if w > !emitted_wm then (emitted_wm := w; Some (Watermark w))
-           else step ())
+          (if w > !emitted_wm then
+             (emitted_wm := w; result := Some (Watermark w); continue := false))
         else
           let m = min !wm_a !wm_b in
-          if m > !emitted_wm then (emitted_wm := m; Some (Watermark m))
-          else step ()
-      (* данные/retract/update с обеих сторон — эмитим меньший по времени.
-         Update сравнивается по своему ts (см. Mf_event.ts). *)
+          if m > !emitted_wm then
+            (emitted_wm := m; result := Some (Watermark m); continue := false)
       | Some (Data _ | Retract _ | Update _ as ea),
         Some (Data _ | Retract _ | Update _ as eb) ->
-        if ts ea <= ts eb then (pa := None; Some ea)
-        else (pb := None; Some eb)
+        if ts ea <= ts eb then (pa := None; result := Some ea)
+        else (pb := None; result := Some eb);
+        continue := false
       | Some (Data _ | Retract _ | Update _ as ea), None when !b_done ->
-        pa := None; Some ea
+        pa := None; result := Some ea; continue := false
       | None, Some (Data _ | Retract _ | Update _ as eb) when !a_done ->
-        pb := None; Some eb
-      | None, None when !a_done && !b_done -> None
+        pb := None; result := Some eb; continue := false
+      | None, None when !a_done && !b_done ->
+        result := None; continue := false
       | Some _, None | None, Some _ | None, None ->
-        (* один пуст, другой ещё нет — рекурсивно докрутим *)
-        step ()
-    in step ()
+        (* один пуст, другой ещё нет — докручиваем цикл *)
+        ()
+    done;
+    !result
 
 let pp_ts t = Printf.sprintf "%d.%03ds" (t/1000) (t mod 1000)

@@ -108,33 +108,30 @@ val keyed_join :
       (а не вернётся к [Some 1]). Если нужна история и rollback —
       это другой use case, не покрывается {!keyed_join}.
 
-      {b ИЗВЕСТНОЕ ОГРАНИЧЕНИЕ — flicker через None:}
-      Когда upstream window эмитит атомарную пару
-      [Retract(old)] + [Data(new)] (late event correction),
-      keyed_join эмитит {b два} последовательных snapshot'а:
-      сначала с [None] в слоте (после retract), затем с
-      [Some new] (после data). Downstream видит transient [None].
+      {b Flicker через None при паре Retract+Data:}
+      Когда upstream эмитит {e раздельную} пару [Retract(old)] +
+      [Data(new)] (старый способ коррекции late event), keyed_join
+      эмитит {b два} последовательных snapshot'а: сначала с [None] в
+      слоте (после retract), затем с [Some new] (после data).
+      Downstream видит transient [None].
 
-      Это {b архитектурное} ограничение: в нашей системе [Retract]
-      и [Data] — раздельные [Mf_event.t] события, без понятия
-      "atomic update". Если downstream чувствителен к промежуточному
-      None (например, эмитит side-effect при first-None или
-      переходит state), это может вызвать ложное срабатывание.
+      {b Решение — атомарный [Update].} С появлением конструктора
+      {!Mf_event.t} [Update {old; new_value}] операторы (window,
+      keyed_join) эмитят атомарную коррекцию, и keyed_join обрабатывает
+      [Update] {b за один шаг}: слот сразу переходит [old → new_value]
+      без промежуточного [None]. Flicker возникает только если источник
+      всё ещё подаёт {e старую} раздельную пару Retract+Data (это
+      поведение сохранено для обратной совместимости). Если downstream
+      чувствителен к промежуточному [None], используйте операторы,
+      эмитящие [Update].
 
-      Workaround: убедитесь что downstream дренит снапшоты пачкой
-      и принимает решения только при стабильном состоянии (например,
-      через {!keyed_join_map} с проверкой "все Some"). Полное
-      решение требует расширения {!Mf_event.t} вариантом
-      [Update(old, new)] — большой refactor, отложен.
-
-      В minePASS workload это ограничение в реальности не
-      проявляется: streams подаваемые в keyed_join — выход
-      {!Pipe.map} от raw packets, которые не генерируют retract'ы.
+      В minePASS workload flicker не проявляется: streams в keyed_join —
+      выход {!Pipe.map} от raw packets, которые не генерируют
+      retract'ы.
 
       Типичные применения retract'а здесь:
-      - Window upstream эмитит [Retract + Data] парой для late
-        event correction — промежуточный snapshot с [None]
-        transient, см. ограничение выше про flicker.
+      - Window upstream эмитит атомарный [Update] для late event
+        correction — промежуточного [None] нет.
       - Standalone retract (TTL eviction, alert revocation) —
         slot остаётся [None] до прихода нового [Data] или
         пересчитанного значения. Здесь None — правильное
