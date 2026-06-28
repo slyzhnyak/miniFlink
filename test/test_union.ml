@@ -19,6 +19,29 @@ let test_union_order () =
   let out = Mf_event.union a b |> data_ts in
   check "merged in time order" (out = ["a1"; "b1"; "a2"; "b2"; "a3"])
 
+(* ── N-5: серия watermark-ов не переполняет стек ──────────────
+   Раньше union.step рекурсивно вызывал себя на каждом watermark, не
+   продвигающем границу; поток из многих таких watermark-ов давал
+   stack overflow. Теперь step — цикл, стек O(1). *)
+let test_union_many_watermarks () =
+  Printf.printf "\n-- union survives a long run of watermarks (no stack overflow)\n";
+  (* A исчерпан сразу (пустой), B шлёт 200000 не-возрастающих watermark
+     (одинаковый ts → границу не продвигают → старый код рекурсировал
+     на каждый). В конце — одно Data, чтобы было что вернуть. *)
+  let n = 200_000 in
+  let a = Stream.of_list [] in
+  let b = Stream.of_list (
+    List.init n (fun _ -> Mf_event.wm 5)        (* все одинаковые *)
+    @ [ Mf_event.data "tail" 10 ]) in
+  let out = Mf_event.union a b in
+  (* продренируем циклом (не рекурсией), чтобы тест проверял именно union *)
+  let count = ref 0 in
+  let continue = ref true in
+  while !continue do
+    (match out () with None -> continue := false | Some _ -> incr count)
+  done;
+  check "drained without stack overflow" (!count >= 1)
+
 (* ── union: все события сохраняются ────────────────────────── *)
 let test_union_complete () =
   Printf.printf "\n-- union loses nothing\n";
@@ -203,6 +226,7 @@ let () =
   test_union_associative ();
   test_union_watermark_monotone ();
   test_union_done_no_regression ();
+  test_union_many_watermarks ();
   test_update_table ();
   test_update_table_live ();
   test_update_table_watermark ();
