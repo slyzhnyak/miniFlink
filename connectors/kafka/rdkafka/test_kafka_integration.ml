@@ -106,23 +106,34 @@ let run brokers =
   (match poll_one 10 with
    | None -> fail "не дождались input1 из in_topic"
    | Some m ->
-     (* транзакционно: produce результат + commit consumer-offset *)
-     let producer = Producer.create ~brokers
-         ~transactional_id:(unique_topic "rpw_txn") () in
-     let sink = Sink.create ~producer ~topic:out_topic ~encode:(fun s -> s) () in
-     let ts = Sink.to_transactional_sink sink in
-     ts.ts_write 1 ("processed:" ^ m.m_payload);
-     (* offset следующего к чтению = обработанный + 1 *)
-     Producer.send_offsets producer
-       ~consumer_handle:(Consumer.raw_handle consumer)
-       ~topic:in_topic ~partition:m.m_pos.partition
-       ~offset:(Int64.add m.m_pos.offset 1L);
-     ts.ts_commit 1;
-     Sink.close sink;
-     Consumer.close consumer;
-     let out = drain_committed ~brokers ~topic:out_topic ~timeout_total_ms:8000 in
-     check "read-process-write: out_topic = [processed:input1]"
-       (out = ["processed:input1"]));
+     (* транзакционно: produce результат + commit consumer-offset.
+        Оборачиваем в try, чтобы при сбое УВИДЕТЬ точную причину в CI
+        (логи blob недоступны), а не молчаливый abort всего теста. *)
+     (try
+       let producer = Producer.create ~brokers
+           ~transactional_id:(unique_topic "rpw_txn") () in
+       let sink = Sink.create ~producer ~topic:out_topic ~encode:(fun s -> s) () in
+       let ts = Sink.to_transactional_sink sink in
+       ts.ts_write 1 ("processed:" ^ m.m_payload);
+       Printf.printf "    [diag] produced, sending offsets (part=%d off=%Ld)\n%!"
+         m.m_pos.partition (Int64.add m.m_pos.offset 1L);
+       (* offset следующего к чтению = обработанный + 1 *)
+       Producer.send_offsets producer
+         ~consumer_handle:(Consumer.raw_handle consumer)
+         ~topic:in_topic ~partition:m.m_pos.partition
+         ~offset:(Int64.add m.m_pos.offset 1L);
+       Printf.printf "    [diag] send_offsets ok, committing txn\n%!";
+       ts.ts_commit 1;
+       Sink.close sink;
+       Consumer.close consumer;
+       let out = drain_committed ~brokers ~topic:out_topic ~timeout_total_ms:8000 in
+       Printf.printf "    [diag] out_topic content: [%s]\n%!"
+         (String.concat "; " out);
+       check "read-process-write: out_topic = [processed:input1]"
+         (out = ["processed:input1"])
+     with e ->
+       Printf.printf "    [diag] EXCEPTION: %s\n%!" (Printexc.to_string e);
+       fail "send_offsets read-process-write упал (см. [diag] выше)"));
 
   Printf.printf "\nLive Kafka EOS integration passed.\n"
 
