@@ -79,4 +79,14 @@ jobs:
       - name: Run EOS integration test against live broker
         env:
           KAFKA_BROKERS: localhost:9092
-        run: opam exec -- dune exec connectors/kafka/rdkafka/test_kafka_integration.exe
+        run: |
+          set -o pipefail
+          # Захватываем вывод теста: при падении логи job уходят на blob
+          # (недоступен для локальной отладки), поэтому дублируем вывод в
+          # GitHub-аннотацию ::error::, чтобы причина была видна в UI.
+          opam exec -- dune exec connectors/kafka/rdkafka/test_kafka_integration.exe \
+            2>&1 | tee /tmp/eos_out.txt || {
+              echo "::error::EOS integration failed — output below"
+              while IFS= read -r line; do echo "::error::$line"; done < /tmp/eos_out.txt
+              exit 1
+            }
