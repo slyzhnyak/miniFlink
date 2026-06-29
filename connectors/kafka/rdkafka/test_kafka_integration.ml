@@ -110,8 +110,10 @@ let run brokers =
         Оборачиваем в try, чтобы при сбое УВИДЕТЬ точную причину в CI
         (логи blob недоступны), а не молчаливый abort всего теста. *)
      (try
+       Printf.printf "    [diag] got input, creating txn producer\n%!";
        let producer = Producer.create ~brokers
            ~transactional_id:(unique_topic "rpw_txn") () in
+       Printf.printf "    [diag] txn producer created (init_transactions ok)\n%!";
        let sink = Sink.create ~producer ~topic:out_topic ~encode:(fun s -> s) () in
        let ts = Sink.to_transactional_sink sink in
        ts.ts_write 1 ("processed:" ^ m.m_payload);
