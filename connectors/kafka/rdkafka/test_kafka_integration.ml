@@ -80,6 +80,50 @@ let run brokers =
   check "read_committed видит только real (ghost абортнут)"
     (got = ["real"]);
 
+  (* ── 3. send_offsets_to_transaction: offset внутри транзакции ──
+     Строжайший EOS read-process-write: производитель пишет в топик и
+     коммитит consumer-offset В ТОЙ ЖЕ транзакции. Проверяем, что
+     send_offsets_to_transaction против живого брокера проходит без
+     ошибки и committed-данные видны (т.е. транзакция с offset'ом
+     закоммитилась атомарно). *)
+  Printf.printf "\n-- 3. send_offsets_to_transaction (read-process-write)\n";
+  let in_topic = unique_topic "rpw_in" in
+  let out_topic = unique_topic "rpw_out" in
+  let group = unique_topic "rpw_grp" in
+  (* засеем входной топик одним сообщением напрямую (нетранзакционный
+     producer), затем прочитаем-обработаем-запишем в транзакции *)
+  let seeder = Producer.create ~brokers () in
+  Producer.produce seeder ~topic:in_topic ~partition:0
+    ~key:None ~payload:"input1";
+  Producer.flush seeder ~timeout_ms:5000;
+  Producer.close seeder;
+  (* consumer читает input1 *)
+  let consumer = Consumer.create ~brokers ~group_id:group ~topics:[in_topic] in
+  let rec poll_one tries =
+    if tries <= 0 then None
+    else match Consumer.poll consumer ~timeout_ms:1000 with
+      | Some m -> Some m | None -> poll_one (tries - 1) in
+  (match poll_one 10 with
+   | None -> fail "не дождались input1 из in_topic"
+   | Some m ->
+     (* транзакционно: produce результат + commit consumer-offset *)
+     let producer = Producer.create ~brokers
+         ~transactional_id:(unique_topic "rpw_txn") () in
+     let sink = Sink.create ~producer ~topic:out_topic ~encode:(fun s -> s) () in
+     let ts = Sink.to_transactional_sink sink in
+     ts.ts_write 1 ("processed:" ^ m.m_payload);
+     (* offset следующего к чтению = обработанный + 1 *)
+     Producer.send_offsets producer
+       ~consumer_handle:(Consumer.raw_handle consumer)
+       ~topic:in_topic ~partition:m.m_pos.partition
+       ~offset:(Int64.add m.m_pos.offset 1L);
+     ts.ts_commit 1;
+     Sink.close sink;
+     Consumer.close consumer;
+     let out = drain_committed ~brokers ~topic:out_topic ~timeout_total_ms:8000 in
+     check "read-process-write: out_topic = [processed:input1]"
+       (out = ["processed:input1"]));
+
   Printf.printf "\nLive Kafka EOS integration passed.\n"
 
 let () =

@@ -194,6 +194,58 @@ CAMLprim value caml_rdk_abort_transaction(value v_rk, value v_timeout) {
     CAMLreturn(Val_int(code));
 }
 
+/* send_offsets_to_transaction(producer_rk, consumer_rk, topic, partition,
+                               offset, timeout_ms) -> int (0 = ok)
+
+   Строжайший EOS read-process-write: коммитит consumer-offset ВНУТРИ
+   открытой producer-транзакции, так что «прочитано → записано → offset
+   сдвинут» атомарны. При abort'е транзакции offset тоже откатывается, и
+   после сбоя данные перечитываются с той же позиции — ни потерь, ни
+   дублей сквозь брокер.
+
+   offset здесь — это offset СЛЕДУЮЩЕГО сообщения для чтения (Kafka-
+   семантика commit: «уже обработано всё до offset»), т.е. last_processed
+   + 1. Group metadata берётся от consumer-handle (он должен быть в той
+   же группе). */
+CAMLprim value caml_rdk_send_offsets(value *argv, int argn) {
+    CAMLparam0();
+    (void)argn;
+    value v_prk     = argv[0];
+    value v_crk     = argv[1];
+    value v_topic   = argv[2];
+    value v_part    = argv[3];
+    value v_offset  = argv[4];
+    value v_timeout = argv[5];
+
+    rd_kafka_t *prk = Rk_val(v_prk);   /* транзакционный producer */
+    rd_kafka_t *crk = Rk_val(v_crk);   /* consumer (для group metadata) */
+
+    rd_kafka_topic_partition_list_t *offsets =
+        rd_kafka_topic_partition_list_new(1);
+    rd_kafka_topic_partition_t *tp =
+        rd_kafka_topic_partition_list_add(offsets,
+            String_val(v_topic), Int_val(v_part));
+    tp->offset = Int64_val(v_offset);
+
+    rd_kafka_consumer_group_metadata_t *cgmd =
+        rd_kafka_consumer_group_metadata(crk);
+
+    rd_kafka_error_t *err = rd_kafka_send_offsets_to_transaction(
+        prk, offsets, cgmd, Int_val(v_timeout));
+
+    int code = 0;
+    if (err) { code = (int)rd_kafka_error_code(err); rd_kafka_error_destroy(err); }
+
+    if (cgmd) rd_kafka_consumer_group_metadata_destroy(cgmd);
+    rd_kafka_topic_partition_list_destroy(offsets);
+    CAMLreturn(Val_int(code));
+}
+
+/* bytecode-обёртка для >5 аргументов (OCaml требует пару native/byte) */
+CAMLprim value caml_rdk_send_offsets_byte(value *argv, int argn) {
+    return caml_rdk_send_offsets(argv, argn);
+}
+
 /* ── Consumer ────────────────────────────────────────────── */
 
 /* create_consumer(conf_pairs) -> rk */
