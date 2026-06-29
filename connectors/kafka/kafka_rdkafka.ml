@@ -26,6 +26,10 @@ module Raw = struct
   external producer_new   : (string * string) list -> handle = "caml_rdk_producer_new"
   external produce        : handle -> string -> int -> string option -> string -> int = "caml_rdk_produce"
   external flush          : handle -> int -> int = "caml_rdk_flush"
+  external init_txns      : handle -> int -> int = "caml_rdk_init_transactions"
+  external begin_txn      : handle -> int = "caml_rdk_begin_transaction"
+  external commit_txn     : handle -> int -> int = "caml_rdk_commit_transaction"
+  external abort_txn      : handle -> int -> int = "caml_rdk_abort_transaction"
   external consumer_new   : (string * string) list -> handle = "caml_rdk_consumer_new"
   external subscribe      : handle -> string list -> int = "caml_rdk_subscribe"
   external consumer_poll  : handle -> int -> (string * int * int64 * string option * string) option = "caml_rdk_consumer_poll"
@@ -63,22 +67,54 @@ module Consumer = struct
 end
 
 module Producer = struct
-  type t = { rk : handle }
+  type t = { rk : handle; transactional : bool }
 
   let create ~brokers ?transactional_id () =
     let conf = ("bootstrap.servers", brokers) ::
       (match transactional_id with Some tid -> ["transactional.id", tid] | None -> []) in
-    { rk = Raw.producer_new conf }
+    let rk = Raw.producer_new conf in
+    let transactional = transactional_id <> None in
+    (* init_transactions один раз при старте транзакционного producer'а;
+       регистрирует producer в координаторе транзакций брокера. Без неё
+       begin/commit_transaction вернут ошибку. *)
+    if transactional then begin
+      let rc = Raw.init_txns rk 30000 in
+      if rc <> 0 then
+        failwith (Printf.sprintf "Kafka init_transactions failed (err=%d)" rc)
+    end;
+    { rk; transactional }
 
   let produce t ~topic ~partition ~key ~payload =
     ignore (Raw.produce t.rk topic partition key payload)
 
   let flush t ~timeout_ms = ignore (Raw.flush t.rk timeout_ms)
 
-  (* транзакции: C-стабы init_transactions/begin/commit нужно добавить в
-     kafka_stubs.c для полноценного EOS; пока флаш как граница *)
-  let begin_txn _ = ()
-  let commit_txn t = flush t ~timeout_ms:10000
-  let abort_txn _ = ()
+  (* Реальные транзакции для exactly-once sink. Для нетранзакционного
+     producer'а (transactional_id не задан) — no-op + flush как граница,
+     чтобы тот же адаптер работал и без EOS. *)
+  let begin_txn t =
+    if t.transactional then begin
+      let rc = Raw.begin_txn t.rk in
+      if rc <> 0 then
+        failwith (Printf.sprintf "Kafka begin_transaction failed (err=%d)" rc)
+    end
+
+  let commit_txn t =
+    if t.transactional then begin
+      (* commit_transaction сам флашит и дожидается доставки всех
+         сообщений транзакции перед коммитом. *)
+      let rc = Raw.commit_txn t.rk 30000 in
+      if rc <> 0 then
+        failwith (Printf.sprintf "Kafka commit_transaction failed (err=%d)" rc)
+    end else
+      flush t ~timeout_ms:10000
+
+  let abort_txn t =
+    if t.transactional then begin
+      let rc = Raw.abort_txn t.rk 30000 in
+      if rc <> 0 then
+        failwith (Printf.sprintf "Kafka abort_transaction failed (err=%d)" rc)
+    end
+
   let close t = flush t ~timeout_ms:10000
 end
