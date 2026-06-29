@@ -146,6 +146,54 @@ CAMLprim value caml_rdk_outq_len(value v_rk) {
     CAMLreturn(Val_int(rd_kafka_outq_len(Rk_val(v_rk))));
 }
 
+/* ── Transactions (EOS) ──────────────────────────────────────
+   librdkafka transaction API возвращает rd_kafka_error_t* (отличается от
+   rd_kafka_resp_err_t): NULL = успех, иначе содержит код + флаги
+   retriable/abortable. Возвращаем наружу int-код ошибки (0 = успех),
+   обязательно освобождая error-объект (rd_kafka_error_destroy), иначе
+   утечка. transactional.id задаётся в конфиге producer'а (producer_new).
+   Порядок жизненного цикла: init_transactions (один раз) →
+   { begin_transaction → produce* → commit_transaction | abort_transaction }*. */
+
+/* init_transactions(rk, timeout_ms) -> int (0 = ok) */
+CAMLprim value caml_rdk_init_transactions(value v_rk, value v_timeout) {
+    CAMLparam2(v_rk, v_timeout);
+    rd_kafka_error_t *err =
+        rd_kafka_init_transactions(Rk_val(v_rk), Int_val(v_timeout));
+    int code = 0;
+    if (err) { code = (int)rd_kafka_error_code(err); rd_kafka_error_destroy(err); }
+    CAMLreturn(Val_int(code));
+}
+
+/* begin_transaction(rk) -> int (0 = ok) */
+CAMLprim value caml_rdk_begin_transaction(value v_rk) {
+    CAMLparam1(v_rk);
+    rd_kafka_error_t *err = rd_kafka_begin_transaction(Rk_val(v_rk));
+    int code = 0;
+    if (err) { code = (int)rd_kafka_error_code(err); rd_kafka_error_destroy(err); }
+    CAMLreturn(Val_int(code));
+}
+
+/* commit_transaction(rk, timeout_ms) -> int (0 = ok) */
+CAMLprim value caml_rdk_commit_transaction(value v_rk, value v_timeout) {
+    CAMLparam2(v_rk, v_timeout);
+    rd_kafka_error_t *err =
+        rd_kafka_commit_transaction(Rk_val(v_rk), Int_val(v_timeout));
+    int code = 0;
+    if (err) { code = (int)rd_kafka_error_code(err); rd_kafka_error_destroy(err); }
+    CAMLreturn(Val_int(code));
+}
+
+/* abort_transaction(rk, timeout_ms) -> int (0 = ok) */
+CAMLprim value caml_rdk_abort_transaction(value v_rk, value v_timeout) {
+    CAMLparam2(v_rk, v_timeout);
+    rd_kafka_error_t *err =
+        rd_kafka_abort_transaction(Rk_val(v_rk), Int_val(v_timeout));
+    int code = 0;
+    if (err) { code = (int)rd_kafka_error_code(err); rd_kafka_error_destroy(err); }
+    CAMLreturn(Val_int(code));
+}
+
 /* ── Consumer ────────────────────────────────────────────── */
 
 /* create_consumer(conf_pairs) -> rk */
