@@ -3,9 +3,12 @@
 ; ((dirs :standard \ rdkafka)) — он требует системную librdkafka.
 ; CI job kafka-eos убирает исключение, ставит librdkafka-dev, поднимает
 ; брокер и собирает/запускает интеграционный тест с KAFKA_BROKERS.
+;
+; library name = kafka_rdkafka совпадает с именем единственного модуля,
+; поэтому он доступен снаружи как Kafka_rdkafka (без обёртки-префикса).
 
 (library
- (name kafka_rdkafka_binding)
+ (name kafka_rdkafka)
  (libraries miniflink kafka_connector)
  (foreign_stubs (language c) (names kafka_stubs))
  (c_library_flags (-lrdkafka))
@@ -13,6 +16,6 @@
 
 (executable
  (name test_kafka_integration)
- (libraries miniflink kafka_connector kafka_rdkafka_binding unix)
- (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
+ (libraries miniflink kafka_connector kafka_rdkafka unix)
+ (flags (:standard -w +a-4-26-27-32-33-37-39-40-41-42-44-45-70))
  (modules test_kafka_integration))
