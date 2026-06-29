@@ -1,6 +1,11 @@
 ; Kafka-коннектор — основная (тестируемая) часть.
 ; БЕЗ librdkafka: абстрактный клиент + in-memory фейк + адаптер.
 ; Логика offset-маппинга/seek/EO проверяется на фейке без брокера.
+;
+; Подкаталог rdkafka/ (прод-биндинг + интеграционный тест против живого
+; брокера) исключён из обычной сборки — он требует системную librdkafka.
+; Включается только в профиле 'rdkafka' (CI job kafka-eos).
+(dirs :standard \ rdkafka)
 (library
  (name kafka_connector)
  (libraries miniflink)
@@ -19,14 +24,9 @@
  (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
  (modules test_kafka_sink))
 
-; ── Прод-биндинг к librdkafka (НЕ собирается по умолчанию) ──
-; Требует системную librdkafka. Чтобы включить: раскомментируй и
-; убедись что librdkafka-dev установлена. kafka_rdkafka реализует
-; Kafka_client.CONSUMER/PRODUCER через C-стабы (kafka_stubs.c).
-;
-; (library
-;  (name kafka_rdkafka_binding)
-;  (libraries miniflink kafka_connector)
-;  (foreign_stubs (language c) (names kafka_stubs))
-;  (c_library_flags (-lrdkafka))
-;  (modules kafka_rdkafka))
+; ── Прод-биндинг к librdkafka ──────────────────────────────
+; Вынесен в подкаталог rdkafka/ с собственным dune, который собирается
+; только в профиле 'rdkafka' (нужна системная librdkafka). Default-сборка
+; его не видит — ядро и адаптер тестируются на фейке без брокера.
+; В CI: job kafka-eos ставит librdkafka-dev, поднимает брокер и
+; собирает с '--profile rdkafka'.

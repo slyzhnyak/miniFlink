@@ -1,0 +1,18 @@
+; Прод-биндинг к librdkafka + интеграционный тест против живого брокера.
+; Этот каталог исключён из обычной сборки родительским dune
+; ((dirs :standard \ rdkafka)) — он требует системную librdkafka.
+; CI job kafka-eos убирает исключение, ставит librdkafka-dev, поднимает
+; брокер и собирает/запускает интеграционный тест с KAFKA_BROKERS.
+
+(library
+ (name kafka_rdkafka_binding)
+ (libraries miniflink kafka_connector)
+ (foreign_stubs (language c) (names kafka_stubs))
+ (c_library_flags (-lrdkafka))
+ (modules kafka_rdkafka))
+
+(executable
+ (name test_kafka_integration)
+ (libraries miniflink kafka_connector kafka_rdkafka_binding unix)
+ (flags (:standard -w +a-4-26-27-32-33-37-39-41-42-44-45-70))
+ (modules test_kafka_integration))

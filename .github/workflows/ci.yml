@@ -30,3 +30,53 @@ jobs:
           opam install -y bisect_ppx
           opam exec -- dune runtest --instrument-with bisect_ppx --force
           opam exec -- bisect-ppx-report summary
+
+  # ── Интеграция Kafka EOS против ЖИВОГО брокера ──────────────
+  # Поднимает реальный Kafka (KRaft, без Zookeeper) сервис-контейнером,
+  # ставит librdkafka, собирает прод-биндинг (kafka_rdkafka + C-стабы) и
+  # гоняет test_kafka_integration — проверка настоящих транзакций
+  # (init/begin/commit/abort) и видимости read_committed сквозь брокер.
+  # Это закрывает то, что фейк проверить не может.
+  kafka-eos:
+    runs-on: ubuntu-latest
+    services:
+      kafka:
+        image: apache/kafka:3.8.0
+        ports:
+          - 9092:9092
+        env:
+          KAFKA_NODE_ID: 1
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+          KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+          KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ocaml/setup-ocaml@v3
+        with: { ocaml-compiler: "5.2" }
+      - name: Install librdkafka + rocksdb
+        run: sudo apt-get update && sudo apt-get install -y librdkafka-dev librocksdb-dev
+      - run: opam install -y dune yojson ppx_deriving ppx_deriving_yojson qcheck-core qcheck
+      - name: Enable rdkafka subdir (remove the default-build exclusion)
+        run: sed -i 's/ \\ rdkafka//' connectors/kafka/dune
+      - name: Build prod binding + integration test
+        run: opam exec -- dune build connectors/kafka/rdkafka/
+      - name: Wait for Kafka to be ready
+        run: |
+          for i in $(seq 1 30); do
+            if bash -c 'cat < /dev/null > /dev/tcp/localhost/9092' 2>/dev/null; then
+              echo "Kafka is up"; exit 0
+            fi
+            echo "waiting for kafka ($i)..."; sleep 2
+          done
+          echo "Kafka did not become ready"; exit 1
+      - name: Run EOS integration test against live broker
+        env:
+          KAFKA_BROKERS: localhost:9092
+        run: opam exec -- dune exec connectors/kafka/rdkafka/test_kafka_integration.exe

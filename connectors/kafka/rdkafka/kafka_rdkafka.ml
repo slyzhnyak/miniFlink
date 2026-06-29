@@ -9,6 +9,9 @@
    Логика адаптера (offset-маппинг, seek, EO) — в Kafka_source, общая для
    фейка и реального клиента; здесь только транспорт. *)
 
+(* Kafka_client приходит из библиотеки kafka_connector (этот биндинг —
+   отдельная library из-за C-стабов), поэтому ссылаемся через неё. *)
+open Kafka_connector
 open Kafka_client
 
 (* Непрозрачный хэндл на rd_kafka_t. На C-стороне это custom block
