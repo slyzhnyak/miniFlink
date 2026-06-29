@@ -33,6 +33,9 @@ module Raw = struct
   external begin_txn      : handle -> int = "caml_rdk_begin_transaction"
   external commit_txn     : handle -> int -> int = "caml_rdk_commit_transaction"
   external abort_txn      : handle -> int -> int = "caml_rdk_abort_transaction"
+  (* send_offsets: 6 аргументов → пара byte/native обёрток *)
+  external send_offsets   : handle -> handle -> string -> int -> int64 -> int -> int
+    = "caml_rdk_send_offsets_byte" "caml_rdk_send_offsets"
   external consumer_new   : (string * string) list -> handle = "caml_rdk_consumer_new"
   external subscribe      : handle -> string list -> int = "caml_rdk_subscribe"
   external consumer_poll  : handle -> int -> (string * int * int64 * string option * string) option = "caml_rdk_consumer_poll"
@@ -67,6 +70,10 @@ module Consumer = struct
     ignore (Raw.commit_offset t.rk po.topic po.partition po.offset)
 
   let close t = Raw.consumer_close t.rk
+
+  (* raw rd_kafka_t handle — нужен producer'у для send_offsets
+     (получить consumer group metadata из той же группы). *)
+  let raw_handle t = t.rk
 end
 
 module Producer = struct
@@ -118,6 +125,22 @@ module Producer = struct
       if rc <> 0 then
         failwith (Printf.sprintf "Kafka abort_transaction failed (err=%d)" rc)
     end
+
+  (* Строжайший EOS: закоммитить consumer-offset ВНУТРИ открытой
+     транзакции этого producer'а. consumer_handle — rk consumer'а той же
+     группы (источник group metadata). offset — позиция СЛЕДУЮЩЕГО
+     сообщения (last_processed + 1). Вызывать ПОСЛЕ produce и ДО
+     commit_txn. Для нетранзакционного producer'а — no-op (offset
+     коммитится consumer'ом отдельно). *)
+  let send_offsets t ~consumer_handle ~topic ~partition ~offset =
+    if t.transactional then begin
+      let rc = Raw.send_offsets t.rk consumer_handle topic partition offset 30000 in
+      if rc <> 0 then
+        failwith (Printf.sprintf "Kafka send_offsets_to_transaction failed (err=%d)" rc)
+    end
+
+  (* доступ к raw consumer-handle для send_offsets (см. Consumer.raw_handle) *)
+  let raw_handle t = t.rk
 
   let close t = flush t ~timeout_ms:10000
 end
