@@ -70,9 +70,9 @@ persistent state via C FFI). A second design contribution is
 with or without durability, the mode being selected from outside the
 pipeline through an ambient runtime context, with serialization handled
 by default and never appearing in operator code. The library is
-approximately 5{,}500 lines across 41 modules with 34 interface files;
-it is validated by 105 test suites, of which 7 are property-based
-(29 QCheck invariants with independent oracles) covering retract/update
+approximately 5{,}600 lines across 42 modules with 37 interface files;
+it is validated by 120 test suites, of which 15 are property-based
+(63 QCheck invariants with independent oracles) covering retract/update
 consistency, FSM invariants, and crash-recovery transparency, alongside
 replay-determinism, fuzzing, and soak tests. The test code (about
 12{,}500 lines) exceeds the library itself by more than a factor of two.
@@ -618,8 +618,8 @@ that example-based tests miss and property-based tests catch
 feeds events via \texttt{push}/\texttt{push\_wm} and collects
 output via \texttt{run}. No broker, no threads, no wall clock.
 
-The suite comprises 105 test executables run under
-\texttt{dune test}; the test code (about 12{,}500 lines) is more than
+The suite comprises 120 test executables run under
+\texttt{dune test}; the test code (about 14{,}000 lines) is more than
 twice the size of the library. Beyond operator-correctness unit tests
 and the property tests below, the suite targets the failure modes
 specific to stream engines:
@@ -641,7 +641,7 @@ specific to stream engines:
   validating dedup and window eviction.
 \end{description}
 
-\textbf{Property tests.} Seven property suites (29 QCheck
+\textbf{Property tests.} Fifteen property suites (63 QCheck
 invariants, with thousands of generated cases each) check general laws
 rather than specific inputs. Every property is checked against an
 \emph{independent oracle} --- a separate, simpler computation of the
@@ -698,7 +698,7 @@ exactly-once (single-thread and parallel via barrier snapshots, with
 recovery and a transactional sink), table/join with TTL eviction,
 retractions, and production layers (DLQ with retry, graceful shutdown,
 Prometheus metrics, structured logging, health/config, RocksDB-backed
-state) --- fit in roughly 5{,}500 lines of OCaml, validated by 105 test
+state) --- fit in roughly 5{,}600 lines of OCaml, validated by 120 test
 suites whose code more than doubles the size of the library. Three
 design decisions proved most consequential:
 

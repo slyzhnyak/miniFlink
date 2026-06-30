@@ -298,7 +298,7 @@ late data). (`dune exec bench/bench_ex07.exe`,
 | Агрегация окон              | ✓ инкрементальная (window_fold) + комбинируемые агрегаторы (Agg) |
 | Stream-table join           | ✓ enrich (snapshot) + temporal_join (as-of, корректен при опоздавших апдейтах) |
 | Persistent state (RocksDB)  | ✓ реализовано (C FFI, librocksdb) |
-| Источники/sink              | in-memory (seekable_of_list) + функции pull/push; MQTT/Kafka-адаптеров нет (источник подключает приложение) |
+| Источники/sink              | in-memory (seekable_of_list) + функции pull/push; Kafka-адаптер реализован (`connectors/kafka`: seekable source + транзакционный sink через librdkafka, базовый EOS проверен на живом брокере в CI) |
 
 ## Дорожная карта
 
@@ -320,10 +320,14 @@ MapState / ReducingState); broadcast state; CEP (паттерны «A затем
 течение T»); connected streams (два входа в один оператор); безопасная
 склейка композитных ключей.
 
-**Kafka end-to-end**: входная сторона сделана (`connectors/kafka`:
-seekable source с offset-маппингом и recovery-seek, протестировано на
-фейке). Не сделан транзакционный commit в Kafka-sink — для полного EOS
-нужны `init_transactions`/`begin`/`commit` в C-слое.
+**Kafka end-to-end**: сделано (`connectors/kafka`). Вход — seekable
+source с offset-маппингом и recovery-seek. Выход — транзакционный sink
+через librdkafka (`init/begin/commit/abort_transaction`), одна
+транзакция = одна epoch чекпойнта. Базовый EOS проверен на живом брокере
+в CI (видимость по commit, отбрасывание по abort, переобработка без
+дублей). Строжайший read-process-write (`send_offsets_to_transaction`) —
+EXPERIMENTAL: падает в C-слое против живого брокера, ждёт отладки в среде
+с брокером.
 
 **Триггерная система** (стиль Zabbix): опциональный refresh внутри
 Problem-состояния; триггеры на агрегированные items; конфиг триггеров из
@@ -348,12 +352,11 @@ end-to-end интеграция операционной готовности.
   shared-memory каналы между потоками/доменами, не по сети.
 - **End-to-end exactly-once через внешние source/sink.** Реализован
   consistent snapshot операторного стейта в параллельном режиме
-  (barrier + recovery), и входная сторона Kafka сделана
-  (connectors/kafka: seekable_source с offset-маппингом и recovery-seek,
-  на фейке протестировано). Не сделана выходная: транзакционный commit в
-  Kafka-sink — begin/commit_txn в kafka_rdkafka заглушки, для полного
-  EOS нужны init_transactions/begin/commit в C-слое (см. «Дорожную
-  карту», раздел Kafka end-to-end).
+  (barrier + recovery), и Kafka-коннектор сделан
+  (connectors/kafka: seekable source с offset-маппингом и recovery-seek
+  на входе, транзакционный sink через librdkafka на выходе, базовый EOS
+  проверён на живом брокере в CI). Строжайший read-process-write
+  (send_offsets_to_transaction) пока EXPERIMENTAL.
 - **Incremental checkpointing.** Снапшот целиком, не дельтами.
 
 Это сознательный выбор: проект демонстрирует *семантику* Flink
