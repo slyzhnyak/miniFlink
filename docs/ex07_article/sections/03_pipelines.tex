@@ -702,7 +702,7 @@ match current_level, previous_alert with
   let ppm_changed      = ppm_changed_significantly old ppm in
   let position_changed = st.position <> old.aa_position in
   if not (level_changed || ppm_changed || position_changed) then []
-  else (* retract old + emit new *)
+  else (* атомарный Update: old -> new одним событием *)
 \end{lstlisting}
 
 Три проверки:
@@ -715,8 +715,15 @@ match current_level, previous_alert with
 \end{itemize}
 
 Если ни одно из условий не выполнено --- ничего не эмитим
-(\emph{sticky} семантика, защита от спама). Иначе --- retract
-старого + emit нового.
+(\emph{sticky} семантика, защита от спама). Иначе --- атомарный
+\texttt{Update old new}: одно событие, несущее и старое, и новое
+значение. В отличие от пары \texttt{Retract+Data}, downstream видит
+коррекцию за один шаг, без промежуточного состояния «алерт исчез, нового
+ещё нет» (которое в snapshot-потребителе дало бы мигание). Случай~2 выше
+(алерт \emph{снят}) остаётся парой \texttt{Retract + Gas\_resolved}: там
+замены нет, есть исчезновение плюс отдельное событие-новость, и для этого
+\texttt{Update} не подходит. Так ex07 показывает оба: \texttt{Update} для
+замены, \texttt{Retract} для исчезновения.
 
 \paragraph{Порог 20\% на ppm.} Сделан конфигурируемым через
 \texttt{Domain.gas\_ppm\_significant\_change}. Меньше --- спам
