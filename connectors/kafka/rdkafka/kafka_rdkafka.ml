@@ -131,7 +131,15 @@ module Producer = struct
      группы (источник group metadata). offset — позиция СЛЕДУЮЩЕГО
      сообщения (last_processed + 1). Вызывать ПОСЛЕ produce и ДО
      commit_txn. Для нетранзакционного producer'а — no-op (offset
-     коммитится consumer'ом отдельно). *)
+     коммитится consumer'ом отдельно).
+
+     EXPERIMENTAL: против живого брокера в CI этот путь приводил к
+     молчаливому падению процесса в C-слое, причину которого не удалось
+     локализовать без отладочной среды с брокером. НЕ проверено
+     end-to-end. Базовый EOS на выходе (begin/produce/commit/abort)
+     проверен на живом брокере и достаточен для основных сценариев.
+     send_offsets оставлен для доведения; не полагаться на него в
+     продакшене до прохождения интеграционного теста. *)
   let send_offsets t ~consumer_handle ~topic ~partition ~offset =
     if t.transactional then begin
       let rc = Raw.send_offsets t.rk consumer_handle topic partition offset 30000 in
