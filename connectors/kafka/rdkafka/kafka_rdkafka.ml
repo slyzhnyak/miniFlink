@@ -86,11 +86,23 @@ module Producer = struct
     let transactional = transactional_id <> None in
     (* init_transactions один раз при старте транзакционного producer'а;
        регистрирует producer в координаторе транзакций брокера. Без неё
-       begin/commit_transaction вернут ошибку. *)
+       begin/commit_transaction вернут ошибку.
+
+       Координатор транзакций брокера может быть ещё не прогружен сразу
+       после старта ("Coordinator load in progress") — это retriable-
+       состояние. Повторяем несколько раз с паузой, иначе на свежем
+       брокере (особенно в CI) init может не успеть с первой попытки. *)
     if transactional then begin
-      let rc = Raw.init_txns rk 30000 in
-      if rc <> 0 then
-        failwith (Printf.sprintf "Kafka init_transactions failed (err=%d)" rc)
+      let rec attempt n =
+        let rc = Raw.init_txns rk 30000 in
+        if rc = 0 then ()
+        else if n > 1 then begin
+          Unix.sleepf 1.0;
+          attempt (n - 1)
+        end else
+          failwith (Printf.sprintf "Kafka init_transactions failed (err=%d)" rc)
+      in
+      attempt 10
     end;
     { rk; transactional }
 

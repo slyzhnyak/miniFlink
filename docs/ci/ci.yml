@@ -71,7 +71,14 @@ jobs:
         run: |
           for i in $(seq 1 30); do
             if bash -c 'cat < /dev/null > /dev/tcp/localhost/9092' 2>/dev/null; then
-              echo "Kafka is up"; exit 0
+              echo "Kafka TCP is up"
+              # порт открыт ≠ координатор транзакций прогружен. Даём
+              # брокеру время поднять transaction coordinator, иначе
+              # init_transactions ловит "Coordinator load in progress".
+              # init_transactions к тому же ретраится в коде, это вторая
+              # линия защиты от флака на старте.
+              sleep 8
+              echo "Kafka should be ready"; exit 0
             fi
             echo "waiting for kafka ($i)..."; sleep 2
           done
