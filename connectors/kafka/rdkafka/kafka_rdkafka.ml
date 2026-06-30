@@ -135,7 +135,10 @@ module Producer = struct
   let send_offsets t ~consumer_handle ~topic ~partition ~offset =
     if t.transactional then begin
       let rc = Raw.send_offsets t.rk consumer_handle topic partition offset 30000 in
-      if rc <> 0 then
+      if rc = -1 then
+        failwith "Kafka send_offsets: consumer group metadata is NULL \
+                  (consumer must have a group.id)"
+      else if rc <> 0 then
         failwith (Printf.sprintf "Kafka send_offsets_to_transaction failed (err=%d)" rc)
     end
 

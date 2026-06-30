@@ -19,6 +19,7 @@
 #include <caml/alloc.h>
 #include <caml/custom.h>
 #include <caml/fail.h>
+#include <caml/threads.h>
 #include <librdkafka/rdkafka.h>
 #include <string.h>
 #include <stdlib.h>
@@ -210,6 +211,7 @@ CAMLprim value caml_rdk_abort_transaction(value v_rk, value v_timeout) {
 CAMLprim value caml_rdk_send_offsets(value *argv, int argn) {
     CAMLparam0();
     (void)argn;
+    CAMLlocal1(ret);
     value v_prk     = argv[0];
     value v_crk     = argv[1];
     value v_topic   = argv[2];
@@ -220,6 +222,13 @@ CAMLprim value caml_rdk_send_offsets(value *argv, int argn) {
     rd_kafka_t *prk = Rk_val(v_prk);   /* транзакционный producer */
     rd_kafka_t *crk = Rk_val(v_crk);   /* consumer (для group metadata) */
 
+    /* group metadata: NULL, если consumer без group.id — тогда вызывать
+       send_offsets нельзя (был бы UB/краш). Возвращаем -1, OCaml бросит
+       внятную ошибку вместо падения процесса. */
+    rd_kafka_consumer_group_metadata_t *cgmd =
+        rd_kafka_consumer_group_metadata(crk);
+    if (!cgmd) CAMLreturn(Val_int(-1));
+
     rd_kafka_topic_partition_list_t *offsets =
         rd_kafka_topic_partition_list_new(1);
     rd_kafka_topic_partition_t *tp =
@@ -227,18 +236,22 @@ CAMLprim value caml_rdk_send_offsets(value *argv, int argn) {
             String_val(v_topic), Int_val(v_part));
     tp->offset = Int64_val(v_offset);
 
-    rd_kafka_consumer_group_metadata_t *cgmd =
-        rd_kafka_consumer_group_metadata(crk);
+    int timeout = Int_val(v_timeout);
 
-    rd_kafka_error_t *err = rd_kafka_send_offsets_to_transaction(
-        prk, offsets, cgmd, Int_val(v_timeout));
+    /* Блокирующий вызов (до timeout): отпускаем OCaml runtime lock, чтобы
+       не держать рантайм и не мешать внутренним потокам librdkafka. */
+    rd_kafka_error_t *err;
+    caml_release_runtime_system();
+    err = rd_kafka_send_offsets_to_transaction(prk, offsets, cgmd, timeout);
+    caml_acquire_runtime_system();
 
     int code = 0;
     if (err) { code = (int)rd_kafka_error_code(err); rd_kafka_error_destroy(err); }
 
-    if (cgmd) rd_kafka_consumer_group_metadata_destroy(cgmd);
+    rd_kafka_consumer_group_metadata_destroy(cgmd);
     rd_kafka_topic_partition_list_destroy(offsets);
-    CAMLreturn(Val_int(code));
+    ret = Val_int(code);
+    CAMLreturn(ret);
 }
 
 /* bytecode-обёртка для >5 аргументов (OCaml требует пару native/byte) */

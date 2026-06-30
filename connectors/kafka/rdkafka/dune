@@ -9,7 +9,7 @@
 
 (library
  (name kafka_rdkafka)
- (libraries miniflink kafka_connector)
+ (libraries miniflink kafka_connector threads.posix)
  (foreign_stubs (language c) (names kafka_stubs))
  (c_library_flags (-lrdkafka))
  (modules kafka_rdkafka))
