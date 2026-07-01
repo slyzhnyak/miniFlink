@@ -733,3 +733,9 @@
  (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
  (modules test_keyed_join_ttl))
 
+
+(test
+ (name test_trigger_ttl)
+ (libraries miniflink)
+ (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
+ (modules test_trigger_ttl))
