@@ -745,3 +745,9 @@
  (libraries miniflink qcheck-core qcheck-core.runner qcheck)
  (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
  (modules test_prop_union_order))
+
+(test
+ (name test_prop_count_sliding)
+ (libraries miniflink test_support qcheck-core qcheck-core.runner qcheck)
+ (flags (:standard -w +a-4-26-27-32-33-37-39-40-41-42-44-45-70))
+ (modules test_prop_count_sliding))
