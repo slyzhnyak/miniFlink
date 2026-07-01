@@ -70,7 +70,12 @@ let run_one (spec : pipeline_spec) : status =
 let supervise_result (specs : pipeline_spec list) : (string * status) list =
   let results = Array.make (List.length specs) ("", `Ok) in
   let results_mu = Mutex.create () in
-  let crit : (string * exn) option ref = ref None in
+  (* Копим ВСЕ критические сбои, а не только первый (H-2): при
+     одновременном падении нескольких Crash_all-пайплайнов раньше
+     терялась диагностика всех, кроме первого. Список копится под
+     mutex'ом; в конце логируем все, а пробрасываем первый по порядку
+     запуска (тип исключения не меняем — обратная совместимость). *)
+  let crits : (string * exn) list ref = ref [] in
   let crit_mu = Mutex.create () in
   let threads = List.mapi (fun i spec ->
     Thread.create (fun () ->
@@ -78,7 +83,7 @@ let supervise_result (specs : pipeline_spec list) : (string * status) list =
         try run_one spec
         with Critical_failure (lbl, e) ->
           Mutex.lock crit_mu;
-          if !crit = None then crit := Some (lbl, e);
+          crits := (lbl, e) :: !crits;
           Mutex.unlock crit_mu;
           `Failed
       in
@@ -92,9 +97,20 @@ let supervise_result (specs : pipeline_spec list) : (string * status) list =
     ) ()
   ) specs in
   List.iter Thread.join threads;
-  (match !crit with
-   | Some (lbl, e) -> raise (Critical_failure (lbl, e))
-   | None -> ());
+  (* crits накоплены в обратном порядке (prepend); развернём в порядок
+     возникновения. Логируем каждый, чтобы ни один не потерялся, затем
+     пробрасываем первый. *)
+  let all_crits = List.rev !crits in
+  (match all_crits with
+   | [] -> ()
+   | first :: rest ->
+     (* остальные критические сбои иначе были бы потеряны — логируем *)
+     List.iter (fun (lbl, e) ->
+       Log.error ~fields:[("pipeline", lbl);
+                          ("error", Printexc.to_string e)]
+         "additional critical pipeline failure (concurrent)") rest;
+     let (lbl, e) = first in
+     raise (Critical_failure (lbl, e)));
   Array.to_list results
 
 (* supervise: то же, но без возврата статусов (бросает при Crash_all). *)
