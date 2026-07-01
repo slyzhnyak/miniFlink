@@ -28,4 +28,12 @@ let send t e =
   ] "dead letter"
 
 let flush _ = ()
-let count t = t.n
+
+(* count берёт тот же mutex, что и send: чтение int при конкурентной
+   записи из другого домена без синхронизации — data race (UB на
+   OCaml 5). Иначе финальный счётчик DLQ мог быть неточным. *)
+let count t =
+  Mutex.lock t.mu;
+  let n = t.n in
+  Mutex.unlock t.mu;
+  n
