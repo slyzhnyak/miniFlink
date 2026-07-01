@@ -107,6 +107,11 @@ CAMLprim value mf_rocksdb_put(value v, value key, value data) {
 
   char *err = NULL;
   rocksdb_writeoptions_t *wopts = rocksdb_writeoptions_create();
+  /* set_sync(1): fsync до подтверждения записи. Для checkpoint-store
+     durability на crash важнее пропускной способности — без sync запись
+     может остаться в page cache ОС и потеряться при сбое питания/kill,
+     что нарушило бы гарантии восстановления. */
+  rocksdb_writeoptions_set_sync(wopts, 1);
   /* Отпустить runtime на время блокирующего дискового I/O — другие
      домены продолжают работать (иначе на OCaml 5 встал бы весь процесс). */
   caml_enter_blocking_section();
@@ -185,6 +190,7 @@ CAMLprim value mf_rocksdb_delete(value v, value key) {
 
   char *err = NULL;
   rocksdb_writeoptions_t *wopts = rocksdb_writeoptions_create();
+  rocksdb_writeoptions_set_sync(wopts, 1);  /* durability на crash, см. put */
   caml_enter_blocking_section();
   rocksdb_delete(db, wopts, kbuf, klen, &err);
   rocksdb_writeoptions_destroy(wopts);
