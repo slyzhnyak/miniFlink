@@ -322,7 +322,12 @@ let run_exactly_once
 
   let in_chans = Array.init workers (fun _ -> Channel.make_bounded capacity) in
   let coord = make_coordinator ~workers ~store in
-  let failed = Array.make workers false in
+  (* failed[i] пишется из воркера i и читается drive-потоком (dispatcher).
+     На OCaml 5 это разные домены без общего lock → обычный bool array дал
+     бы data race (UB): dispatcher мог бы читать устаревшее значение и
+     слать события/барьеры мёртвому воркеру, теряя их. Atomic даёт
+     happens-before и корректную видимость (как current_epoch рядом). *)
+  let failed = Array.init workers (fun _ -> Atomic.make false) in
 
   (* Текущий epoch виден воркерам для маршрутизации выходов в pre-commit.
      Atomic чтобы воркеры и dispatcher видели согласованно. *)
@@ -354,7 +359,7 @@ let run_exactly_once
              loop ()
          in loop ()
        with e ->
-         failed.(i) <- true;
+         Atomic.set failed.(i) true;
          (* сообщаем координатору что воркер выбыл — иначе он будет
             ждать снапшот мёртвого и checkpoint залипнет (R1) *)
          mark_failed coord i;
@@ -406,7 +411,7 @@ let run_exactly_once
     let e = !epoch in
     Atomic.set current_epoch e;
     Array.iteri (fun i ch ->
-      if not failed.(i) then ignore (Channel.try_push ch (Barrier e))) in_chans
+      if not (Atomic.get failed.(i)) then ignore (Channel.try_push ch (Barrier e))) in_chans
   in
   (* счётчик разосланных Data и запись data_count -> позиция в потоке.
      Ведём здесь (главный drive-поток), читаем в try_close под co_mu. *)
@@ -421,9 +426,9 @@ let run_exactly_once
      терять события (try_push роняет при полном канале). push даёт
      backpressure. Проверка failed чтобы не зависнуть на упавшем. *)
   let send_to i ch msg =
-    if not failed.(i) then
+    if not (Atomic.get failed.(i)) then
       if Channel.try_push ch msg then ()
-      else if not failed.(i) then Channel.push ch msg  (* блокируем = backpressure *)
+      else if not (Atomic.get failed.(i)) then Channel.push ch msg  (* блокируем = backpressure *)
   in
   let rec drive () =
     match source.pull () with
