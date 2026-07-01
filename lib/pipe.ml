@@ -107,6 +107,7 @@ let update_table (tbl : ('k, 'a) Hashtbl.t) ~(key : 'a -> 'k)
 let keyed_join
     (type a)
     (module K : Keyed.S with type t = a)
+    ?ttl
     (streams : a Mf_event.t Stream.t list)
     : (string * a option list) Mf_event.t Stream.t =
   let n = List.length streams in
@@ -126,6 +127,27 @@ let keyed_join
     in
     (* Состояние: per-key array длиной n с последними значениями. *)
     let states : (string, a option array) Hashtbl.t = Hashtbl.create 64 in
+    (* last_seen: ts последнего события на ключ — для опциональной
+       TTL-очистки (C-3). Без ttl states растёт без границ на
+       неограниченном пространстве ключей. С ttl ключ, не обновлявшийся
+       дольше [wm - ttl], удаляется при watermark: предполагается, что
+       join для него завершён и больше значений не придёт. По умолчанию
+       ttl = None → поведение прежнее (никакой очистки). *)
+    let last_seen : (string, Time.t) Hashtbl.t = Hashtbl.create 64 in
+    let touch key ts =
+      match ttl with None -> () | Some _ -> Hashtbl.replace last_seen key ts
+    in
+    let evict_before wm =
+      match ttl with
+      | None -> ()
+      | Some ttl ->
+        (* collect-then-remove: нельзя мутировать Hashtbl во время iter *)
+        let stale = Hashtbl.fold (fun k last acc ->
+          if last < wm - ttl then k :: acc else acc) last_seen [] in
+        List.iter (fun k ->
+          Hashtbl.remove states k;
+          Hashtbl.remove last_seen k) stale
+    in
     let get_or_init k =
       match Hashtbl.find_opt states k with
       | Some arr -> arr
@@ -143,9 +165,11 @@ let keyed_join
           let key = K.key v in
           let arr = get_or_init key in
           arr.(idx) <- Some v;
+          touch key ts;
           Queue.push (Mf_event.data (key, Array.to_list arr) ts) out_q;
           next ()
         | Some (Mf_event.Watermark wm) ->
+          evict_before wm;
           Some (Mf_event.wm wm)
         | Some (Mf_event.Retract ((idx, v), ts)) ->
           (* Retract обнуляет slot [idx] для ключа [K.key v] ТОЛЬКО
@@ -163,6 +187,7 @@ let keyed_join
           (match Hashtbl.find_opt states key with
            | Some arr when arr.(idx) = Some v ->
              arr.(idx) <- None;
+             touch key ts;
              Queue.push
                (Mf_event.data (key, Array.to_list arr) ts) out_q
            | _ ->
@@ -189,6 +214,7 @@ let keyed_join
           let new_key = K.key new_v in
           if old_key = new_key then begin
             let arr = get_or_init new_key in
+            touch new_key ts;
             (match arr.(old_idx) with
              | Some v when v = old_v ->
                (* old match'нулся; применяем атомарно — один snapshot *)
@@ -213,6 +239,8 @@ let keyed_join
                             (old_key, Array.to_list old_arr) ts) out_q
              | _ -> ());
             let new_arr = get_or_init new_key in
+            touch old_key ts;
+            touch new_key ts;
             new_arr.(new_idx) <- Some new_v;
             Queue.push (Mf_event.data
                          (new_key, Array.to_list new_arr) ts) out_q
