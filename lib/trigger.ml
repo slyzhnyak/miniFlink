@@ -223,6 +223,7 @@ end
 
 let of_stream
     (type k v a)
+    ?ttl
     (spec : (k, v, a) spec)
     (source : (k * v) Mf_event.t Stream.t)
   : a Mf_event.t Stream.t =
@@ -409,7 +410,26 @@ let of_stream
 
   let on_watermark wm =
     let due = Timers.pop_due timers ~wm in
-    List.iter on_timer due
+    List.iter on_timer due;
+    (* Опциональная TTL-очистка (A-1): без ttl states/last_event_ts
+       растут без границ на неограниченном пространстве ключей. С ttl
+       выселяем ключ, если он давно (дольше wm - ttl) не обновлялся И
+       находится в спокойном состоянии S_ok. Ключи в S_pending_problem /
+       S_problem / S_pending_ok НЕ трогаем: там sticky-алерт или
+       незавершённый переход с pending timer — их выселение потеряло бы
+       состояние. По умолчанию ttl = None → очистки нет (совместимость). *)
+    match ttl with
+    | None -> ()
+    | Some ttl ->
+      let stale = Hashtbl.fold (fun ks last acc ->
+        if last < wm - ttl then
+          match Hashtbl.find_opt states ks with
+          | Some (S_ok, _) -> ks :: acc   (* только спокойные ключи *)
+          | _ -> acc                       (* активные не выселяем *)
+        else acc) last_event_ts [] in
+      List.iter (fun ks ->
+        Hashtbl.remove states ks;
+        Hashtbl.remove last_event_ts ks) stale
   in
 
   let rec next () =
