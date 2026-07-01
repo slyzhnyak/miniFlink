@@ -50,6 +50,7 @@ let gen_events : string Mf_event.t list Gen.t =
           (5, key >>= fun k -> return (Mf_event.data k ts'));
           (2, return (Mf_event.wm ts'));
           (1, key >>= fun k -> return (Mf_event.retract k ts'));
+          (1, key >>= fun k -> return (Mf_event.update k (k ^ "'") ts'));
         ] >>= fun ev -> build (i+1) ts' (ev :: acc)
     in build 0 0 [])
 
@@ -59,7 +60,7 @@ let arb = make
     let nd = List.length (List.filter
       (function Mf_event.Data _ -> true | _ -> false) evs) in
     Printf.sprintf "n_data=%d workers=%d checkpoint_every=%d" nd w cp)
-  Gen.(triple gen_events (int_range 1 4) (int_range 1 20))
+  Gen.(triple gen_events (int_range 1 8) (int_range 1 20))
 
 let n_data evs =
   List.length (List.filter (function Mf_event.Data _ -> true | _ -> false) evs)

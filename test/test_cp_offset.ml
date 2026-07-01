@@ -61,17 +61,32 @@ let run_recovery_replay events n_expected label =
   (match CP.latest_checkpoint store with
    | None -> ()
    | Some cp ->
-     (* offset согласован со снапшотом: Data в префиксе = обработанные *)
+     (* Новый контракт (KI-1 fix, Chandy-Lamport): cp_offset = позиция
+        инжекта барьера, и снапшот покрывает ровно префикс [0, cp_offset).
+        Проверяем прямой инвариант: суммарное состояние в снапшоте =
+        число Data в префиксе. Раньше тут стояло data_in_prefix =
+        snap_processed — это держалось на старом контракте (offset
+        привязан к data-count через data_positions); с per-epoch
+        alignment offset больше не реконструируется из processed. *)
      let arr = Array.of_list events in
      let data_in_prefix =
        let c = ref 0 in
        for i = 0 to min cp.CP.cp_offset (Array.length arr) - 1 do
          (match arr.(i) with Mf_event.Data _ -> incr c | _ -> ())
        done; !c in
-     let snap_processed =
-       Array.fold_left (fun a s -> a + s.CP.processed) 0 cp.CP.cp_snapshots in
-     check (label ^ ": cp_offset согласован со снапшотом")
-       (data_in_prefix = snap_processed));
+     let snap_state =
+       Array.fold_left (fun a s ->
+         let b = s.CP.state in
+         (* снапшот воркера — Marshal его backend; считаем сумму значений *)
+         a + (let tmp = State_backend_memory.create () in
+              State_backend_memory.restore tmp b;
+              List.fold_left (fun acc k ->
+                match State_backend_memory.get tmp k with
+                | Some v -> acc + int_of_string (Bytes.to_string v)
+                | None -> acc) 0 (State_backend_memory.keys tmp)))
+         0 cp.CP.cp_snapshots in
+     check (label ^ ": снапшот покрывает ровно префикс [0, cp_offset)")
+       (snap_state = data_in_prefix));
   (* полный цикл recovery + replay = ровно n, без потерь/дублей *)
   let src2 = CP.seekable_of_list events in
   let backends = CP.recover ~workers:4

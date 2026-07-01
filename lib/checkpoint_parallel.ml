@@ -110,29 +110,44 @@ let checkpoint_count store =
 type coordinator = {
   workers   : int;
   store     : checkpoint_store;
-  pending   : worker_snapshot option array;
+  pending   : (epoch, worker_snapshot option array) Hashtbl.t;
+    (* Снапшоты буферизуются ПО ЭПОХАМ (закрытие KI-1). Раньше pending
+       был плоским массивом [worker -> snapshot], и когда быстрый воркер
+       успевал прислать снапшот эпохи e+1 до закрытия эпохи e, он
+       ЗАТИРАЛ снапшот эпохи e того же воркера — try_close затем смешивал
+       снапшоты разных эпох (брал epoch первого попавшегося). Теперь для
+       каждой эпохи своя ячейка [worker -> snapshot], и эпоха закрывается
+       строго когда собраны все живые воркеры ИМЕННО этой эпохи. *)
   alive     : bool array;        (* воркер ещё жив? упавших не ждём *)
   co_mu     : Mutex.t;
   co_done   : Condition.t;
-  data_positions : (int, offset) Hashtbl.t;
-    (* data_count -> позиция в потоке СРАЗУ ПОСЛЕ этого по счёту Data.
-       [data_positions.(k)] = source.position() в момент, когда
-       координатор разослал k-е Data-событие. cp_offset для чекпойнта
-       со снапшотом из N обработанных Data берётся как
-       data_positions.(N): это позиция в полном потоке (Data+WM+...),
-       соответствующая ровно N обработанным Data, поэтому offset
-       СОГЛАСОВАН со снапшотом независимо от того, сколько событий было
-       in-flight в момент инжекта барьера (см. §4.1). *)
+  epoch_positions : (epoch, offset) Hashtbl.t;
+    (* epoch -> позиция источника, ЗАФИКСИРОВАННАЯ в момент инжекта
+       барьера этой эпохи (Chandy-Lamport, закрытие KI-1).
+
+       Ключевая инвариантность: каналы FIFO, поэтому каждый воркер
+       обрабатывает ВСЕ Event эпохи e до того, как встретит Barrier(e) и
+       сделает снапшот. Значит объединённое состояние снапшотов эпохи e =
+       ровно префикс потока [0, epoch_positions[e]). Поэтому
+       cp_offset = epoch_positions[epoch] согласован со снапшотом
+       ТОЧНО — независимо от того, сколько Update/Retract/Watermark было
+       в потоке и насколько асинхронно воркеры достигли барьера.
+
+       Это заменило прежний data_positions (data_count -> offset), из-за
+       которого KI-1 и возникал: snap_processed считал только Data по
+       воркерам, а ключ строился по Data+Update в drive → рассинхрон на
+       смешанных потоках. Привязка к позиции инжекта убирает зависимость
+       от processed целиком. *)
 }
 
 let make_coordinator ~workers ~store = {
   workers;
   store;
-  pending = Array.make workers None;
+  pending = Hashtbl.create 8;
   alive   = Array.make workers true;
   co_mu   = Mutex.create ();
   co_done = Condition.create ();
-  data_positions = Hashtbl.create 16;
+  epoch_positions = Hashtbl.create 16;
 }
 
 (* Пометить воркера выбывшим (после краха) — определено ниже, после
@@ -143,53 +158,63 @@ let make_coordinator ~workers ~store = {
 (* Закрыть checkpoint если снапшоты пришли от всех ЖИВЫХ воркеров.
    Вызывается под co_mu из submit_snapshot и mark_failed. epoch берём
    из любого присланного снапшота. *)
-let try_close c =
-  let idxs = Array.init c.workers (fun i -> i) in
-  let all_alive_ready =
-    Array.for_all (fun i -> not c.alive.(i) || Option.is_some c.pending.(i)) idxs
-    && Array.exists (fun i -> c.alive.(i) && Option.is_some c.pending.(i)) idxs in
-  if all_alive_ready then begin
-    let snapshots =
-      Array.to_list c.pending
-      |> List.filteri (fun i _ -> c.alive.(i))
-      |> List.filter_map (fun x -> x)
-      |> Array.of_list in
-    let epoch = snapshots.(0).epoch in
-    (* snap_processed — число Data, реально вошедших в снапшот (сумма
-       processed по воркерам). cp_offset = позиция в потоке СРАЗУ ПОСЛЕ
-       snap_processed-го Data (из data_positions). Это согласует offset
-       со снапшотом: seek(cp_offset) при recovery встанет ровно туда,
-       где обработано snap_processed Data, и replay доиграет остаток без
-       потерь и дублей — независимо от того, сколько событий было
-       in-flight в момент инжекта барьера и есть ли watermark-и между
-       Data (см. §4.1). *)
-    let snap_processed =
-      Array.fold_left (fun a s -> a + s.processed) 0 snapshots in
-    let cp_offset =
-      if snap_processed = 0 then 0
-      else match Hashtbl.find_opt c.data_positions snap_processed with
+let try_close c epoch =
+  match Hashtbl.find_opt c.pending epoch with
+  | None -> ()  (* для этой эпохи ещё нет ни одного снапшота *)
+  | Some slots ->
+    let idxs = Array.init c.workers (fun i -> i) in
+    (* эпоха закрывается, когда КАЖДЫЙ живой воркер прислал снапшот
+       ИМЕННО этой эпохи (а не любой) *)
+    let all_alive_ready =
+      Array.for_all (fun i -> not c.alive.(i) || Option.is_some slots.(i)) idxs
+      && Array.exists (fun i -> c.alive.(i) && Option.is_some slots.(i)) idxs in
+    if all_alive_ready then begin
+      let snapshots =
+        Array.to_list slots
+        |> List.filteri (fun i _ -> c.alive.(i))
+        |> List.filter_map (fun x -> x)
+        |> Array.of_list in
+      (* cp_offset = позиция источника, зафиксированная в момент инжекта
+         барьера ЭТОЙ эпохи (Chandy-Lamport). FIFO-каналы гарантируют,
+         что снапшоты эпохи покрывают ровно префикс [0, cp_offset),
+         поэтому seek(cp_offset) при recovery встаёт точно на границу
+         снапшота, а replay доигрывает хвост без потерь и дублей — на
+         любых потоках (Data/Update/Retract/Watermark), при любом числе
+         воркеров и любой асинхронности достижения барьера. Вместе с
+         per-epoch буферизацией pending это закрывает KI-1.
+
+         processed в снапшотах больше НЕ участвует в offset (оставлен для
+         обратной совместимости тестов и диагностики). *)
+      let cp_offset =
+        match Hashtbl.find_opt c.epoch_positions epoch with
         | Some off -> off
-        | None -> snap_processed  (* подстраховка (не должно случаться) *)
-    in
-    (* Очистка: записи для data_count < snap_processed больше не нужны.
-       Следующий чекпойнт будет иметь snap_processed не меньше текущего
-       (число обработанных Data монотонно растёт), а recover читает
-       только latest_checkpoint. Без очистки data_positions рос бы на
-       каждое Data — утечка на long-running прогоне (4096 ламп). *)
-    Hashtbl.filter_map_inplace
-      (fun k v -> if k < snap_processed then None else Some v)
-      c.data_positions;
-    commit c.store { cp_epoch = epoch;
-                     cp_offset;
-                     cp_snapshots = snapshots };
-    Array.fill c.pending 0 c.workers None;
-    Condition.broadcast c.co_done
-  end
+        | None -> 0
+      in
+      Hashtbl.filter_map_inplace
+        (fun e v -> if e <= epoch then None else Some v)
+        c.epoch_positions;
+      commit c.store { cp_epoch = epoch;
+                       cp_offset;
+                       cp_snapshots = snapshots };
+      (* эта эпоха закрыта — убираем её буфер и все более ранние
+         (они уже не закроются: снапшоты для них не придут) *)
+      Hashtbl.filter_map_inplace
+        (fun e slots -> if e <= epoch then None else Some slots)
+        c.pending;
+      Condition.broadcast c.co_done
+    end
 
 let submit_snapshot c (snap : worker_snapshot) =
   with_mutex c.co_mu (fun () ->
-    c.pending.(snap.worker) <- Some snap;
-    try_close c)
+    let slots =
+      match Hashtbl.find_opt c.pending snap.epoch with
+      | Some s -> s
+      | None ->
+        let s = Array.make c.workers None in
+        Hashtbl.replace c.pending snap.epoch s; s
+    in
+    slots.(snap.worker) <- Some snap;
+    try_close c snap.epoch)
 
 (* Пометить воркера выбывшим (после краха). Координатор перестаёт ждать
    его снапшот; если он был последним недостающим — текущий checkpoint
@@ -197,8 +222,15 @@ let submit_snapshot c (snap : worker_snapshot) =
 let mark_failed c worker =
   with_mutex c.co_mu (fun () ->
     if worker < c.workers then c.alive.(worker) <- false;
-    c.pending.(worker) <- None;
-    try_close c)
+    (* воркер выбыл — убираем его слот из всех открытых эпох и пробуем
+       закрыть каждую (какая-то могла ждать только его снапшот). Копируем
+       список эпох, т.к. try_close мутирует c.pending. *)
+    let epochs = Hashtbl.fold (fun e _ acc -> e :: acc) c.pending [] in
+    List.iter (fun e ->
+      match Hashtbl.find_opt c.pending e with
+      | Some slots -> if worker < c.workers then slots.(worker) <- None
+      | None -> ()) epochs;
+    List.iter (fun e -> try_close c e) (List.sort compare epochs))
 
 (* Ждать коммита данного epoch (для теста/синхронизации) *)
 let wait_committed c ~epoch =
@@ -410,18 +442,19 @@ let run_exactly_once
     incr epoch;
     let e = !epoch in
     Atomic.set current_epoch e;
+    (* Зафиксировать позицию источника В МОМЕНТ инжекта барьера
+       (Chandy-Lamport, закрытие KI-1). Всё, что drive разослал до этого
+       момента, войдёт в снапшоты эпохи e (FIFO-каналы), всё после — нет.
+       Поэтому epoch_positions[e] = граница префикса, покрытого эпохой e. *)
+    Mutex.lock coord.co_mu;
+    Hashtbl.replace coord.epoch_positions e (source.position ());
+    Mutex.unlock coord.co_mu;
     Array.iteri (fun i ch ->
       if not (Atomic.get failed.(i)) then ignore (Channel.try_push ch (Barrier e))) in_chans
   in
-  (* счётчик разосланных Data и запись data_count -> позиция в потоке.
-     Ведём здесь (главный drive-поток), читаем в try_close под co_mu. *)
-  let data_count = ref 0 in
-  let record_data_position () =
-    incr data_count;
-    Mutex.lock coord.co_mu;
-    Hashtbl.replace coord.data_positions !data_count (source.position ());
-    Mutex.unlock coord.co_mu
-  in
+  (* since_checkpoint считает state-меняющие события (Data/Update) для
+     каденции барьеров. Позиция источника фиксируется в inject_barrier,
+     поэтому отдельного data_count -> position учёта больше не нужно. *)
   (* Блокирующая отправка живому воркеру: для exactly-once нельзя
      терять события (try_push роняет при полном канале). push даёт
      backpressure. Проверка failed чтобы не зависнуть на упавшем. *)
@@ -438,7 +471,6 @@ let run_exactly_once
        | Mf_event.Data (v, _) ->
          let shard = hash_key (key_of v) workers in
          send_to shard in_chans.(shard) (Event ev);
-         record_data_position ();
          incr since_checkpoint;
          if !since_checkpoint >= checkpoint_every then begin
            inject_barrier (); since_checkpoint := 0
@@ -455,7 +487,6 @@ let run_exactly_once
          (* Update шардируем по ключу new_value, как Data *)
          let shard = hash_key (key_of v) workers in
          send_to shard in_chans.(shard) (Event ev);
-         record_data_position ();
          incr since_checkpoint;
          if !since_checkpoint >= checkpoint_every then begin
            inject_barrier (); since_checkpoint := 0
