@@ -329,7 +329,12 @@ let window_fold
           Managed_state.iter state (fun (k,_,stop) st ->
             match st with FOpen (acc, true) -> emit_data k stop acc | _ -> ()
           );
-          Managed_state.iter state (fun k _ -> Managed_state.remove state k)
+          (* collect-then-remove: мутация Hashtbl во время iter — UB
+             (может пропускать записи). Собираем ключи, потом удаляем
+             отдельным проходом (тот же паттерн, что для to_remove выше). *)
+          let to_clear = ref [] in
+          Managed_state.iter state (fun k _ -> to_clear := k :: !to_clear);
+          List.iter (fun k -> Managed_state.remove state k) !to_clear
         end;
         if Queue.is_empty out then None else Some (Queue.pop out)
       | Some (Mf_event.Watermark wm) ->
