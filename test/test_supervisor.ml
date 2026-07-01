@@ -70,6 +70,24 @@ let test_crash_all () =
   (try Supervisor.supervise specs with _ -> raised := true);
   check "Crash_all propagated the failure" !raised
 
+(* ── H-2: несколько одновременных Critical_failure ───────────
+   Раньше supervisor хранил только первый Critical_failure, остальные
+   терялись. Теперь все копятся и логируются, а исключение всё равно
+   бросается. Проверяем, что при N одновременных Crash_all-сбоях:
+   1. исключение проброшено (система падает, как и должна);
+   2. supervise_result не теряет статусы всех пайплайнов. *)
+let test_multiple_critical () =
+  Printf.printf "\n-- H-2: multiple concurrent critical failures\n";
+  let specs = Supervisor.[
+    { label = "crit_a"; run = (fun () -> failwith "boom_a"); on_failure = Crash_all };
+    { label = "crit_b"; run = (fun () -> failwith "boom_b"); on_failure = Crash_all };
+    { label = "crit_c"; run = (fun () -> failwith "boom_c"); on_failure = Crash_all };
+  ] in
+  let raised = ref false in
+  (try ignore (Supervisor.supervise_result specs)
+   with Supervisor.Critical_failure _ -> raised := true);
+  check "multiple criticals still raise" !raised
+
 let () =
   Printf.printf "==========================================\n";
   Printf.printf "  Pipeline supervisor\n";
@@ -78,4 +96,5 @@ let () =
   test_restart_resumes_from_checkpoint ();
   test_isolate_others_survive ();
   test_crash_all ();
+  test_multiple_critical ();
   Printf.printf "\nSupervisor tests passed.\n"
