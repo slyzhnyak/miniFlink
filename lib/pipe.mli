@@ -85,9 +85,10 @@ val update_table :
 
 val keyed_join :
   (module Keyed.S with type t = 'a) ->
+  ?ttl:Time.t ->
   'a Mf_event.t Stream.t list ->
   (string * 'a option list) Mf_event.t Stream.t
-(** [keyed_join (module K) streams] объединяет [streams] (все одного
+(** [keyed_join (module K) ?ttl streams] объединяет [streams] (все одного
     типа ['a]) в один поток, где для каждого нового [Data]-события
     эмитится [(key, options)] — где [options] — список длины
     [List.length streams] с {b последними} значениями по каждому
@@ -107,6 +108,15 @@ val keyed_join :
       [Data(v=1), Data(v=2), Retract(v=2)], slot обнулится в [None]
       (а не вернётся к [Some 1]). Если нужна история и rollback —
       это другой use case, не покрывается {!keyed_join}.
+
+      {b Ограничение памяти (?ttl).} Без [?ttl] состояние per-key
+      хранится вечно — на неограниченном/ротирующем пространстве
+      ключей (сессии, композитные ключи со временем) это утечка.
+      С [?ttl] ключ, не получавший событий дольше [wm - ttl],
+      удаляется при watermark (join для него считается завершённым).
+      Для стабильного пространства ключей (например ~4096 ламп minePASS)
+      [?ttl] не обязателен. Значение по умолчанию — без очистки, для
+      обратной совместимости.
 
       {b Flicker через None при паре Retract+Data:}
       Когда upstream эмитит {e раздельную} пару [Retract(old)] +
