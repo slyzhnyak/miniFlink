@@ -50,23 +50,24 @@ let default = { mode = Ephemeral }
 
 (* Ambient-контекст хранится в Ctx_store — на OCaml 5 это
    domain-local (каждый домен свой контекст, без гонок), на OCaml 4 —
-   простой ref. Значение хранится как Obj.t (Ctx_store не знает наш
-   тип, чтобы не было цикла зависимостей); приведение скрыто здесь и
-   безопасно, потому что только этот модуль кладёт/читает ячейку. *)
+   простой ref. Ctx_store — функтор по типу ячейки, инстанцируем его
+   нашим типом [t], поэтому приведений через Obj больше нет (A-2). *)
+module Store = Ctx_store.Make (struct type nonrec t = t end)
+
 let get () : t =
-  match Ctx_store.get () with
-  | Some o -> (Obj.obj o : t)
+  match Store.get () with
+  | Some ctx -> ctx
   | None -> default
 
 let set_current (ctx : t) : unit =
-  Ctx_store.set (Some (Obj.repr ctx))
+  Store.set (Some ctx)
 
 (* Выполнить [f] с заданным контекстом, восстановив предыдущий после
    (в т.ч. при исключении). Вложенность поддерживается. *)
 let with_context ctx f =
-  let saved = Ctx_store.get () in        (* Obj.t option — сырое, без приведения *)
+  let saved = Store.get () in            (* t option — типизировано, без Obj *)
   set_current ctx;
-  Fun.protect ~finally:(fun () -> Ctx_store.set saved) f
+  Fun.protect ~finally:(fun () -> Store.set saved) f
 
 (* ── Конструкторы режимов ──────────────────────────────────── *)
 

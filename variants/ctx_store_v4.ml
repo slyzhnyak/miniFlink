@@ -1,12 +1,14 @@
 (* ============================================================
-   Ctx_store (v4) — простой [ref].
+   Ctx_store (v4) — простой [ref], функтор по типу ячейки.
 
    На OCaml 4 поток исполнения один (Thread кооперируются под GIL),
-   поэтому глобальная ячейка-[ref] безопасна. Это в точности прежнее
-   поведение Runtime_context до выделения хранилища.
-   ============================================================ *)
+   поэтому глобальная ячейка-[ref] безопасна. Тип ячейки — параметр
+   функтора [T.t], а не [Obj.t]: приведения не нужны (A-2). *)
 
-let cell : Obj.t option ref = ref None
+module type CELL = sig type t end
 
-let get () = !cell
-let set v = cell := v
+module Make (T : CELL) = struct
+  let cell : T.t option ref = ref None
+  let get () = !cell
+  let set v = cell := v
+end
