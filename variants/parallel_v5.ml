@@ -40,7 +40,12 @@ let run_parallel_simple
     () =
 
   let in_chans = Array.init workers (fun _ -> Channel.make_bounded capacity) in
-  let failed   = Array.make workers false in
+  (* failed[i] пишется из воркера i (Domain) и читается диспетчером
+     (главный Domain). На OCaml 5 это разные домены без общего lock, поэтому
+     обычный bool array дал бы data race (UB по модели памяти): читатель мог
+     бы видеть устаревшее значение и слать события мёртвому воркеру. Atomic
+     даёт happens-before и корректную видимость между доменами. *)
+  let failed   = Array.init workers (fun _ -> Atomic.make false) in
 
   let mu_sink = Mutex.create () in
   let worker_sink = match sink_factory with
@@ -59,7 +64,7 @@ let run_parallel_simple
          let src = Channel.to_stream in_chans.(i) in
          pipeline src |> Pipe.sink my_sink
        with e ->
-         failed.(i) <- true;
+         Atomic.set failed.(i) true;
          Channel.close in_chans.(i);
          Printf.eprintf "[parallel] worker %d crashed: %s\n%!"
            i (Printexc.to_string e))
@@ -79,7 +84,7 @@ let run_parallel_simple
     match ev with
     | Mf_event.Data (v,_) ->
       let shard = hash_key (key_of v) workers in
-      if not failed.(shard) then begin
+      if not (Atomic.get failed.(shard)) then begin
         (* try_push спинит при полном канале (backpressure) и вернёт
            false только если воркер УПАЛ (канал закрыт) — тогда событие
            его шарда обработать некем; логируем, а не глотаем молча *)
@@ -89,17 +94,17 @@ let run_parallel_simple
       report_depth ()
     | Mf_event.Watermark _ ->
       Array.iteri (fun i ch ->
-        if not failed.(i) then ignore (Channel.try_push ch ev)) in_chans
+        if not (Atomic.get failed.(i)) then ignore (Channel.try_push ch ev)) in_chans
     | Mf_event.Retract (v,_) ->
       (* ретракт шардируем по ключу как Data — иначе он терялся бы и
          retract-семантика расходилась бы с однопоточным путём *)
       let shard = hash_key (key_of v) workers in
-      if not failed.(shard) then
+      if not (Atomic.get failed.(shard)) then
         ignore (Channel.try_push in_chans.(shard) ev)
     | Mf_event.Update { new_value = v; _ } ->
       (* Update шардируем по ключу new_value, как Data. *)
       let shard = hash_key (key_of v) workers in
-      if not failed.(shard) then
+      if not (Atomic.get failed.(shard)) then
         ignore (Channel.try_push in_chans.(shard) ev);
       report_depth ()
   ) source;
