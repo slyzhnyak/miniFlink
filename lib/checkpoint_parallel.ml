@@ -119,6 +119,16 @@ type coordinator = {
        каждой эпохи своя ячейка [worker -> snapshot], и эпоха закрывается
        строго когда собраны все живые воркеры ИМЕННО этой эпохи. *)
   alive     : bool array;        (* воркер ещё жив? упавших не ждём *)
+  mutable crash_epoch : epoch option;
+    (* Эпоха, в которой упал первый воркер (M-3). Checkpoint'ы эпох
+       СТРОГО МЕНЬШЕ crash_epoch валидны (в них все воркеры были живы и
+       дали снапшот) и коммитятся нормально. Эпохи >= crash_epoch
+       неполны (упавший воркер их не завершит) и НЕ коммитятся; их
+       буферы sink откатываются, и весь этот хвост переигрывается при
+       recovery с последнего валидного checkpoint. Это чинит
+       недетерминированную частичную потерю выходов живых воркеров,
+       когда ts_abort упавшего сносил общий буфер эпохи. None = крахов
+       не было. *)
   co_mu     : Mutex.t;
   co_done   : Condition.t;
   epoch_positions : (epoch, offset) Hashtbl.t;
@@ -145,6 +155,7 @@ let make_coordinator ~workers ~store = {
   store;
   pending = Hashtbl.create 8;
   alive   = Array.make workers true;
+  crash_epoch = None;
   co_mu   = Mutex.create ();
   co_done = Condition.create ();
   epoch_positions = Hashtbl.create 16;
@@ -159,6 +170,10 @@ let make_coordinator ~workers ~store = {
    Вызывается под co_mu из submit_snapshot и mark_failed. epoch берём
    из любого присланного снапшота. *)
 let try_close c epoch =
+  (* после краха коммитим только эпохи строго меньше эпохи краха (M-3) *)
+  match c.crash_epoch with
+  | Some ce when epoch >= ce -> ()
+  | _ ->
   match Hashtbl.find_opt c.pending epoch with
   | None -> ()  (* для этой эпохи ещё нет ни одного снапшота *)
   | Some slots ->
@@ -219,18 +234,28 @@ let submit_snapshot c (snap : worker_snapshot) =
 (* Пометить воркера выбывшим (после краха). Координатор перестаёт ждать
    его снапшот; если он был последним недостающим — текущий checkpoint
    закрывается по оставшимся живым. *)
-let mark_failed c worker =
+let mark_failed c worker crash_epoch =
   with_mutex c.co_mu (fun () ->
     if worker < c.workers then c.alive.(worker) <- false;
-    (* воркер выбыл — убираем его слот из всех открытых эпох и пробуем
-       закрыть каждую (какая-то могла ждать только его снапшот). Копируем
-       список эпох, т.к. try_close мутирует c.pending. *)
+    (* M-3: фиксируем эпоху краха (первую). Эпохи < crash_epoch валидны
+       (все воркеры были живы), эпохи >= crash_epoch неполны. Обновляем
+       alive-слоты открытых валидных эпох (< crash_epoch) без упавшего и
+       пробуем их закрыть — какая-то могла ждать только его снапшот, а
+       для валидной эпохи он БЫЛ отправлен до краха. Эпохи >= crash_epoch
+       try_close сам не закроет. Будим committer. *)
+    let ce = match c.crash_epoch with
+      | Some e -> min e crash_epoch  (* самый ранний краш *)
+      | None -> crash_epoch in
+    c.crash_epoch <- Some ce;
     let epochs = Hashtbl.fold (fun e _ acc -> e :: acc) c.pending [] in
     List.iter (fun e ->
-      match Hashtbl.find_opt c.pending e with
-      | Some slots -> if worker < c.workers then slots.(worker) <- None
-      | None -> ()) epochs;
-    List.iter (fun e -> try_close c e) (List.sort compare epochs))
+      if e < ce then
+        match Hashtbl.find_opt c.pending e with
+        | Some slots -> if worker < c.workers then slots.(worker) <- None
+        | None -> ()) epochs;
+    List.iter (fun e -> try_close c e)
+      (List.sort compare (List.filter (fun e -> e < ce) epochs));
+    Condition.broadcast c.co_done)
 
 (* Ждать коммита данного epoch (для теста/синхронизации) *)
 let wait_committed c ~epoch =
@@ -372,32 +397,42 @@ let run_exactly_once
   (* ── Воркеры ──────────────────────────────────────────── *)
   let worker_threads = Array.init workers (fun i ->
     Thread.create (fun () ->
+      (* локальная эпоха воркера (см. ниже) — вне try, чтобы crash-хендлер
+         мог откатить незакоммиченную эпоху этого воркера *)
+      let my_epoch = ref 1 in
       (try
          let backend = make_state () in
          let processed = ref 0 in
+         (* Локальная эпоха воркера: выход события принадлежит эпохе,
+            чей Barrier придёт ПОСЛЕ него в ЭТОМ канале (FIFO). Раньше
+            воркер брал глобальный current_epoch, который drive убегал
+            вперёд → выходы попадали в БОЛЕЕ ПОЗДНЮЮ эпоху, чем та, что их
+            снапшотит. Без краха это скрывал финальный ts_flush; при крахе
+            (M-3) хвост абортился и выходы терялись. Локальный счётчик по
+            барьерам своего канала чинит это в корне. *)
          let rec loop () =
            match Channel.pop in_chans.(i) with
            | None -> ()
            | Some (Event ev) ->
-             let e = Atomic.get current_epoch in
              let outs = process backend ev in
              (match ev with Mf_event.Data _ -> incr processed | _ -> ());
-             List.iter (fun o -> sink.ts_write e o) outs;
+             List.iter (fun o -> sink.ts_write !my_epoch o) outs;
              loop ()
            | Some (Barrier epoch) ->
              let state = State_backend_memory.snapshot backend in
              submit_snapshot coord
                { worker = i; epoch; state; processed = !processed };
+             my_epoch := epoch + 1;  (* следующие выходы — уже след. эпоха *)
              loop ()
          in loop ()
        with e ->
          Atomic.set failed.(i) true;
          (* сообщаем координатору что воркер выбыл — иначе он будет
             ждать снапшот мёртвого и checkpoint залипнет (R1) *)
-         mark_failed coord i;
+         mark_failed coord i !my_epoch;
          Channel.close in_chans.(i);
-         (* Откатываем незакоммиченные выходы текущего epoch этого воркера *)
-         sink.ts_abort (Atomic.get current_epoch);
+         (* Откатываем незакоммиченные выходы текущей эпохи ЭТОГО воркера *)
+         sink.ts_abort !my_epoch;
          Log.error ~fields:[("worker", string_of_int i);
                             ("error", Printexc.to_string e)]
            "checkpoint worker crashed")
@@ -512,8 +547,20 @@ let run_exactly_once
     then (Option.get (latest_checkpoint store)).cp_epoch else 0 in
   for e = !committed_upto + 1 to final do on_committed e done;
   (* Штатное завершение: опубликовать хвост (события после последнего
-     checkpoint). Для идемпотентного sink — no-op. *)
-  sink.ts_flush ()
+     checkpoint). Для идемпотентного sink — no-op.
+
+     НО при крахе (M-3) хвостовые буферы НЕ публикуем: эпохи после
+     последнего валидного checkpoint неполны (упавший воркер не завершил
+     их), и весь этот хвост переиграется при recovery. Публикация здесь
+     дала бы недетерминированные частичные выходы живых воркеров.
+     Откатываем все незакоммиченные эпохи вместо flush. *)
+  if coord.crash_epoch <> None then
+    (* откат: буферы незакоммиченных эпох (>= эпохи краха) отбрасываются.
+       Весь этот хвост переиграется при recovery с последнего валидного
+       checkpoint. *)
+    (for e = final + 1 to !epoch do sink.ts_abort e done)
+  else
+    sink.ts_flush ()
 
 (* ── Восстановление ───────────────────────────────────────── *)
 

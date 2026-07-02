@@ -751,3 +751,11 @@
  (libraries miniflink test_support qcheck-core qcheck-core.runner qcheck)
  (flags (:standard -w +a-4-26-27-32-33-37-39-40-41-42-44-45-70))
  (modules test_prop_count_sliding))
+
+
+
+(test
+ (name test_m3_crash_commit)
+ (libraries miniflink)
+ (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
+ (modules test_m3_crash_commit))
