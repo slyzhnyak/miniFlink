@@ -50,6 +50,13 @@ val is_data : 'a t -> bool
     изменений. Для [Update] применяется к обоим — [old] и [new_value]. *)
 val map_value : ('a -> 'b) -> 'a t -> 'b t
 
+(** Как {!map_value}, но функция видит и timestamp события. Вид события
+    (Data/Retract/Update/Watermark) сохраняется; watermark — без
+    изменений; для [Update] оба значения ([old] и [new_value])
+    маппятся с общим временем события. Нужна, когда конструируемое
+    значение зависит от времени (например конец окна как поле записи). *)
+val map_ts : ('a -> Time.t -> 'b) -> 'a t -> 'b t
+
 (** [with_watermarks_ext ~latency ?interval src] вставляет watermarks
     [max_seen - latency] в поток.
     - [~latency] — допуск на опоздание (насколько событие может прийти

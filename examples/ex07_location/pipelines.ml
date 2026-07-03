@@ -139,24 +139,12 @@ let median_rssi
                    match med with Some m -> Some (b, m) | None -> None)
               |> Agg.run (top_k_by 2 ~by:snd)))
   (* window_agg_keyed эмитит (Data (lamp, top2)) с ts=конец окна.
-     Преобразуем в Location, сохраняя event-time + считаем позицию. *)
-  |> (fun stream ->
-       let build_loc lamp top2 wend =
-         { loc_lamp = lamp; loc_wend = wend; loc_top2 = top2;
-           loc_position = interpolate_position ~find_beacon top2 } in
-       let rec out () =
-         match stream () with
-         | None -> None
-         | Some (Mf_event.Data ((lamp, top2), wend)) ->
-           Some (Mf_event.Data (build_loc lamp top2 wend, wend))
-         | Some (Mf_event.Retract ((lamp, top2), wend)) ->
-           Some (Mf_event.Retract (build_loc lamp top2 wend, wend))
-         | Some (Mf_event.Update { old = (l1, t1); new_value = (l2, t2); ts }) ->
-           let old_loc = build_loc l1 t1 ts in
-           let new_loc = build_loc l2 t2 ts in
-           Some (Mf_event.update old_loc new_loc ts)
-         | Some (Mf_event.Watermark wm) -> Some (Mf_event.Watermark wm)
-       in out)
+     map_ts даёт доступ к ts (концу окна) прямо в конструкторе Location,
+     сохраняя вид события (Data/Retract/Update) — раньше здесь был
+     ручной разбор всех четырёх конструкторов (закрытый разрыв G-1). *)
+  |> Pipe.map_ts (fun (lamp, top2) wend ->
+       { loc_lamp = lamp; loc_wend = wend; loc_top2 = top2;
+         loc_position = interpolate_position ~find_beacon top2 })
 
 (** {1 Контроль состояния шахтёра: 3 слоя + 4 FSM} *)
 

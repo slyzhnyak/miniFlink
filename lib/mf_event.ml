@@ -40,6 +40,16 @@ let map_value f = function
     Update { old = f old; new_value = f new_value; ts }
   | Watermark _ as w -> w
 
+(* Как map_value, но f видит и timestamp события. Структура события
+   (Data/Retract/Update/Watermark) сохраняется. Для Update оба значения
+   маппятся с общим ts события. Watermark проходит без изменений. *)
+let map_ts f = function
+  | Data    (v, t) -> Data    (f v t, t)
+  | Retract (v, t) -> Retract (f v t, t)
+  | Update { old; new_value; ts } ->
+    Update { old = f old ts; new_value = f new_value ts; ts }
+  | Watermark _ as w -> w
+
 (* ── Watermark стратегия ──────────────────────────────────────
    wm = max_seen - latency, но эмитим не на каждый максимум, а:
    - когда watermark продвинулся минимум на ~interval (по event-time),
