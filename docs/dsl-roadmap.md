@@ -21,15 +21,15 @@
       `ctx.emit_update : old:'out -> 'out -> unit` в process_keyed ctx
       (Process_fn). Существующий `emit` не трогаем — обратная
       совместимость.
-- [ ] **P1.3 / E-4** Валидация Time/int-параметров на входе публичных
+- [x] **P1.3 / E-4** (готово, 4c86172) Валидация Time/int-параметров на входе публичных
       конструкторов: `event_time ~lateness<0`, `dedup ~cooldown<0`,
       `keyed_join ~ttl<=0`, `Trigger.of_stream ~ttl<=0`,
       `run_exactly_once ~workers<=0 / ~capacity<=0 / ~checkpoint_every<=0`.
       `invalid_arg` с именем параметра, как уже сделано в окнах.
-- [ ] **P1.4 / E-5** Doc-предупреждения «⚠ бесконечный поток = вечный
+- [x] **P1.4 / E-5** (готово, c4f8c1c) Doc-предупреждения «⚠ бесконечный поток = вечный
       цикл» на все дренящие потребители: `collect`, `Stream.to_list`,
       `materialize`, `fold_data`, `count_data`.
-- [ ] **P1.5 / E-1** Warning «окно без watermark»: оконный оператор при
+- [x] **P1.5 / E-1** (готово, eafb7d1) Warning «окно без watermark»: оконный оператор при
       N=10000 событий без единого Watermark логирует один раз
       `Log.warn "окно не получило ни одного watermark — забыт
       Pipe.event_time?"`. Главный тихий footgun.
