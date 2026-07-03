@@ -10,6 +10,7 @@
 (* ── Lift: применить функцию к значению события ─────────── *)
 
 let emap  f = Stream.map   (Mf_event.map_value f)
+let emap_ts f = Stream.map (Mf_event.map_ts f)
 (* Фильтр с корректной семантикой Update/Retract.
 
    Простой Stream.filter не годится для Update/Retract, потому что
@@ -411,6 +412,7 @@ let dedup
 (* ── Map / Filter / FlatMap ───────────────────────────────── *)
 
 let map      = emap
+let map_ts   = emap_ts
 
 (* event_time: пометить поток для обработки по event-time с допуском
    [lateness] на опоздание (псевдоним Mf_event.with_watermarks с

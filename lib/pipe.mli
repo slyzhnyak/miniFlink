@@ -15,6 +15,13 @@
     без изменений. *)
 val map : ('a -> 'b) -> 'a Mf_event.t Stream.t -> 'b Mf_event.t Stream.t
 
+(** Как {!map}, но функция получает и timestamp события. Удобно, когда
+    конструируемое значение зависит от времени (например конец окна как
+    поле выходной записи). Вид события сохраняется, watermark проходит
+    без изменений. Убирает необходимость вручную разбирать поток по
+    конструкторам ради доступа к [ts]. *)
+val map_ts : ('a -> Time.t -> 'b) -> 'a Mf_event.t Stream.t -> 'b Mf_event.t Stream.t
+
 val event_time : lateness:Time.t -> 'a Mf_event.t Stream.t -> 'a Mf_event.t Stream.t
 (** Пометить поток для обработки по event-time с допуском [lateness] на
     опоздание. Доменный псевдоним {!Mf_event.with_watermarks}: окна
