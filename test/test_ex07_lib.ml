@@ -85,4 +85,23 @@ let () =
   check "Fsm.contact_state pure & callable"
     (Pipelines.Fsm.contact_state ~now:100 seen = Pipelines.Fsm.Contact_ok);
 
+  (* Газовый пайплайн (переписан на co_process3) — проверяем, что
+     retract-семантика работает end-to-end: есть алерты И есть
+     Retract/Update (алерты отзываются/обновляются). *)
+  let gas_events =
+    let gas = Src.read_gas () in
+    let rssi = Src.read () in
+    let locs = Src.read () |> Pipelines.median_rssi in
+    Pipelines.gas_alerts ~rssi ~locations:locs ~gas ()
+    |> Stream.to_list in
+  let gas_data = List.filter (function
+    | Mf_event.Data (Domain.Gas_alert _, _) -> true | _ -> false) gas_events in
+  let gas_retracts = List.filter (function
+    | Mf_event.Retract _ -> true | _ -> false) gas_events in
+  let gas_updates = List.filter (function
+    | Mf_event.Update _ -> true | _ -> false) gas_events in
+  check "gas_alerts produces Gas_alert" (List.length gas_data > 0);
+  check "gas_alerts uses retract-семантику (Retract или Update есть)"
+    (List.length gas_retracts > 0 || List.length gas_updates > 0);
+
   Printf.printf "\nLibrary reusable from external test ✓\n"

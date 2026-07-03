@@ -374,18 +374,6 @@ let connectivity_alerts (source : packet Mf_event.t Stream.t)
    side input. В state помним последнюю позицию + активные алерты.
    ════════════════════════════════════════════════════════════════ *)
 
-(** Union-тип входа газового пайплайна. *)
-type gas_input =
-  | Position_from_window of location
-    (** Точная позиция из закрытого RSSI окна — отстаёт от реального
-        времени, но точнее (медиана RSSI 60-секундного окна). *)
-  | Position_from_raw of packet
-    (** Грубая позиция от raw RSSI-пакета — обновляется мгновенно
-        каждые 15с, точность хуже (один маяк). Нужна чтобы первые
-        газовые алерты УЖЕ имели координаты, не дожидаясь окна. *)
-  | Gas of gas_packet
-    (** Газовый пакет — driver. По нему мы решаем эмитить alert или нет. *)
-
 (** State per шахтёра: последняя известная позиция + активные алерты
     (по одному на (gas) пока шахтёр в опасной зоне). *)
 type gas_state = {
@@ -496,25 +484,20 @@ let refresh_alerts_for_new_position
   ) st.active;
   List.rev !to_emit
 
-module ByGasInputLamp = Keyed.Make (struct
-  type t = gas_input
-  let key = function
-    | Position_from_window l -> l.loc_lamp
-    | Position_from_raw p    -> p.lamp
-    | Gas g                  -> g.g_lamp
-end)
-
 (** Основной газовый пайплайн.
 
-    Три входа сливаются в один union-stream по event-time. Затем сами
-    держим Hashtbl<lamp, gas_state> и для каждого Data-события из
-    union производим список Mf_event'ов (Data/Retract) для эмиссии.
+    Три входа (позиция из окна, позиция из raw-пакета, показания газа)
+    co-обрабатываются на общем per-lamp состоянии через
+    {!Pipe.co_process3}. Каждый обработчик эмитит готовые события
+    (Data/Retract/Update) через [ctx.emit_event] — retract-семантика
+    (алерт отзывается при возврате к норме, обновляется атомарным Update
+    при смене позиции) выражается прямо в DSL.
 
-    process_keyed не подходит здесь: его ctx.emit ожидает только
-    значение (не Mf_event), и мы не можем эмитить retract'ы. Делаем
-    руками — это нормально для нестандартной retract-семантики.
+    Исторически этот пайплайн был написан вручную (union-тег + свой
+    Hashtbl + Queue + pull-цикл), потому что ctx.emit умел только
+    значения; разрывы G-4/G-5 закрыты (emit_event + co_process3).
 
-    [?find_beacon] — для расчёта грубой позиции из Position_from_raw
+    [?find_beacon] — для расчёта грубой позиции из raw-пакета
     (single-beacon fallback). Default — {!Domain.beacon_coords}. *)
 let gas_alerts
     ?(find_beacon = Domain.beacon_coords)
@@ -522,72 +505,39 @@ let gas_alerts
     ~(locations : location Mf_event.t Stream.t)
     ~(gas : gas_packet Mf_event.t Stream.t)
     () : gas_alert Mf_event.t Stream.t =
-  (* Маппим каждый входной поток в union-тип *)
-  let s_loc =
-    locations |> Pipe.map (fun l -> Position_from_window l) in
-  let s_raw =
-    rssi |> Pipe.map (fun p -> Position_from_raw p) in
-  let s_gas =
-    gas |> Pipe.map (fun g -> Gas g) in
-  (* Union трёх потоков: align watermarks (min) автоматически *)
-  let unioned = Mf_event.union (Mf_event.union s_loc s_raw) s_gas in
-  (* Per-lamp state и outbound буфер *)
-  let states : (string, gas_state) Hashtbl.t = Hashtbl.create 64 in
-  let get_or_create lamp =
-    match Hashtbl.find_opt states lamp with
-    | Some st -> st
-    | None ->
-      let st = make_gas_state () in
-      Hashtbl.add states lamp st;
-      st
-  in
-  let out_buf : gas_alert Mf_event.t Queue.t = Queue.create () in
-  let process_input = function
-    | Position_from_window loc ->
-      (match loc.loc_position with
-       | None -> ()
-       | Some _ as new_pos ->
-         let st = get_or_create loc.loc_lamp in
-         if new_pos <> st.position then begin
-           st.position <- new_pos;
-           List.iter (fun ev -> Queue.push ev out_buf)
-             (refresh_alerts_for_new_position st loc.loc_lamp loc.loc_wend)
-         end)
-    | Position_from_raw pkt ->
-      let st = get_or_create pkt.lamp in
-      (match st.position, single_beacon_position ~find_beacon pkt.readings with
-       | None, (Some _ as new_pos) ->
-         st.position <- new_pos;
-         List.iter (fun ev -> Queue.push ev out_buf)
-           (refresh_alerts_for_new_position st pkt.lamp pkt.ts)
-       | _ -> ())
-    | Gas g ->
-      let st = get_or_create g.g_lamp in
+  (* co_process3 объединяет три разнотипных входа на общем per-lamp
+     состоянии (закрытый разрыв G-5). Раньше здесь были ~90 строк
+     ручного каркаса: union-тег, свой Hashtbl состояний, Queue, pull-цикл
+     по четырём конструкторам. Теперь — три доменных обработчика, каждый
+     эмитит готовые события через ctx.emit_event (helper'ы возвращают
+     gas_alert Mf_event.t list с Data/Retract/Update). *)
+  let emit_all ctx evs = List.iter ctx.Pipe.emit_event evs in
+  Pipe.co_process3
+    ~init:make_gas_state
+    ~key_a:(fun (l : location) -> l.loc_lamp)
+    ~key_b:(fun (p : packet) -> p.lamp)
+    ~key_c:(fun (g : gas_packet) -> g.g_lamp)
+    (* A: позиция из окна медианы RSSI *)
+    ~on_a:(fun ctx _lamp st loc ->
+      match loc.loc_position with
+      | None -> ()
+      | Some _ as new_pos ->
+        if new_pos <> st.position then begin
+          st.position <- new_pos;
+          emit_all ctx
+            (refresh_alerts_for_new_position st loc.loc_lamp loc.loc_wend)
+        end)
+    (* B: позиция из одиночного маяка raw-пакета (только если позиции ещё нет) *)
+    ~on_b:(fun ctx _lamp st pkt ->
+      match st.position, single_beacon_position ~find_beacon pkt.readings with
+      | None, (Some _ as new_pos) ->
+        st.position <- new_pos;
+        emit_all ctx
+          (refresh_alerts_for_new_position st pkt.lamp pkt.ts)
+      | _ -> ())
+    (* C: показания газа → алерты/резолвы/апдейты *)
+    ~on_c:(fun ctx _lamp st g ->
       gases_in_packet g
       |> List.iter (fun (gas_id, ppm) ->
-           List.iter (fun ev -> Queue.push ev out_buf)
-             (process_one_gas st g.g_lamp g.g_ts gas_id ppm))
-  in
-  (* Возвращаем stream: на каждом pull сначала отдаём накопленное в
-     out_buf, иначе подтягиваем следующее из upstream и обрабатываем. *)
-  let rec next () =
-    if not (Queue.is_empty out_buf) then Some (Queue.pop out_buf)
-    else
-      match unioned () with
-      | None -> None
-      | Some (Mf_event.Watermark wm) ->
-        (* watermark прокидываем как есть — газовый поток должен иметь
-           правильный wm для downstream *)
-        Some (Mf_event.Watermark wm)
-      | Some (Mf_event.Retract _) ->
-        (* Retract из upstream — пропускаем (нам нужны только Data) *)
-        next ()
-      | Some (Mf_event.Update { new_value = input; _ }) ->
-        (* Update — атомарная коррекция; обрабатываем new_value как Data *)
-        process_input input;
-        next ()
-      | Some (Mf_event.Data (input, _ts)) ->
-        process_input input;
-        next ()
-  in
-  next
+           emit_all ctx (process_one_gas st g.g_lamp g.g_ts gas_id ppm)))
+    locations rssi gas

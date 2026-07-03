@@ -498,6 +498,10 @@ type 'out ctx = 'out Process_fn.ctx = {
   emit_update             : old:'out -> 'out -> unit;
   (** эмитить атомарный [Update] [old]→new: downstream видит коррекцию за
       один шаг, без промежуточного None-flicker. *)
+  emit_event              : 'out Mf_event.t -> unit;
+  (** эмитить уже готовое событие (Data/Retract/Update/Watermark) с его
+      собственным временем — когда доменная функция возвращает список
+      [Mf_event.t] (см. ex07 gas_alerts). *)
   set_event_timer         : Time.t -> unit;
   (** идентичность таймера — пара (ключ, время); повторный set на то
       же время идемпотентен, cancel снимает всю запись. Полная семантика
@@ -534,3 +538,49 @@ val process_keyed :
 val process_keyed_spec :
   ('a, 'st, 'out) Process_fn.spec ->
   'a Mf_event.t Stream.t -> 'out Mf_event.t Stream.t
+
+(** {3 co_process — keyed-обработка нескольких разнотипных потоков}
+
+    Co-обработка потоков разных типов на ОБЩЕМ per-key состоянии
+    (разрыв G-5). «Driver + side inputs на одном ключе» (позиция из
+    окна + позиция из raw-пакета + показания газа → алерты на лампу)
+    раньше требовал ручного union-тега, своего Hashtbl состояний,
+    Queue и pull-цикла. co_process2/3 строится поверх {!process_keyed}:
+    входы объединяются union'ом (watermark = min по входам), а
+    обработчики [on_a]/[on_b]/[on_c] диспетчеризуются по источнику,
+    получая общий {!ctx} (доступны [emit], [emit_retract], [emit_update]).
+
+    [key_a]/[key_b]/[...] извлекают общий строковый ключ из каждого
+    входа — по нему шардируется состояние. *)
+
+type ('a, 'b) either2 = L2 of 'a | R2 of 'b
+type ('a, 'b, 'c) either3 = L3 of 'a | M3 of 'b | R3 of 'c
+
+val co_process2 :
+  ?now_ms:(unit -> int) ->
+  ?name:string ->
+  init:(unit -> 'st) ->
+  key_a:('a -> string) ->
+  key_b:('b -> string) ->
+  on_a:('out ctx -> string -> 'st -> 'a -> unit) ->
+  on_b:('out ctx -> string -> 'st -> 'b -> unit) ->
+  ?on_timer:('out ctx -> string -> 'st -> Time.t -> timer_kind -> unit) ->
+  'a Mf_event.t Stream.t ->
+  'b Mf_event.t Stream.t ->
+  'out Mf_event.t Stream.t
+
+val co_process3 :
+  ?now_ms:(unit -> int) ->
+  ?name:string ->
+  init:(unit -> 'st) ->
+  key_a:('a -> string) ->
+  key_b:('b -> string) ->
+  key_c:('c -> string) ->
+  on_a:('out ctx -> string -> 'st -> 'a -> unit) ->
+  on_b:('out ctx -> string -> 'st -> 'b -> unit) ->
+  on_c:('out ctx -> string -> 'st -> 'c -> unit) ->
+  ?on_timer:('out ctx -> string -> 'st -> Time.t -> timer_kind -> unit) ->
+  'a Mf_event.t Stream.t ->
+  'b Mf_event.t Stream.t ->
+  'c Mf_event.t Stream.t ->
+  'out Mf_event.t Stream.t
