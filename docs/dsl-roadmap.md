@@ -45,11 +45,11 @@
 - [x] **P2.3 / G-3** (готово, eb418c6) `Pipe.single_timer` (или helper в Process_fn):
       «один логический таймер на ключ с переносом цели на ближайший
       дедлайн» — вынести из ex07 (Self_timer) в библиотеку.
-- [ ] **P2.4 / E-3** `?on_error:(`Dlq of Dlq_log.t | `Propagate)` для
+- [x] **P2.4 / E-3** (готово, cd821d0) `?on_error:(`Dlq of Dlq_log.t | `Propagate)` для
       process_keyed и window_fold. Default `Propagate` (текущее
       поведение). Мотивация: после M-3 ядовитое событие в exactly-once =
       вечный цикл crash-recovery-crash.
-- [ ] **P2.5 / E-2** Док-блок про min-семантику watermark в union +
+- [x] **P2.5 / E-2** (готово, 2ab6156) Док-блок про min-семантику watermark в union +
       idle; опционально шорткат `union ~idle_timeout`.
 
 ## P3 — крупный дизайн, отдельное обсуждение перед реализацией
