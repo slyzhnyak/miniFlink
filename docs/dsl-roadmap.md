@@ -12,12 +12,12 @@
 
 ## P1 — дёшево, закрывает видимые дыры (одна сессия)
 
-- [ ] **P1.1 / G-1** `Pipe.map_ts : ('a -> Time.t -> 'b) -> 'a Mf_event.t Stream.t -> 'b Mf_event.t Stream.t`
+- [x] **P1.1 / G-1** (готово, f05f518) `Pipe.map_ts : ('a -> Time.t -> 'b) -> 'a Mf_event.t Stream.t -> 'b Mf_event.t Stream.t`
       — map с доступом к timestamp, структура событий
       (Data/Retract/Update/Watermark) сохраняется библиотекой.
       Сразу же: переписать хвост `median_rssi` в ex07 на него
       (убирает 18-строчный ручной цикл, pipelines.ml:143-160).
-- [ ] **P1.2 / G-4** `ctx.emit_retract : 'out -> unit` и
+- [x] **P1.2 / G-4** (готово, 155a8ca) `ctx.emit_retract : 'out -> unit` и
       `ctx.emit_update : old:'out -> 'out -> unit` в process_keyed ctx
       (Process_fn). Существующий `emit` не трогаем — обратная
       совместимость.
