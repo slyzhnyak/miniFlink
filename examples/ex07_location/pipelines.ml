@@ -218,22 +218,9 @@ module Last_seen = struct
     if sos_pressed then `Sos_pressed else `Quiet
 end
 
-(** ─── Layer 2: Self_timer — один логический таймер на ключ ──── *)
-module Self_timer = struct
-  type t = { mutable target : Time.t option }
-  let make () = { target = None }
-
-  (** Поставить event-таймер на [target], сняв предыдущий если был на
-      другое время. Идемпотентно по [target]. *)
-  let reschedule t (ctx : alert Pipe.ctx) ~target =
-    (match t.target with
-     | Some old when old <> target -> ctx.cancel_event_timer old
-     | _ -> ());
-    t.target <- Some target;
-    ctx.set_event_timer target
-
-  let consumed t = t.target <- None
-end
+(** ─── Layer 2: Single_timer — один логический таймер на ключ ────
+    Вынесен в библиотеку (Pipe.Single_timer, разрыв G-3 закрыт). *)
+module Self_timer = Pipe.Single_timer
 
 (** ─── Layer 3: Fsm — три чистые функции перехода ───────────── *)
 module Fsm = struct

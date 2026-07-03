@@ -45,6 +45,26 @@ type 'out ctx = {
   cancel_processing_timers: unit -> unit;
 }
 
+(** Один логический event-таймер на ключ с переносом цели на ближайший
+    дедлайн (разрыв G-3). Частый паттерн keyed-FSM: у ключа один
+    «следующий момент проверки», сдвигающийся по мере событий. Наивная
+    установка нового таймера на каждое событие даёт десятки таймеров на
+    ключ; Single_timer держит одну цель. *)
+module Single_timer : sig
+  type t
+  val make : unit -> t
+
+  (** Поставить event-таймер на [~target], сняв предыдущий если он был на
+      другое время. Идемпотентно по [~target]. *)
+  val reschedule : t -> 'out ctx -> target:Time.t -> unit
+
+  (** Отметить, что таймер отработал (вызывать в on_timer). *)
+  val consumed : t -> unit
+
+  (** Текущая цель, если установлена. *)
+  val target : t -> Time.t option
+end
+
 (** [process_keyed (module K) ?now_ms ~init ~on_event ~on_timer] —
     оператор с состоянием на ключ и таймерами.
     - [on_event ctx key state event] — на каждое событие ключа.
