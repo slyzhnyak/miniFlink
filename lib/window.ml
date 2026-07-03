@@ -309,6 +309,7 @@ let window_fold
     ?(latency = 0)
     ?(allowed_lateness = 0)
     ?(remove : (acc -> a -> acc) option)
+    ?(on_error : (exn -> a Mf_event.t -> unit) option)
     (spec : win_spec)
     ~(init : unit -> acc)
     ~(add  : acc -> a -> acc)
@@ -347,6 +348,15 @@ let window_fold
     Queue.push (Mf_event.update (k, old_acc) (k, new_acc) stop) out
   in
 
+  (* E-3/P2.4: guard оборачивает обработку события целиком (весь fold по
+     окнам). При исключении в пользовательском add/remove событие уходит
+     в on_error, состояние окон для него не меняется, пайплайн живёт.
+     Default (None) — проброс. *)
+  let guard ev f =
+    match on_error with
+    | None -> f ()
+    | Some h -> (try f () with e -> h e ev)
+  in
 
   fun () ->
     let rec pull () =
@@ -469,21 +479,22 @@ let window_fold
                Managed_state.set state mk (FFired (acc', true))
            ) (assign spec t);
            pull ())
-      | Some (Mf_event.Data (v, t)) ->
-        List.iter (fun (s, stop) ->
-          let mk = (K.key v, s, stop) in
-          match Managed_state.get state mk with
-          | None ->
-            Managed_state.set state mk (FOpen (add (init ()) v, true))
-          | Some (FOpen (acc, _)) ->
-            Managed_state.set state mk (FOpen (add acc v, true))
-          | Some (FFired (acc, _)) ->
-            (* Phase 3 atomic: late data применяет add и эмитит
-               ОДИН Update event (был Retract+Data пара). *)
-            let acc' = add acc v in
-            emit_update (K.key v) stop acc acc';
-            Managed_state.set state mk (FFired (acc', true))
-        ) (assign spec t);
+      | Some (Mf_event.Data (v, t) as ev) ->
+        guard ev (fun () ->
+          List.iter (fun (s, stop) ->
+            let mk = (K.key v, s, stop) in
+            match Managed_state.get state mk with
+            | None ->
+              Managed_state.set state mk (FOpen (add (init ()) v, true))
+            | Some (FOpen (acc, _)) ->
+              Managed_state.set state mk (FOpen (add acc v, true))
+            | Some (FFired (acc, _)) ->
+              (* Phase 3 atomic: late data применяет add и эмитит
+                 ОДИН Update event (был Retract+Data пара). *)
+              let acc' = add acc v in
+              emit_update (K.key v) stop acc acc';
+              Managed_state.set state mk (FFired (acc', true))
+          ) (assign spec t));
         pull ()
     in pull ()
 

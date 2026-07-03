@@ -265,6 +265,7 @@ val window_fold :
   ?latency:Time.t ->
   ?allowed_lateness:Time.t ->
   ?remove:('acc -> 'a -> 'acc) ->
+  ?on_error:(exn -> 'a Mf_event.t -> unit) ->
   win_spec ->
   init:(unit -> 'acc) ->
   add:('acc -> 'a -> 'acc) ->
@@ -528,6 +529,7 @@ val process_keyed :
   ?name:string ->
   ?on_update:('out ctx -> string -> 'st -> old:'a -> new_value:'a -> unit) ->
   ?on_retract:('out ctx -> string -> 'st -> 'a -> unit) ->
+  ?on_error:(exn -> 'a Mf_event.t -> unit) ->
   init:(unit -> 'st) ->
   on_event:('out ctx -> string -> 'st -> 'a -> unit) ->
   on_timer:('out ctx -> string -> 'st -> Time.t -> timer_kind -> unit) ->
