@@ -377,6 +377,12 @@ let run_exactly_once
     ~(store : checkpoint_store)
     () =
 
+  if workers <= 0 then
+    invalid_arg "run_exactly_once: workers должен быть > 0";
+  if capacity <= 0 then
+    invalid_arg "run_exactly_once: capacity должен быть > 0";
+  if checkpoint_every <= 0 then
+    invalid_arg "run_exactly_once: checkpoint_every должен быть > 0";
   let in_chans = Array.init workers (fun _ -> Channel.make_bounded capacity) in
   let coord = make_coordinator ~workers ~store in
   (* failed[i] пишется из воркера i и читается drive-потоком (dispatcher).
