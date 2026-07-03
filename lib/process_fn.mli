@@ -30,6 +30,10 @@ type 'out ctx = {
   emit_update             : old:'out -> 'out -> unit;
   (** эмитить атомарный [Update] [old]→new: downstream видит коррекцию за
       один шаг, без промежуточного None-flicker. *)
+  emit_event              : 'out Mf_event.t -> unit;
+  (** эмитить уже готовое событие (Data/Retract/Update/Watermark) с его
+      собственным временем — когда доменная функция возвращает список
+      [Mf_event.t]. *)
   set_event_timer         : Time.t -> unit;
   set_event_timer_for     : string -> Time.t -> unit;
   (** поставить event-таймер НА УКАЗАННЫЙ ключ (не текущий) — для

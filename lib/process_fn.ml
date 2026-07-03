@@ -30,6 +30,11 @@ type 'out ctx = {
   emit_update             : old:'out -> 'out -> unit;
     (* эмитить атомарный Update old→new: downstream видит коррекцию за
        один шаг, без промежуточного «вывод исчез» (None-flicker). *)
+  emit_event              : 'out Mf_event.t -> unit;
+    (* эмитить уже готовое событие (Data/Retract/Update/Watermark) с его
+       собственным временем. Нужно, когда доменная функция возвращает
+       список Mf_event.t — избавляет от разбора вида для выбора
+       emit/emit_retract/emit_update. *)
   set_event_timer         : Time.t -> unit;
   set_event_timer_for     : string -> Time.t -> unit;
   set_processing_timer    : Time.t -> unit;
@@ -122,6 +127,7 @@ let process_keyed
     emit = (fun o -> Queue.push (Mf_event.data o emit_ts) out_q);
     emit_retract = (fun o -> Queue.push (Mf_event.retract o emit_ts) out_q);
     emit_update = (fun ~old o -> Queue.push (Mf_event.update old o emit_ts) out_q);
+    emit_event = (fun ev -> Queue.push ev out_q);
     set_event_timer = (fun t ->
       incr ev_set; stat `Event_timer_set;
       ev_timers := TimerSet.add (key, t) !ev_timers);

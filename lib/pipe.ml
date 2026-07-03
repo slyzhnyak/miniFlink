@@ -598,6 +598,7 @@ type 'out ctx = 'out Process_fn.ctx = {
   emit                    : 'out -> unit;
   emit_retract            : 'out -> unit;
   emit_update             : old:'out -> 'out -> unit;
+  emit_event              : 'out Mf_event.t -> unit;
   set_event_timer         : Time.t -> unit;
   set_event_timer_for     : string -> Time.t -> unit;
   set_processing_timer    : Time.t -> unit;
@@ -608,3 +609,67 @@ type 'out ctx = 'out Process_fn.ctx = {
 }
 let process_keyed = Process_fn.process_keyed
 let process_keyed_spec = Process_fn.process_keyed_spec
+
+(* ── co_process: keyed-обработка нескольких РАЗНОТИПНЫХ потоков на общем
+   per-key состоянии (закрытие разрыва G-5).
+
+   Раньше «driver + side inputs на общем ключе» (ex07 gas_alerts) писался
+   вручную: union-тег, свой Hashtbl состояний, свой Queue, свой pull-цикл
+   по четырём конструкторам — ~90 строк каркаса, идентичного внутренностям
+   process_keyed. co_process2/3 строится ПОВЕРХ process_keyed: каждый вход
+   оборачивается в вариант, потоки объединяются union'ом (watermark = min
+   автоматически), а process_keyed диспетчеризует по варианту на общий
+   ctx (emit / emit_retract / emit_update — все доступны).
+
+   key_* извлекают ОБЩИЙ строковый ключ из каждого входа (по нему
+   шардируется состояние). *)
+
+type ('a, 'b) either2 = L2 of 'a | R2 of 'b
+
+let co_process2
+    ?now_ms ?name ~init
+    ~(key_a : 'a -> string) ~(key_b : 'b -> string)
+    ~(on_a : 'out ctx -> string -> 'st -> 'a -> unit)
+    ~(on_b : 'out ctx -> string -> 'st -> 'b -> unit)
+    ?(on_timer = fun _ _ _ _ _ -> ())
+    (stream_a : 'a Mf_event.t Stream.t)
+    (stream_b : 'b Mf_event.t Stream.t)
+  : 'out Mf_event.t Stream.t =
+  let sa = stream_a |> emap (fun a -> L2 a) in
+  let sb = stream_b |> emap (fun b -> R2 b) in
+  let unioned = Mf_event.union sa sb in
+  let key = function L2 a -> key_a a | R2 b -> key_b b in
+  process_keyed (Keyed.of_fun key) ?now_ms ?name
+    ~init
+    ~on_event:(fun ctx k st -> function
+      | L2 a -> on_a ctx k st a
+      | R2 b -> on_b ctx k st b)
+    ~on_timer
+    unioned
+
+type ('a, 'b, 'c) either3 = L3 of 'a | M3 of 'b | R3 of 'c
+
+let co_process3
+    ?now_ms ?name ~init
+    ~(key_a : 'a -> string) ~(key_b : 'b -> string) ~(key_c : 'c -> string)
+    ~(on_a : 'out ctx -> string -> 'st -> 'a -> unit)
+    ~(on_b : 'out ctx -> string -> 'st -> 'b -> unit)
+    ~(on_c : 'out ctx -> string -> 'st -> 'c -> unit)
+    ?(on_timer = fun _ _ _ _ _ -> ())
+    (stream_a : 'a Mf_event.t Stream.t)
+    (stream_b : 'b Mf_event.t Stream.t)
+    (stream_c : 'c Mf_event.t Stream.t)
+  : 'out Mf_event.t Stream.t =
+  let sa = stream_a |> emap (fun a -> L3 a) in
+  let sb = stream_b |> emap (fun b -> M3 b) in
+  let sc = stream_c |> emap (fun c -> R3 c) in
+  let unioned = Mf_event.union (Mf_event.union sa sb) sc in
+  let key = function L3 a -> key_a a | M3 b -> key_b b | R3 c -> key_c c in
+  process_keyed (Keyed.of_fun key) ?now_ms ?name
+    ~init
+    ~on_event:(fun ctx k st -> function
+      | L3 a -> on_a ctx k st a
+      | M3 b -> on_b ctx k st b
+      | R3 c -> on_c ctx k st c)
+    ~on_timer
+    unioned
