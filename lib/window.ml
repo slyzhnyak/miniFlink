@@ -125,6 +125,27 @@ let window
   (* самодиагностика сборки пайпа *)
   let saw_data = ref false and saw_wm = ref false in
   let n_late = ref 0 and n_emitted = ref 0 in
+  (* E-1: ранняя диагностика забытого event_time. На бесконечном потоке
+     end-of-stream не наступает, поэтому warning «были данные, но не было
+     watermark» на закрытии потока никогда бы не сработал — окна копились
+     бы вечно молча. Считаем Data-события; если их накопилось много без
+     единого watermark, предупреждаем ОДИН раз в процессе. *)
+  let n_no_wm = ref 0 in
+  let warned_no_wm = ref false in
+  let warned_eos = ref false in
+  let no_watermark_warn_threshold = 10_000 in
+  let note_data_without_wm () =
+    if not !saw_wm && not !warned_no_wm then begin
+      incr n_no_wm;
+      if !n_no_wm >= no_watermark_warn_threshold then begin
+        warned_no_wm := true;
+        Log.warn ~fields:[("events", string_of_int !n_no_wm)]
+          "window: получено много событий, но ни одного watermark — \
+           окна не закрываются (на бесконечном потоке — утечка памяти и \
+           ноль результатов). Добавьте Pipe.event_time перед окном"
+      end
+    end
+  in
   let on_late x = incr n_late; on_late x in
   let out : (string * a list) Mf_event.t Queue.t = Queue.create () in
   let emit_data k stop vs =
@@ -142,16 +163,21 @@ let window
       if not (Queue.is_empty out) then Some (Queue.pop out) else
       match upstream () with
       | None ->
-        if !saw_data && not !saw_wm then
-          Log.warn ~fields:[("windows_emitted_incrementally", "0")]
-            "window: события были, но ни одного watermark — окна эмитированы \
-             только при завершении потока (на бесконечном потоке — никогда), \
-             late-семантика не работала. Добавьте Pipe.event_time перед окном";
-        if !saw_data && !saw_wm && !n_emitted = 0 && !n_late > 0 then
-          Log.warn ~fields:[("late", string_of_int !n_late)]
-            "window: ВСЕ события ушли в late (0 окон эмитировано) — \
-             watermark обгоняет данные; увеличьте lateness у Pipe.event_time \
-             или allowed_lateness у окна";
+        (* защита от повторного pull() после None: потребитель может
+           дёрнуть поток несколько раз, warning должен быть один раз *)
+        if not !warned_eos then begin
+          warned_eos := true;
+          if !saw_data && not !saw_wm && not !warned_no_wm then
+            Log.warn ~fields:[("windows_emitted_incrementally", "0")]
+              "window: события были, но ни одного watermark — окна эмитированы \
+               только при завершении потока (на бесконечном потоке — никогда), \
+               late-семантика не работала. Добавьте Pipe.event_time перед окном";
+          if !saw_data && !saw_wm && !n_emitted = 0 && !n_late > 0 then
+            Log.warn ~fields:[("late", string_of_int !n_late)]
+              "window: ВСЕ события ушли в late (0 окон эмитировано) — \
+               watermark обгоняет данные; увеличьте lateness у Pipe.event_time \
+               или allowed_lateness у окна"
+        end;
         (* Закрываем все Open окна; Fired уже эмитили *)
         Hashtbl.iter (fun (k,_,stop) st ->
           match st with Open vs when vs <> [] -> emit_data k stop vs | _ -> ()
@@ -203,7 +229,7 @@ let window
         pull ()
       | Some (Mf_event.Update { old; new_value; ts = t }) ->
         (* Атомарная коррекция: убрать old, добавить new. *)
-        saw_data := true;
+        saw_data := true; note_data_without_wm ();
         List.iter (fun (s, stop) ->
           let mk = (K.key new_value, s, stop) in
           match Hashtbl.find_opt tbl mk with
@@ -221,7 +247,7 @@ let window
         ) (assign spec t);
         pull ()
       | Some (Mf_event.Data (v,t)) ->
-        saw_data := true;
+        saw_data := true; note_data_without_wm ();
         List.iter (fun (s, stop) ->
           let mk = (K.key v, s, stop) in
           match Hashtbl.find_opt tbl mk with
