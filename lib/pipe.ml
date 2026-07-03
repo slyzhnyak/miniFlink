@@ -110,6 +110,9 @@ let keyed_join
     ?ttl
     (streams : a Mf_event.t Stream.t list)
     : (string * a option list) Mf_event.t Stream.t =
+  (match ttl with
+   | Some t when t <= 0 -> invalid_arg "Pipe.keyed_join: ttl должен быть > 0"
+   | _ -> ());
   let n = List.length streams in
   if n = 0 then Stream.empty
   else begin
@@ -378,6 +381,8 @@ let dedup
     ~(rule     : a -> string)
     ~(cooldown : Time.t)
     (upstream  : a Mf_event.t Stream.t) : a Mf_event.t Stream.t =
+  if cooldown < 0 then
+    invalid_arg "Pipe.dedup: cooldown должен быть >= 0";
   let seen = Hashtbl.create 64 in
   let evict_before wm =
     (* Собираем устаревшие ключи, затем удаляем (нельзя мутировать во время iter) *)
@@ -410,7 +415,10 @@ let map      = emap
 (* event_time: пометить поток для обработки по event-time с допуском
    [lateness] на опоздание (псевдоним Mf_event.with_watermarks с
    доменным именем — читается как «обрабатываем по времени событий»). *)
-let event_time ~lateness stream = Mf_event.with_watermarks ~latency:lateness stream
+let event_time ~lateness stream =
+  if lateness < 0 then
+    invalid_arg "Pipe.event_time: lateness должен быть >= 0";
+  Mf_event.with_watermarks ~latency:lateness stream
 let filter   = efilt
 let flat_map = eflatmap
 

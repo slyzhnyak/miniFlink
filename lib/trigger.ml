@@ -228,6 +228,9 @@ let of_stream
     (source : (k * v) Mf_event.t Stream.t)
   : a Mf_event.t Stream.t =
 
+  (match ttl with
+   | Some t when t <= 0 -> invalid_arg "Trigger.of_stream: ttl должен быть > 0"
+   | _ -> ());
   let states : (string, (k, v, a) state * k) Hashtbl.t = Hashtbl.create 64 in
   let last_event_ts : (string, Time.t) Hashtbl.t = Hashtbl.create 64 in
   let timers = Timers.create () in

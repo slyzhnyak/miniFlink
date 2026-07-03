@@ -116,6 +116,10 @@ let window
     (spec     : win_spec)
     (upstream : a Mf_event.t Stream.t)
     : (string * a list) Mf_event.t Stream.t =
+  if latency < 0 then
+    invalid_arg "Pipe.window: latency должен быть >= 0";
+  if allowed_lateness < 0 then
+    invalid_arg "Pipe.window: allowed_lateness должен быть >= 0";
   let tbl : (win_key, a win_state) Hashtbl.t = Hashtbl.create 4096 in
   let cur_wm = ref min_int in   (* последний виденный watermark *)
   (* самодиагностика сборки пайпа *)
@@ -285,6 +289,10 @@ let window_fold
     (upstream : a Mf_event.t Stream.t)
     : (string * acc) Mf_event.t Stream.t =
 
+  if latency < 0 then
+    invalid_arg "Pipe.window_fold: latency должен быть >= 0";
+  if allowed_lateness < 0 then
+    invalid_arg "Pipe.window_fold: allowed_lateness должен быть >= 0";
   (* Состояние окон — managed-state с прозрачной persistence.
      Persistence решается ambient Runtime_context, НЕ параметром
      оператора: тот же код работает в ephemeral и durable. Ключ окна
