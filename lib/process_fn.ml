@@ -100,11 +100,27 @@ let process_keyed
     ?(name = "default")
     ?(on_update : (out ctx -> string -> st -> old:a -> new_value:a -> unit) option)
     ?(on_retract : (out ctx -> string -> st -> a -> unit) option)
+    ?(on_error : (exn -> a Mf_event.t -> unit) option)
     ~(init : unit -> st)
     ~(on_event : out ctx -> string -> st -> a -> unit)
     ~(on_timer : out ctx -> string -> st -> Time.t -> timer_kind -> unit)
     (upstream : a Mf_event.t Stream.t)
     : out Mf_event.t Stream.t =
+
+  (* E-3/P2.4: если ?on_error задан, исключение из пользовательского
+     колбэка (on_event/on_update/on_retract) не роняет пайплайн — оно
+     передаётся в on_error вместе с событием, вызвавшим сбой, и обработка
+     продолжается. Это критично для exactly-once: после M-3 креш в
+     колбэке = бесконечный цикл crash-recovery, поэтому «ядовитое»
+     событие должно уходить в DLQ, а не валить воркера. Default (None) —
+     проброс, как раньше. on_timer не оборачиваем: там нет входного
+     события для DLQ, и таймерный сбой обычно логический баг, а не
+     битые данные. *)
+  let guard ev f =
+    match on_error with
+    | None -> f ()
+    | Some h -> (try f () with e -> h e ev)
+  in
 
   let states : (string, st) Hashtbl.t = Hashtbl.create 64 in
   let ev_timers = ref TimerSet.empty in   (* (key, time) event-time *)
@@ -210,9 +226,9 @@ let process_keyed
               ("pending_event_timers", string_of_int (TimerSet.cardinal !ev_timers))]
               "process_keyed: event-таймеры установлены, но в потоке не было ни                одного watermark — они никогда не сработают. Добавьте                Pipe.event_time перед process_keyed (или idle-watermark для                молчаливых источников)";
           None
-        | Some (Mf_event.Data (v, ts)) ->
+        | Some (Mf_event.Data (v, ts) as ev) ->
           let key = K.key v in
-          on_event (ctx_for key ~emit_ts:ts) key (state_of key) v;
+          guard ev (fun () -> on_event (ctx_for key ~emit_ts:ts) key (state_of key) v);
           persist_key key;
           (* при активности проверяем processing-time таймеры по wall-clock *)
           fire_due pt_timers Processing_time (now_ms ());
@@ -223,7 +239,7 @@ let process_keyed
           fire_due pt_timers Processing_time (now_ms ());
           Queue.push (Mf_event.wm wm) out_q;
           pull ()
-        | Some (Mf_event.Retract (v, ts)) ->
+        | Some (Mf_event.Retract (v, ts) as ev) ->
           (* По умолчанию Retract отбрасывается (исторически). Если
              передан ?on_retract — пользователь реагирует на отзыв
              значения (например, удаляет его из своего состояния),
@@ -231,12 +247,12 @@ let process_keyed
           (match on_retract with
            | Some cb ->
              let key = K.key v in
-             cb (ctx_for key ~emit_ts:ts) key (state_of key) v;
+             guard ev (fun () -> cb (ctx_for key ~emit_ts:ts) key (state_of key) v);
              persist_key key;
              fire_due pt_timers Processing_time (now_ms ())
            | None -> ());
           pull ()
-        | Some (Mf_event.Update { old; new_value; ts }) ->
+        | Some (Mf_event.Update { old; new_value; ts } as ev) ->
           (* Phase 3.3: если ?on_update передан — atomic native handling.
              Иначе Phase 1 conservative fallback: обработать Update
              как Data на new_value. Оба пути обновляют state через
@@ -244,9 +260,10 @@ let process_keyed
           let key = K.key new_value in
           let ctx = ctx_for key ~emit_ts:ts in
           let st = state_of key in
-          (match on_update with
-           | Some cb -> cb ctx key st ~old ~new_value
-           | None -> on_event ctx key st new_value);
+          guard ev (fun () ->
+            match on_update with
+            | Some cb -> cb ctx key st ~old ~new_value
+            | None -> on_event ctx key st new_value);
           persist_key key;
           fire_due pt_timers Processing_time (now_ms ());
           pull ()

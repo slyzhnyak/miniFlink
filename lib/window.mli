@@ -26,6 +26,7 @@ val window_fold :
   (module Keyed.S with type t = 'a) ->
   ?latency:Time.t -> ?allowed_lateness:Time.t ->
   ?remove:('acc -> 'a -> 'acc) ->
+  ?on_error:(exn -> 'a Mf_event.t -> unit) ->
   win_spec ->
   init:(unit -> 'acc) -> add:('acc -> 'a -> 'acc) ->
   'a Mf_event.t Stream.t -> (string * 'acc) Mf_event.t Stream.t

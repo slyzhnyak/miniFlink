@@ -114,10 +114,20 @@ val process_keyed :
   ?name:string ->
   ?on_update:('out ctx -> string -> 'st -> old:'a -> new_value:'a -> unit) ->
   ?on_retract:('out ctx -> string -> 'st -> 'a -> unit) ->
+  ?on_error:(exn -> 'a Mf_event.t -> unit) ->
   init:(unit -> 'st) ->
   on_event:('out ctx -> string -> 'st -> 'a -> unit) ->
   on_timer:('out ctx -> string -> 'st -> Time.t -> timer_kind -> unit) ->
   'a Mf_event.t Stream.t -> 'out Mf_event.t Stream.t
+(** [?on_error] (E-3): если задан, исключение из пользовательского
+    колбэка ([on_event]/[on_update]/[on_retract]) не роняет пайплайн —
+    оно передаётся в [on_error exn event] вместе с событием, вызвавшим
+    сбой, и обработка продолжается со следующего события. Критично для
+    exactly-once: без этого «ядовитое» событие валит воркера, а после
+    восстановления валит снова (бесконечный цикл). Внутрь [on_error]
+    удобно положить запись в DLQ. По умолчанию (не задан) — исключение
+    пробрасывается, как раньше. [on_timer] не оборачивается: там нет
+    входного события, а сбой таймера обычно логический баг, не данные. *)
 (** Persistence ОРТОГОНАЛЬНА: задаётся ambient {!Runtime_context}, не
     параметром. В durable-контексте per-key состояние (включая event-
     и processing-таймеры) снапшотится в backend на каждое изменение и
