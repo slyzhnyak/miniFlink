@@ -24,6 +24,12 @@ type 'out ctx = {
       высокой кардинальности ключей; обычно вызывается из on_timer
       по TTL-логике) *)
   emit                    : 'out -> unit;
+  emit_retract            : 'out -> unit;
+  (** эмитить [Retract] значения (отзыв ранее выпущенного вывода) с тем
+      же временем, что и [emit]. Открывает retract-семантику keyed-логике. *)
+  emit_update             : old:'out -> 'out -> unit;
+  (** эмитить атомарный [Update] [old]→new: downstream видит коррекцию за
+      один шаг, без промежуточного None-flicker. *)
   set_event_timer         : Time.t -> unit;
   set_event_timer_for     : string -> Time.t -> unit;
   (** поставить event-таймер НА УКАЗАННЫЙ ключ (не текущий) — для

@@ -23,6 +23,13 @@ type timer_kind = Event_time | Processing_time
 type 'out ctx = {
   clear_state             : unit -> unit;   (* удалить состояние текущего ключа *)
   emit                    : 'out -> unit;
+  emit_retract            : 'out -> unit;
+    (* эмитить Retract значения (отзыв ранее выпущенного вывода) с тем же
+       временем, что и emit. Открывает retract-семантику keyed-логике —
+       раньше это приходилось делать в обход process_keyed. *)
+  emit_update             : old:'out -> 'out -> unit;
+    (* эмитить атомарный Update old→new: downstream видит коррекцию за
+       один шаг, без промежуточного «вывод исчез» (None-flicker). *)
   set_event_timer         : Time.t -> unit;
   set_event_timer_for     : string -> Time.t -> unit;
   set_processing_timer    : Time.t -> unit;
@@ -113,6 +120,8 @@ let process_keyed
   let ctx_for key ~emit_ts = {
     clear_state = (fun () -> Hashtbl.remove states key);
     emit = (fun o -> Queue.push (Mf_event.data o emit_ts) out_q);
+    emit_retract = (fun o -> Queue.push (Mf_event.retract o emit_ts) out_q);
+    emit_update = (fun ~old o -> Queue.push (Mf_event.update old o emit_ts) out_q);
     set_event_timer = (fun t ->
       incr ev_set; stat `Event_timer_set;
       ev_timers := TimerSet.add (key, t) !ev_timers);
