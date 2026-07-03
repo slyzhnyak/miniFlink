@@ -609,6 +609,7 @@ type 'out ctx = 'out Process_fn.ctx = {
 }
 let process_keyed = Process_fn.process_keyed
 let process_keyed_spec = Process_fn.process_keyed_spec
+module Single_timer = Process_fn.Single_timer
 
 (* ── co_process: keyed-обработка нескольких РАЗНОТИПНЫХ потоков на общем
    per-key состоянии (закрытие разрыва G-5).

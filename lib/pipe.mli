@@ -539,6 +539,11 @@ val process_keyed_spec :
   ('a, 'st, 'out) Process_fn.spec ->
   'a Mf_event.t Stream.t -> 'out Mf_event.t Stream.t
 
+(** Один логический event-таймер на ключ (переэкспорт
+    {!Process_fn.Single_timer}). Для keyed-FSM, где у ключа единственный
+    сдвигающийся «следующий момент проверки». *)
+module Single_timer = Process_fn.Single_timer
+
 (** {3 co_process — keyed-обработка нескольких разнотипных потоков}
 
     Co-обработка потоков разных типов на ОБЩЕМ per-key состоянии

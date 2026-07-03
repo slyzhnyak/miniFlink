@@ -44,6 +44,42 @@ type 'out ctx = {
   cancel_processing_timers: unit -> unit;
 }
 
+(* ── Single_timer — один логический event-таймер на ключ с переносом
+   цели на ближайший дедлайн (закрытие разрыва G-3).
+
+   Частый паттерн keyed-FSM: у ключа один «следующий момент проверки»,
+   который по мере прихода событий сдвигается. Наивно ставить новый
+   event-таймер на каждое событие → десятки таймеров на ключ, а сработает
+   лишний. Single_timer держит ОДНУ цель: reschedule снимает предыдущий
+   таймер (если цель поменялась) и ставит новый; идемпотентен по target.
+   consumed вызывается в on_timer, когда таймер отработал. Вынесено из
+   ручного кода ex07 (Layer 2). *)
+module Single_timer = struct
+  type t = { mutable target : Time.t option }
+  let make () = { target = None }
+
+  (* Поставить event-таймер на [target], сняв предыдущий если он был на
+     другое время. Идемпотентно по [target] (повторный вызов на то же
+     время — no-op). *)
+  let reschedule t (ctx : 'out ctx) ~target =
+    match t.target with
+    | Some old when old = target -> ()  (* та же цель — no-op (идемпотентно) *)
+    | Some old ->
+      ctx.cancel_event_timer old;        (* цель сдвинулась — снять старый *)
+      t.target <- Some target;
+      ctx.set_event_timer target
+    | None ->
+      t.target <- Some target;
+      ctx.set_event_timer target
+
+  (* Отметить, что таймер отработал (вызывать в on_timer). После этого
+     reschedule на новую цель поставит свежий таймер. *)
+  let consumed t = t.target <- None
+
+  (* Текущая цель, если есть. *)
+  let target t = t.target
+end
+
 (* таймер: (ключ, время, тип) *)
 (* событие телеметрии оператора — для подключения внешних метрик *)
 type stat =
