@@ -765,3 +765,10 @@
  (libraries miniflink)
  (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
  (modules test_input_validation))
+
+(test
+ (name test_no_watermark_warn)
+ (libraries miniflink str)
+ (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
+ (modules test_no_watermark_warn))
+
