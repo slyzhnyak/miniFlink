@@ -54,18 +54,18 @@
 
 ## P3 — крупный дизайн, отдельное обсуждение перед реализацией
 
-- [ ] **P3.1 / G-2a** Условия на тишину first-class:
+- [x] **P3.1 / G-2a** (готово, f7449dc) Условия на тишину first-class:
       `Trigger.on_silence ~threshold` (сейчас — только связка
       Item.silence_age + of_stream, 4 разных silence на ключ не
       выражаются).
-- [ ] **P3.2 / G-2b** Подавление между автоматами:
+- [x] **P3.2 / G-2b** (готово, f7449dc) Подавление между автоматами:
       `Trigger.suppress_when other_state` (motion/voltage молчат при
       No_packets). Цель: connectivity_alerts ex07 из ~200 строк слоёв в
       ~40 строк деклараций четырёх автоматов.
-- [ ] **P3.3 / G-6** Reactive enrich (side input с re-emit активных
+- [x] **P3.3 / G-6** (готово, d5f86f7 — закрыт co_process3 бесплатно) Reactive enrich (side input с re-emit активных
       выходов при обновлении справочника). Проверить после P2.1 —
       возможно, выражается через co_process бесплатно.
-- [ ] **P3.4 / E-6** Финал: пройтись по ex07 целиком — либо все обходы
+- [x] **P3.4 / E-6** (готово) Финал: пройтись по ex07 целиком — либо все обходы
       заменены комбинаторами, либо остатки помечены «ограничение DSL,
       см. roadmap» с номером пункта.
 
@@ -79,3 +79,44 @@
   CI-job по образцу kafka-eos.
 - Fuzzing (Crowbar/afl через CI) для парсеров/декодеров (Kafka payload,
   snapshot restore, Marshal) — обсуждалось, приоритет ниже roadmap DSL.
+
+---
+
+## Итог (все P1–P3 закрыты)
+
+Все шесть разрывов выразительности (G-1…G-6) и шесть unhappy-path'ов
+(E-1…E-6) из ревью закрыты. Добавленные в библиотеку операторы:
+
+- `Pipe.map_ts` — map с доступом к timestamp (G-1)
+- `ctx.emit_retract` / `emit_update` / `emit_event` — retract-семантика
+  в keyed-логике (G-4)
+- `Pipe.co_process2` / `co_process3` — co-обработка разнотипных потоков
+  на общем ключе (G-5); попутно закрыл G-6 (reactive enrich) бесплатно
+- `Pipe.Single_timer` — один логический таймер на ключ (G-3)
+- `Pipe.on_silence` — детекция отсутствия как первичная операция (G-2a)
+- `Pipe.suppress_while` — подавление как композиция (G-2b)
+- `?on_error` в process_keyed / window_fold — ядовитое событие в DLQ,
+  не крах пайплайна (E-3)
+- валидация Time/int-параметров (E-4), warning об окне без watermark
+  (E-1), doc-предупреждения о дренящих потребителях (E-5), документация
+  union min-watermark + idle (E-2)
+
+### ex07 как витрина (E-6)
+
+pipelines.ml: 605 → 457 строк. Все три пайплайна — декларативные
+композиции:
+- `median_rssi` — dedup → flat_map → event_time → window_agg (медиана,
+  top-2); хвост на `map_ts`;
+- `connectivity_alerts` — три `on_silence` + `Trigger` (гистерезис) +
+  `suppress_while` + SOS-импульс, вместо трёх ручных FSM;
+- `gas_alerts` — `co_process3` с тремя доменными обработчиками, retract/
+  update/reactive-enrich выражены прямо в DSL.
+
+Не осталось ни ручных `match stream () with`, ни сентинелов
+`min_int/max_int`, ни признательных комментариев «делаем руками».
+Остаток pipelines.ml — доменные функции (RSSI→расстояние, интерполяция
+позиции, разбор газов), которые кодом остаются в любом фреймворке.
+
+Тест-покрытие: каждый оператор имеет юнит-тест; ex07 smoke проверяет все
+шесть видов алертов + монотонность late-событий; ex07 lib проверяет
+reactive enrich end-to-end. CI зелёный на OCaml 4.14 и 5.2.
