@@ -1,7 +1,20 @@
 \documentclass[11pt,a4paper]{article}
-\usepackage[utf8]{inputenc}
-\usepackage[T2A]{fontenc}
-\usepackage[english,russian]{babel}
+% Кириллица: под pdflatex — классический T2A (нужен texlive-lang-cyrillic),
+% под xelatex/lualatex — fontspec+polyglossia (UTF-8 native, без T2A).
+% Собирается любым движком: `pdflatex tutorial` или `xelatex tutorial`.
+\usepackage{iftex}
+\ifPDFTeX
+  \usepackage[utf8]{inputenc}
+  \usepackage[T2A]{fontenc}
+  \usepackage[english,russian]{babel}
+\else
+  \usepackage{fontspec}
+  \setmainfont{DejaVu Serif}
+  \setmonofont{DejaVu Sans Mono}
+  \usepackage{polyglossia}
+  \setmainlanguage{russian}
+  \setotherlanguage{english}
+\fi
 \usepackage{amsmath}
 \usepackage{amssymb}
 \usepackage[margin=1in]{geometry}
