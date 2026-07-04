@@ -165,4 +165,95 @@ Checkpoint_parallel.run_exactly_once
   ~key_of ~make_state ~process ~source ~sink ~store ()
 ]}
 
+{1 Шаг 11. Продвинутые операторы}
+
+Линейный [window → aggregate → dedup] покрывает большинство задач. Но
+когда доменная логика сложнее (состояние на ключ с коррекциями, детекция
+отсутствия, co-обработка нескольких потоков), miniFlink даёт первичные
+операторы, чтобы не выпадать в ручной [match stream () with].
+
+{2 Состояние на ключ с ретрактами: {!Pipe.process_keyed}}
+
+Когда нужно держать состояние на ключ и реагировать на события с
+возможностью {e отозвать} или {e обновить} ранее выпущенный результат —
+{!Pipe.process_keyed}. Контекст [ctx] даёт [emit] (Data),
+[emit_retract] (отозвать) и [emit_update] (атомарно заменить old→new,
+без промежуточного «результат исчез»):
+
+{[
+events
+|> Pipe.process_keyed (module ByKey)
+     ~init:(fun () -> { current = None })
+     ~on_event:(fun ctx key st v ->
+       match st.current with
+       | None       -> st.current <- Some v; ctx.emit v
+       | Some old   -> st.current <- Some v; ctx.emit_update ~old v)
+     ~on_timer:(fun _ _ _ _ _ -> ())
+]}
+
+{2 Детекция отсутствия: {!Pipe.on_silence}}
+
+Для безопасности часто опаснее не «плохое значение», а {e тишина}:
+датчик перестал слать данные. {!Pipe.on_silence} эмитит алерт, когда
+признак не наблюдался дольше [~within], и (опционально) recovery при
+возобновлении:
+
+{[
+packets
+|> Pipe.event_time ~lateness:(seconds 1)
+|> Pipe.on_silence (module ByLamp)
+     ~within:(minutes 2)
+     ~has:(fun _ -> true)          (* любой пакет = «жив» *)
+     ~on_silent:(fun key ~last ~ts -> No_signal (key, last))
+     ~on_resumed:(fun key ~ts -> Signal_back key)
+]}
+
+Время перехода в тишину — [last + within] (когда молчание превысило
+порог), а не время watermark, который это обнаружил. Источник нужно
+разметить {!Pipe.event_time}, иначе watermark не двигается и тишина не
+наступает. Это прямее, чем связка {!Item.silence_age} + триггер, когда
+нужен именно алерт об отсутствии.
+
+Если один детектор должен {e молчать}, пока активен другой (например
+«нет движения» не важно, когда «нет связи вообще»), их композирует
+{!Pipe.suppress_while}.
+
+{2 Co-обработка разнотипных потоков: {!Pipe.co_process2}}
+
+Когда на одном ключе сходятся несколько потоков {e разных типов}
+(driver + side inputs), {!Pipe.co_process2} / {!Pipe.co_process3} держат
+общее per-key состояние и диспетчеризуют по источнику:
+
+{[
+Pipe.co_process2
+  ~init:make_state
+  ~key_a:(fun r -> r.id) ~key_b:(fun s -> s.id)
+  ~on_a:(fun ctx key st r -> (* driver: r обновляет состояние, эмитит *))
+  ~on_b:(fun ctx key st s -> (* side input: s обогащает состояние *))
+  driver side_input
+]}
+
+Watermark входов объединяется по минимуму автоматически. Обновление
+side-потока может переэмитить активные выходы через [ctx.emit_event] —
+это даёт «реактивное обогащение» без отдельного оператора.
+
+{2 Битые события без падения: [?on_error]}
+
+{!Pipe.process_keyed} и [window_fold] принимают [?on_error]: если
+пользовательский колбэк бросает исключение, событие уходит в обработчик
+(например в DLQ) вместе с исключением, а пайплайн продолжает. Без этого
+одно «ядовитое» событие роняет воркера — а в exactly-once ещё и
+переигрывается после восстановления, зацикливая крах:
+
+{[
+|> Pipe.process_keyed (module ByKey)
+     ~on_error:(fun exn ev -> Dlq.send dlq exn ev)  (* не падаем *)
+     ~init ~on_event ~on_timer
+]}
+
+Полный рабочий пример со всеми этими операторами —
+[examples/ex07_location/] (локация + связь + газовые алерты подземной
+шахты): [median_rssi] на окнах, [connectivity_alerts] на [on_silence] +
+[suppress_while] + триггерах, [gas_alerts] на [co_process3].
+
 Возврат к {!page-index}.
