@@ -7,9 +7,12 @@
     - подменять моки реальными Kafka-коннекторами без изменения этого
       модуля.
 
-    Два независимых пайплайна:
+    Три пайплайна:
     - {!median_rssi}: локация шахтёра по медиане RSSI в скользящем окне;
-    - {!connectivity_alerts}: четыре независимых FSM + импульсный SOS. *)
+    - {!connectivity_alerts}: декларативная композиция детекторов
+      (on_silence × 3 + Trigger с гистерезисом + suppress_while + SOS);
+    - {!gas_alerts}: газовые алерты через co_process3 с обогащением
+      координатами (retract/update-семантика). *)
 
 open Miniflink
 open Time

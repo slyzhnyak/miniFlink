@@ -15,10 +15,12 @@ Apache Flink **на одном узле**. Акцент — на чистоте 
 (tumbling, sliding, count, session со слиянием, global+triggers) с
 инкрементальной агрегацией и комбинируемыми агрегаторами, stateful
 operators, exactly-once (end-to-end: offset, 2PC sink, recovery, durable),
-table/join с TTL (+ temporal as-of join), union потоков, retractions — плюс production-слои
+table/join с TTL (+ temporal as-of join), union потоков, retractions,
+co-обработка разнотипных потоков (`co_process`), детекция отсутствия
+(`on_silence`) и подавление (`suppress_while`) — плюс production-слои
 (DLQ + retry/backoff, graceful shutdown, Prometheus metrics, структурированные
-логи, health, config, RocksDB state). ~5600 строк OCaml, 120 тест-сюит,
-63 property-инварианта.
+логи, health, config, RocksDB state). ~6100 строк OCaml в ядре, 133 тест-сюиты,
+76 property-инвариантов.
 
 ## Почему декларативно
 
@@ -100,16 +102,14 @@ variants/            — реализации channel/parallel по версии
 bin/    main.ml        демо pipeline
 examples/              самодостаточные примеры (см. examples/README.md)
 bench/  bench.ml bench_parallel.ml bench_ex07.ml soak.ml
-test/   120 тест-сюит (core, props, invariants, reliability, metrics,
-                     retract, sliding, count_window, session_window,
-                     global_window, window_fold, agg, union, safe, parallel_retract,
-                     side_output, ttl_state, nexmark, watermark_fuzz, timers,
-                     recovery, differential, cardinality, temporal,
-                     dedup_evict, parallel_crash, crash_checkpoint,
-                     determinism, watermark, idle_watermark, table_ttl,
-                     checkpoint_parallel, rocksdb, codec, channel,
-                     window_validation, log, health_config, retry,
-                     schema, backpressure, queue_depth, ex07_smoke, ex07_lib)
+test/   133 тест-сюиты  core, props/invariants, reliability, metrics,
+                       retract/update, все типы окон, window_fold, agg,
+                       union, safe/on_error, parallel + crash + recovery,
+                       exactly-once (property: recover=replay), temporal,
+                       dedup_evict, determinism, watermark/idle, table_ttl,
+                       rocksdb, codec, channel, schema, backpressure,
+                       co_process, single_timer, map_ts, silence_suppress,
+                       input_validation, no_watermark_warn, ex07/ex11
 ```
 
 ### Практика: каждый найденный баг → тест
@@ -198,6 +198,7 @@ dune exec examples/ex05_fleet.exe     # production-путь: EO+recovery, Agg, s
 dune exec examples/ex06_topology.exe  # модель исполнения B+C: merge+fan_out+supervisor
 dune exec examples/ex07_location/ex07_location.exe  # локация шахтёра: median RSSI, sliding, top-2 + координаты
 dune exec examples/ex08_triggers/ex08_triggers.exe  # триггеры в стиле Zabbix (гистерезис, recovery)
+dune exec examples/ex09_complex_trigger/ex09_complex_trigger.exe  # составной триггер (комбинация условий)
 dune exec examples/ex10_keyed_join/ex10_keyed_join.exe  # multi-stream join по ключу
 dune exec examples/ex11_presence.exe  # учёт присутствия: когда нужен Retract (исчезновение без замены)
 
@@ -281,8 +282,8 @@ late data). (`dune exec bench/bench_ex07.exe`,
 | Dead Letter Queue           | ✓ реализовано (noop + log)    |
 | Graceful Shutdown           | ✓ реализовано (SIGTERM/INT)   |
 | Prometheus Metrics          | ✓ реализовано (HTTP :9090)    |
-| Изоляция исключений         | ✓ safe_map / safe_filter (битое событие → on_error, не падение) |
-| Unit + Property тесты       | ✓ 120 сюит, 63 QCheck-инварианта |
+| Изоляция исключений         | ✓ safe_map / safe_filter + `?on_error` в process_keyed / window_fold (ядовитое событие → обработчик/DLQ, не падение) |
+| Unit + Property тесты       | ✓ 133 сюиты, 76 QCheck-инвариантов |
 | CI                          | ✓ активен (GitHub Actions): сборка + тесты + покрытие на OCaml 4.14 и 5.2, зелёный на каждом пуше |
 | Exactly-once parallel       | ✓ реализовано (barrier + snapshot) |
 | Exactly-once end-to-end     | ✓ offset + 2PC sink + recovery + durable (E2E recovery harness: kill→recover→output совпадает) |
