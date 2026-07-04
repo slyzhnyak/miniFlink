@@ -50,56 +50,61 @@ type ping =
      - первое появление          → Data
      - смена зоны                 → Update (атомарная замена зоны)
      - тот же зон (повтор)        → ничего (без спама)
-     - Lost                       → Retract (присутствие исчезает) *)
+     - Lost                       → Retract (присутствие исчезает)
+
+   Реализовано через {!Pipe.process_keyed}: состояние на горняка
+   (последняя зона) держит библиотека, а Retract/Update эмитятся
+   штатными [ctx.emit_retract] / [ctx.emit_update] — те самые
+   первичные средства, ради демонстрации которых и существует пример.
+   Ключ партиционирования — miner; ping оборачивается в событие с его
+   [ts], поэтому per-key состояние и эмиссии несут event-time. *)
+
+module ByPing : Keyed.S with type t = ping = struct
+  type t = ping
+  let key = function Seen (m, _, _) -> m | Lost (m, _) -> m
+end
+
+(* состояние на горняка: последнее известное присутствие (или None) *)
+type pstate = { mutable current : presence option }
 
 let presence_events (raw : ping Stream.t) : presence Mf_event.t Stream.t =
-  let last : (string, presence) Hashtbl.t = Hashtbl.create 64 in
-  let pending : presence Mf_event.t Queue.t = Queue.create () in
-  let rec next () =
-    if not (Queue.is_empty pending) then Some (Queue.pop pending)
-    else match raw () with
-      | None -> None
-      | Some (Seen (miner, zone, ts)) ->
-        let cur = { miner; zone; ts } in
-        (match Hashtbl.find_opt last miner with
-         | None ->
-           (* первое появление — новое присутствие *)
-           Hashtbl.replace last miner cur;
-           Some (Mf_event.data cur ts)
-         | Some old when old.zone = zone ->
-           (* та же зона — без спама, ничего не эмитим *)
-           next ()
-         | Some old ->
-           (* смена зоны — атомарная ЗАМЕНА (Update), не исчезновение *)
-           Hashtbl.replace last miner cur;
-           Some (Mf_event.update old cur ts))
-      | Some (Lost (miner, ts)) ->
-        (match Hashtbl.find_opt last miner with
-         | None -> next ()   (* не знали о нём — нечего отзывать *)
-         | Some old ->
-           (* присутствие ИСЧЕЗАЕТ — Retract. Замены нет: человека
-              больше нет ни в одной зоне. Update здесь невыразим. *)
-           Hashtbl.remove last miner;
-           ignore ts;
-           Some (Mf_event.retract old old.ts))
-  in next
+  raw
+  |> Stream.map (fun ping ->
+       let ts = match ping with Seen (_, _, t) | Lost (_, t) -> t in
+       Mf_event.data ping ts)
+  |> Pipe.process_keyed (module ByPing)
+       ~init:(fun () -> { current = None })
+       ~on_event:(fun ctx miner st ping ->
+         match ping with
+         | Seen (_, zone, ts) ->
+           let cur = { miner; zone; ts } in
+           (match st.current with
+            | None ->
+              st.current <- Some cur;
+              ctx.Pipe.emit cur                 (* первое появление *)
+            | Some old when old.zone = zone -> () (* та же зона — без спама *)
+            | Some old ->
+              st.current <- Some cur;
+              ctx.Pipe.emit_update ~old cur)    (* смена зоны — Update *)
+         | Lost (_, _) ->
+           (match st.current with
+            | None -> ()                         (* не знали — нечего отзывать *)
+            | Some old ->
+              st.current <- None;
+              ctx.Pipe.emit_retract old))        (* присутствие исчезает *)
+       ~on_timer:(fun _ _ _ _ _ -> ())
 
 (* ── Downstream: live-карта «кто в какой зоне» ────────────────
-   Материализует поток присутствия в текущую картину. Показывает, как
-   каждый тип события влияет на карту:
-     Data    → добавить/обновить
-     Update  → переместить (old.zone убрать, new.zone поставить)
-     Retract → убрать совсем *)
+   Материализует поток присутствия в текущую картину через
+   {!Pipe.materialize}: Data кладёт, Update атомарно заменяет, Retract
+   убирает. Идентичность записи — miner. Раньше здесь был ручной
+   Hashtbl-проход по конструкторам; materialize делает ровно это
+   декларативно. *)
 
 let live_map (events : presence Mf_event.t list) : (string * string) list =
-  let map : (string, string) Hashtbl.t = Hashtbl.create 64 in
-  List.iter (function
-    | Mf_event.Data (p, _) -> Hashtbl.replace map p.miner p.zone
-    | Mf_event.Update { new_value = p; _ } ->
-      Hashtbl.replace map p.miner p.zone   (* атомарный переход *)
-    | Mf_event.Retract (p, _) -> Hashtbl.remove map p.miner  (* исчез *)
-    | Mf_event.Watermark _ -> ()) events;
-  Hashtbl.fold (fun m z acc -> (m, z) :: acc) map []
+  Stream.of_list events
+  |> Pipe.materialize ~by:(fun p _ts -> p.miner)
+  |> List.map (fun (miner, p) -> (miner, p.zone))
   |> List.sort compare
 
 (* ── Сценарий ─────────────────────────────────────────────── *)
