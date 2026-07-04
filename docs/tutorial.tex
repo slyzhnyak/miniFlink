@@ -555,6 +555,30 @@ let silence =
 данных --- то, что batch-запрос увидел бы в лучшем случае с большим
 опозданием.
 
+\paragraph{Прямее: \texttt{on\_silence}.} \texttt{silence\_age} даёт
+\emph{поток возраста}, который надо соединять с триггером. Если нужен
+сразу алерт об отсутствии, есть более прямой оператор ---
+\texttt{Pipe.on\_silence}: он сам эмитит событие, когда признак не
+наблюдался дольше порога, и (опционально) recovery при возобновлении.
+
+\begin{lstlisting}
+packets
+|> Pipe.event_time ~lateness:(seconds 1)
+|> Pipe.on_silence (module ByLamp)
+     ~within:(minutes 2)
+     ~has:(fun _ -> true)          (* любой пакет = <<жив>> *)
+     ~on_silent:(fun key ~last ~ts -> No_signal (key, last))
+     ~on_resumed:(fun key ~ts -> Signal_back key)
+\end{lstlisting}
+
+Время перехода в тишину --- \texttt{last + within} (когда молчание
+превысило порог), а не время watermark, который это обнаружил.
+\texttt{\textasciitilde{}has} выбирает, что считается «признаком жизни»:
+любой пакет, только пакет с показаниями, только с движением. Когда один
+детектор должен молчать, пока активен другой, их композирует
+\texttt{Pipe.suppress\_while}. Оба выросли из реального кода ex07 (см.
+ниже раздел про операторы за пределами линейного pipeline).
+
 %%% ──────────────────────────────────────────────────────────────────────
 \section{Порог из данных, а не из кода}
 
@@ -816,6 +840,38 @@ $T$, уже получены (даже те, что пришли с опозда
 Писать обработку \texttt{Retract}/\texttt{Update} вручную обычно не
 нужно: операторы (\texttt{map}, \texttt{filter}, \texttt{window\_agg},
 \texttt{trigger}) делают это сами и согласованно.
+
+\paragraph{Когда нужна своя логика на ключ.} Иногда доменная логика не
+укладывается в готовые операторы: нужно держать состояние на ключ и
+самому решать, когда выдать \texttt{Data}, когда \emph{отозвать}
+(\texttt{Retract}) уже выпущенный результат, а когда \emph{обновить}
+(\texttt{Update}). Для этого есть \texttt{Pipe.process\_keyed}: состояние
+на ключ держит библиотека, а контекст \texttt{ctx} даёт \texttt{emit},
+\texttt{emit\_retract} и \texttt{emit\_update} --- те же три
+конструктора, но под вашим контролем.
+
+\begin{lstlisting}
+events
+|> Pipe.process_keyed (module ByKey)
+     ~init:(fun () -> { current = None })
+     ~on_event:(fun ctx key st v ->
+       match st.current with
+       | None     -> st.current <- Some v; ctx.emit v
+       | Some old -> st.current <- Some v; ctx.emit_update ~old v)
+     ~on_timer:(fun _ _ _ _ _ -> ())
+\end{lstlisting}
+
+А когда на одном ключе сходятся \emph{несколько потоков разных типов}
+(например driver + справочник, приходящий отдельным потоком),
+\texttt{Pipe.co\_process2}/\texttt{co\_process3} держат общее состояние
+на ключ и вызывают свой обработчик на каждый вход. Оба выросли из
+реального кода ex07; полный разбор --- в \texttt{docs/expressiveness.md}
+(раздел 4) и в примере \texttt{examples/ex07\_location/}.
+
+Ещё одна практичная деталь для продакшена: \texttt{process\_keyed} и
+\texttt{window\_fold} принимают \texttt{\textasciitilde{}?on\_error} ---
+если ваш колбэк бросит исключение на «ядовитом» событии, оно уйдёт в
+обработчик (например в DLQ), а пайплайн продолжит работать, а не упадёт.
 
 %%% ──────────────────────────────────────────────────────────────────────
 \section{Шаг 9. Персистентность без изменения пайплайна}
