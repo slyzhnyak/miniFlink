@@ -591,3 +591,53 @@ val co_process3 :
   'b Mf_event.t Stream.t ->
   'c Mf_event.t Stream.t ->
   'out Mf_event.t Stream.t
+
+(** {3 on_silence — детектор отсутствия (absence)}
+
+    «Признак не наблюдался дольше [~within]» как first-class оператор
+    (разрыв G-2a). Trigger умеет гистерезис/debounce по значению, но не
+    по отсутствию; on_silence закрывает это.
+
+    Держит per-key время последнего события, прошедшего [~has]. Когда
+    watermark уходит за [last + within], эмитит [~on_silent key ~last
+    ~ts] со временем перехода [ts = last + within] (не временем
+    watermark — тишина наступила именно тогда). Когда [~has]-событие
+    приходит после тишины, эмитит [?on_resumed key ~ts] (recovery).
+
+    ts берётся из конверта потока (event-time), поэтому источник должен
+    быть размечен {!event_time}. [~has] выбирает, что «сбрасывает
+    тишину»: [fun _ -> true] — любое событие; [fun p -> p.readings <> []]
+    — только с показаниями.
+
+    @raise Invalid_argument если [within <= 0]. *)
+val on_silence :
+  (module Keyed.S with type t = 'a) ->
+  within:Time.t ->
+  has:('a -> bool) ->
+  on_silent:(string -> last:Time.t option -> ts:Time.t -> 'out) ->
+  ?on_resumed:(string -> ts:Time.t -> 'out) ->
+  'a Mf_event.t Stream.t ->
+  'out Mf_event.t Stream.t
+
+(** {3 suppress_while — подавление одного потока алертов другим}
+
+    Поток [suppressed] глушится по ключу, пока по этому ключу активно
+    подавление от [controller] (разрыв G-2b). Раньше подавление
+    (motion/voltage молчат при No_packets) вшивалось в переплетённые
+    FSM; suppress_while делает его композицией.
+
+    [~gate] классифицирует событие controller'а: [`On key] включает
+    подавление для ключа, [`Off key] снимает, [`Ignore] — не влияет.
+    Пока для ключа подавление включено, Data/Retract/Update из
+    [suppressed] по этому ключу отбрасываются. Watermark'и обоих входов
+    объединяются (min) и проходят. Управляющие события в выход не идут.
+
+    Пример: [controller] = поток No_packets-алертов ([`On] на Data,
+    [`Off] на Retract), [suppressed] = motion-алерты. *)
+val suppress_while :
+  controller_key:('b -> string option) ->
+  gate:('b -> [ `On of string | `Off of string | `Ignore ]) ->
+  suppressed_key:('a -> string) ->
+  'b Mf_event.t Stream.t ->
+  'a Mf_event.t Stream.t ->
+  'a Mf_event.t Stream.t

@@ -76,14 +76,13 @@ let () =
     List.exists (function Domain.Sos _ -> true | _ -> false) alerts);
   check "alerts include Low_voltage" (
     List.exists (function Domain.Low_voltage _ -> true | _ -> false) alerts);
-
-  (* FSM-функции — чистые, проверяем переходы *)
-  let seen = Pipelines.Last_seen.make () in
-  let pkt_with_motion = { p with moving = true; ts = 100 } in
-  let _ = Pipelines.Last_seen.record seen ~p:pkt_with_motion in
-  check "Last_seen.record updates moving" (seen.moving = Some 100);
-  check "Fsm.contact_state pure & callable"
-    (Pipelines.Fsm.contact_state ~now:100 seen = Pipelines.Fsm.Contact_ok);
+  (* connectivity_alerts переписан на декларативную композицию
+     (on_silence + suppress_while + Trigger). Проверяем, что absence-
+     детекторы дают свои алерты — раньше эти ветки не тестировались. *)
+  check "alerts include an absence alert (No_packets/No_readings/No_motion)" (
+    List.exists (function
+      | Domain.No_packets _ | Domain.No_readings _ | Domain.No_motion _ -> true
+      | _ -> false) alerts);
 
   (* Газовый пайплайн (переписан на co_process3) — проверяем, что
      retract-семантика работает end-to-end: есть алерты И есть

@@ -146,203 +146,130 @@ let median_rssi
        { loc_lamp = lamp; loc_wend = wend; loc_top2 = top2;
          loc_position = interpolate_position ~find_beacon top2 })
 
-(** {1 Контроль состояния шахтёра: 3 слоя + 4 FSM} *)
+(** {1 Контроль состояния шахтёра: декларативная композиция} *)
 
 (* ════════════════════════════════════════════════════════════════
-   Четыре НЕЗАВИСИМЫХ подсистемы фонаря — связь, движение, батарея,
-   SOS-кнопка. У шахтёра могут падать одновременно несколько; каждая
-   требует своей реакции, поэтому НЕ один автомат с пятью состояниями
-   (где одно подавит другое), а ТРИ независимых FSM плюс импульсное
-   событие SOS.
+   Четыре независимых подсистемы фонаря — связь, движение, батарея,
+   SOS. Раньше это были три переплетённых ручных FSM (Last_seen /
+   Single_timer / Fsm, ~150 строк) с подавлением, вшитым в состояния.
 
-   Структура трёх слоёв:
-
-     Layer 1 — Last_seen:  ЧТО ИЗВЕСТНО (факты о шахтёре)
-     Layer 2 — Self_timer: КОГДА ПРОВЕРИТЬ (один таймер на ключ,
-                           переменная цель = ближайшая смена состояния)
-     Layer 3 — Fsm:        ЧТО ДЕЛАТЬ (три чистые функции перехода)
-
-   Зависимость подавления: motion и voltage смотрят на contact_state.
-   Если No_packets, они возвращают «Ok» — нет смысла сигналить, мы
-   просто не знаем.
-
-   Гистерезис и debounce напряжения: три состояния (Ok / Suspect /
-   Low_voltage); Suspect — внутренний, наружу не эмитим. Вход в
-   Suspect при V<low; через debounce, если V всё ещё низко, переход
-   в Low_voltage и эмиссия. Выход в Ok только при V>ok (гистерезис).
-
-   Late пакеты не сдвигают last_* поля назад во времени (монотонность);
-   только late, который реально новее уже зафиксированного, обновляет
-   их вперёд.
+   Теперь — композиция первичных операторов (разрывы G-2a/G-2b):
+     - Pipe.on_silence   — отсутствие (нет пакетов/показаний/движения);
+     - Trigger           — напряжение с гистерезисом и debounce;
+     - Pipe.suppress_while — подавление (motion/voltage молчат без связи);
+     - map/filter        — импульсный SOS.
+   Вся сборка — в connectivity_alerts ниже.
    ════════════════════════════════════════════════════════════════ *)
-
-(** ─── Layer 1: Last_seen — хранилище фактов ────────────────── *)
-module Last_seen = struct
-  type t = {
-    mutable any           : Time.t option;
-    mutable with_readings : Time.t option;
-    mutable moving        : Time.t option;
-    mutable voltage       : float option;
-    mutable suspect_low_since : Time.t option;
-    mutable sos           : bool;
-  }
-
-  let make () = {
-    any = None; with_readings = None; moving = None;
-    voltage = None; suspect_low_since = None; sos = false;
-  }
-
-  (** Зарегистрировать пришедший пакет. Возвращает [`Sos_pressed] если
-      это переход кнопки false→true (импульс).
-
-      {b Монотонность по времени}: поля last_* обновляются только если
-      [p.ts > current] — late не сдвигает зафиксированные «свежие»
-      факты назад. *)
-  let record t ~(p : packet) : [ `Sos_pressed | `Quiet ] =
-    let bumps_max old_v = match old_v with
-      | None -> true
-      | Some t' -> p.ts > t' in
-    let was_freshest = bumps_max t.any in
-    if was_freshest then t.any <- Some p.ts;
-    if p.readings <> [] && bumps_max t.with_readings then
-      t.with_readings <- Some p.ts;
-    if p.moving && bumps_max t.moving then t.moving <- Some p.ts;
-    if was_freshest || t.voltage = None then
-      t.voltage <- Some p.voltage;
-    if p.voltage < low_voltage_threshold && t.suspect_low_since = None then
-      t.suspect_low_since <- Some p.ts
-    else if p.voltage > voltage_ok_threshold then
-      t.suspect_low_since <- None;
-    let sos_pressed = p.sos && not t.sos in
-    t.sos <- p.sos;
-    if sos_pressed then `Sos_pressed else `Quiet
-end
-
-(** ─── Layer 2: Single_timer — один логический таймер на ключ ────
-    Вынесен в библиотеку (Pipe.Single_timer, разрыв G-3 закрыт). *)
-module Self_timer = Pipe.Single_timer
-
-(** ─── Layer 3: Fsm — три чистые функции перехода ───────────── *)
-module Fsm = struct
-  type contact_state = Contact_ok | C_no_readings | C_no_packets
-  type motion_state  = Motion_ok  | M_no_motion
-  type voltage_state = V_ok       | V_suspect | V_low
-
-  let contact_state ~now (s : Last_seen.t) : contact_state =
-    let exhausted ~since ~threshold = match since with
-      | None -> true | Some t -> now - t >= threshold in
-    if exhausted ~since:s.any ~threshold:no_packets_threshold then C_no_packets
-    else if exhausted ~since:s.with_readings ~threshold:no_readings_threshold then C_no_readings
-    else Contact_ok
-
-  let motion_state ~now (s : Last_seen.t) : motion_state =
-    match contact_state ~now s with
-    | C_no_packets -> Motion_ok
-    | _ ->
-      match s.moving with
-      | None -> M_no_motion
-      | Some t when now - t >= no_motion_threshold -> M_no_motion
-      | Some _ -> Motion_ok
-
-  let voltage_state ~now (s : Last_seen.t) : voltage_state =
-    match contact_state ~now s with
-    | C_no_packets -> V_ok
-    | _ ->
-      match s.voltage, s.suspect_low_since with
-      | None, _ -> V_ok
-      | Some v, _ when v > voltage_ok_threshold -> V_ok
-      | Some _, Some since when now - since >= voltage_debounce -> V_low
-      | Some _, Some _ -> V_suspect
-      | Some _, None -> V_ok
-
-  (** Ближайший момент, когда состояние какой-либо подсистемы может
-      измениться. Минимум из 4 порогов; max_int если ничего не запланировано. *)
-  let next_check (s : Last_seen.t) : Time.t =
-    let after since threshold = (Option.value since ~default:0) + threshold in
-    let contact_check =
-      min (after s.any no_packets_threshold)
-          (after s.with_readings no_readings_threshold) in
-    let motion_check = after s.moving no_motion_threshold in
-    let voltage_check = match s.suspect_low_since with
-      | Some since -> since + voltage_debounce
-      | None -> max_int in
-    min contact_check (min motion_check voltage_check)
-end
-
-(** ─── Клей: process_keyed связывает три слоя ────────────────── *)
-type per_lamp = {
-  seen          : Last_seen.t;
-  timer         : Self_timer.t;
-  mutable last_contact : Fsm.contact_state;
-  mutable last_motion  : Fsm.motion_state;
-  mutable last_voltage : Fsm.voltage_state;
-  mutable max_now      : Time.t;
-}
-
-let make_state () = {
-  seen         = Last_seen.make ();
-  timer        = Self_timer.make ();
-  last_contact = Fsm.Contact_ok;
-  last_motion  = Fsm.Motion_ok;
-  last_voltage = Fsm.V_ok;
-  max_now      = min_int;
-}
-
-(** Проверить все три FSM, эмитнуть на переходе. Не пересчитывает FSM
-    «в прошлое» относительно уже виденного [max_now]. *)
-let check_and_emit ctx key st ~now =
-  if now <= st.max_now then ()
-  else begin
-    st.max_now <- now;
-    let c = Fsm.contact_state ~now st.seen in
-    if c <> st.last_contact then begin
-      st.last_contact <- c;
-      match c with
-      | Fsm.C_no_packets  -> ctx.Pipe.emit (No_packets  (key, st.seen.any))
-      | Fsm.C_no_readings -> ctx.Pipe.emit (No_readings (key, st.seen.with_readings))
-      | Fsm.Contact_ok    -> ()
-    end;
-    let m = Fsm.motion_state ~now st.seen in
-    if m <> st.last_motion then begin
-      st.last_motion <- m;
-      match m with
-      | Fsm.M_no_motion -> ctx.Pipe.emit (No_motion (key, st.seen.moving))
-      | Fsm.Motion_ok   -> ()
-    end;
-    let v = Fsm.voltage_state ~now st.seen in
-    if v <> st.last_voltage then begin
-      st.last_voltage <- v;
-      match v, st.seen.voltage with
-      | Fsm.V_low, Some volts -> ctx.Pipe.emit (Low_voltage (key, volts))
-      | Fsm.V_ok, _           -> ctx.Pipe.emit (Voltage_ok key)
-      | Fsm.V_suspect, _ | Fsm.V_low, None -> ()
-    end
-  end
-
 (** [connectivity_alerts packets] — поток алертов о состоянии шахтёра.
 
-    Один [process_keyed] на каждого шахтёра, три независимых FSM плюс
-    SOS-импульс. Использует pull-modэль таймеров miniflink: при тишине
-    источника нужен [Pipe.event_time] перед оператором, чтобы watermark
-    двигался. *)
+    Декларативная композиция пяти детекторов (разрывы G-2a/G-2b закрыты):
+
+    - три {!Pipe.on_silence} для отсутствия (нет пакетов / показаний /
+      движения) — absence как первичная операция, а не ручной FSM;
+    - {!Trigger} с гистерезисом и debounce для напряжения — та самая
+      механика, что жила в проекте, но раньше не композировалась;
+    - импульсный SOS через map+filter по переходу кнопки.
+
+    Подавление (motion и voltage молчат, пока «нет пакетов» — связи нет,
+    сигналить нечем) выражено {!Pipe.suppress_while}, а не переплетением
+    состояний. No_packets-поток используется дважды: как выход и как
+    controller подавления — поэтому источник и no_packets-поток
+    разветвляются через {!Stream.split}.
+
+    Источник размечается {!Pipe.event_time}: absence и Trigger работают
+    по event-time, watermark двигает детекцию тишины. *)
 let connectivity_alerts (source : packet Mf_event.t Stream.t)
     : alert Mf_event.t Stream.t =
-  source
-  |> Pipe.event_time ~lateness:(seconds 1)
-  |> Pipe.process_keyed (module ByLamp)
-       ~init:make_state
-       ~on_event:(fun ctx key st p ->
-         (match Last_seen.record st.seen ~p with
-          | `Sos_pressed -> ctx.Pipe.emit (Sos (key, p.ts))
-          | `Quiet -> ());
-         check_and_emit ctx key st ~now:p.ts;
-         Self_timer.reschedule st.timer ctx ~target:(Fsm.next_check st.seen))
-       ~on_timer:(fun ctx key st t _kind ->
-         Self_timer.consumed st.timer;
-         check_and_emit ctx key st ~now:t;
-         let next = Fsm.next_check st.seen in
-         if next > t && next < max_int then
-           Self_timer.reschedule st.timer ctx ~target:next)
+  let timed = source |> Pipe.event_time ~lateness:(seconds 1) in
+  (* источник нужен нескольким детекторам + no_packets — дважды
+     (выход и controller подавления). Разветвляем. *)
+  let srcs = Stream.split 6 timed in
+  let s_no_packets  = List.nth srcs 0 in
+  let s_no_readings = List.nth srcs 1 in
+  let s_no_motion   = List.nth srcs 2 in
+  let s_voltage     = List.nth srcs 3 in
+  let s_sos         = List.nth srcs 4 in
+  let s_np_ctrl     = List.nth srcs 5 in
+
+  (* ── Absence-детекторы ──────────────────────────────────── *)
+  let no_packets =
+    s_no_packets
+    |> Pipe.on_silence (module ByLamp)
+         ~within:no_packets_threshold
+         ~has:(fun _ -> true)          (* любой пакет = контакт *)
+         ~on_silent:(fun k ~last ~ts:_ -> No_packets (k, last)) in
+
+  let no_readings =
+    s_no_readings
+    |> Pipe.on_silence (module ByLamp)
+         ~within:no_readings_threshold
+         ~has:(fun p -> p.readings <> [])   (* пакет с маяками *)
+         ~on_silent:(fun k ~last ~ts:_ -> No_readings (k, last)) in
+
+  let no_motion =
+    s_no_motion
+    |> Pipe.on_silence (module ByLamp)
+         ~within:no_motion_threshold
+         ~has:(fun p -> p.moving)           (* пакет с движением *)
+         ~on_silent:(fun k ~last ~ts:_ -> No_motion (k, last)) in
+
+  (* ── Voltage: Trigger с гистерезисом + debounce ─────────── *)
+  let voltage =
+    let low_voltage = Trigger.create
+      ~name:"low_voltage"
+      ~condition:(Trigger.less_than_with_hysteresis
+                    ~problem:low_voltage_threshold
+                    ~recovery:voltage_ok_threshold)
+      ~problem_for:voltage_debounce
+      ~severity:Trigger.Warning
+      ~produce_alert:(fun ~key ~value ~ts:_ -> Low_voltage (key, value))
+      ~produce_recovery:(fun ~key ~ts:_ -> Voltage_ok key)
+      () in
+    s_voltage
+    |> Pipe.map (fun p -> (p.lamp, p.voltage))
+    |> Trigger.of_stream low_voltage in
+
+  (* ── SOS: импульс на переходе кнопки false→true ─────────── *)
+  let sos =
+    s_sos
+    |> Pipe.filter (fun p -> p.sos)
+    |> Pipe.map_ts (fun p ts -> Sos (p.lamp, ts))
+    |> Pipe.dedup (module Keyed.Make (struct
+         type t = alert
+         let key = function
+           | Sos (k, _) -> k | _ -> "" end))
+         ~rule:(function Sos (k, t) -> k ^ string_of_int t | _ -> "")
+         ~cooldown:0 in
+
+  (* ── Подавление: motion и voltage молчат, пока «нет пакетов» ──
+     No_packets-controller включает подавление ([`On]) на Data-алерте
+     No_packets и снимает ([`Off]) на его Retract (recovery контакта). *)
+  let np_alerts_ctrl =
+    s_np_ctrl
+    |> Pipe.on_silence (module ByLamp)
+         ~within:no_packets_threshold
+         ~has:(fun _ -> true)
+         ~on_silent:(fun k ~last ~ts:_ -> No_packets (k, last))
+         ~on_resumed:(fun k ~ts:_ -> No_packets (k, None)) in
+  let np_gate = function
+    | No_packets (k, Some _) -> `On k    (* тишина наступила — подавляем *)
+    | No_packets (k, None)   -> `Off k   (* контакт возобновился — снимаем *)
+    | _ -> `Ignore in
+  let np_key = function No_packets (k, _) -> Some k | _ -> None in
+  let alert_key = function
+    | No_packets (k, _) | No_readings (k, _) | No_motion (k, _)
+    | Low_voltage (k, _) | Voltage_ok k | Sos (k, _) -> k in
+
+  let suppress s =
+    Pipe.suppress_while
+      ~controller_key:np_key ~gate:np_gate ~suppressed_key:alert_key
+      np_alerts_ctrl s in
+
+  (* ── Слияние всех детекторов ────────────────────────────── *)
+  Mf_event.union no_packets
+    (Mf_event.union no_readings
+       (Mf_event.union (suppress no_motion)
+          (Mf_event.union (suppress voltage) sos)))
 
 
 (** {1 Газовые алерты с обогащением координатами} *)
