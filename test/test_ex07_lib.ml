@@ -103,4 +103,33 @@ let () =
   check "gas_alerts uses retract-семантику (Retract или Update есть)"
     (List.length gas_retracts > 0 || List.length gas_updates > 0);
 
+  (* G-6 reactive enrich (закрыт co_process3 + emit_event): газовый
+     алерт, выпущенный БЕЗ позиции, переэмитится с позицией, когда она
+     приходит позже. Контролируемый сценарий: CH4 6000ppm (Warning) без
+     позиции, затем location с координатами на тот же lamp. *)
+  let ch4_pkt : Domain.gas_packet = {
+    g_lamp = "M1"; g_ts = 1000;
+    g_co2 = None; g_co = None; g_h2 = None; g_ch4 = Some 6000. } in
+  let loc : Domain.location = {
+    loc_lamp = "M1"; loc_wend = 2000;
+    loc_top2 = []; loc_position = Some (10., 20., -30) } in
+  let re_emit =
+    let gas = Stream.of_list [ Mf_event.data ch4_pkt 1000; Mf_event.wm 3000 ] in
+    let rssi = Stream.of_list [ Mf_event.wm 3000 ] in
+    let locs = Stream.of_list [ Mf_event.data loc 2000; Mf_event.wm 3000 ] in
+    Pipelines.gas_alerts ~rssi ~locations:locs ~gas ()
+    |> Stream.to_list in
+  (* первый алерт без позиции *)
+  let had_alert_without_pos = List.exists (function
+    | Mf_event.Data (Domain.Gas_alert { ga_position = None; _ }, _) -> true
+    | _ -> false) re_emit in
+  (* переэмиссия с позицией (Update, где new несёт Some position) *)
+  let re_emitted_with_pos = List.exists (function
+    | Mf_event.Update { new_value =
+        Domain.Gas_alert { ga_position = Some _; _ }; _ } -> true
+    | _ -> false) re_emit in
+  check "G-6: газовый алерт сперва без позиции" had_alert_without_pos;
+  check "G-6: обновление позиции переэмитило алерт с координатами"
+    re_emitted_with_pos;
+
   Printf.printf "\nLibrary reusable from external test ✓\n"
