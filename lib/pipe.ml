@@ -611,6 +611,175 @@ let process_keyed = Process_fn.process_keyed
 let process_keyed_spec = Process_fn.process_keyed_spec
 module Single_timer = Process_fn.Single_timer
 
+(* варианты для объединения разнотипных потоков (co_process, suppress) *)
+type ('a, 'b) either2 = L2 of 'a | R2 of 'b
+type ('a, 'b, 'c) either3 = L3 of 'a | M3 of 'b | R3 of 'c
+
+(* ── on_silence — детектор отсутствия (absence) как first-class
+   оператор (закрытие разрыва G-2a).
+
+   «Признак не наблюдался дольше [within]» — половина connectivity_alerts
+   minePASS (нет пакетов, нет показаний, нет движения). Trigger умеет
+   гистерезис/debounce ПО ЗНАЧЕНИЮ, но не по ОТСУТСТВИЮ. on_silence
+   закрывает это: держит per-key время последнего наблюдения признака
+   [has], и когда watermark уходит дальше [last + within], эмитит
+   [on_silent] (переход в тишину) с временем перехода. Когда признак
+   снова наблюдён после тишины — эмитит [on_resumed] (recovery).
+
+   Absence детектируется по EVENT-TIME из конверта Data/watermark потока
+   (не из полей значения) — поэтому ts берётся из потока, а признак
+   [has] решается по значению. Источник должен быть размечен
+   Pipe.event_time, иначе watermark не двигается и тишина не наступает.
+
+   [has] выбирает, какое событие «сбрасывает» тишину: «нет пакетов» —
+   [fun _ -> true]; «нет показаний» — [fun p -> p.readings <> []] и т.д.
+   Событие, не прошедшее [has], не обновляет время наблюдения, но
+   watermark всё равно двигает детекцию. *)
+
+type ('key, 'out) silence_state = {
+  mutable last_seen : Time.t option;  (* время последнего has-признака *)
+  mutable silent    : bool;
+  mutable deadline  : Time.t option;  (* когда наступит тишина: last + within *)
+}
+
+let on_silence
+    (type a) (type out)
+    (module K : Keyed.S with type t = a)
+    ~(within : Time.t)
+    ~(has : a -> bool)
+    ~(on_silent : string -> last:Time.t option -> ts:Time.t -> out)
+    ?(on_resumed : (string -> ts:Time.t -> out) option)
+    (upstream : a Mf_event.t Stream.t)
+  : out Mf_event.t Stream.t =
+  if within <= 0 then invalid_arg "Pipe.on_silence: within должен быть > 0";
+  let states : (string, (string, out) silence_state) Hashtbl.t =
+    Hashtbl.create 64 in
+  let state_of key =
+    match Hashtbl.find_opt states key with
+    | Some s -> s
+    | None ->
+      let s = { last_seen = None; silent = false; deadline = None } in
+      Hashtbl.add states key s; s
+  in
+  let out_q : out Mf_event.t Queue.t = Queue.create () in
+  (* на watermark wm: для каждого ключа, чей дедлайн наступил и кто ещё
+     не молчит — эмитим переход в тишину со временем дедлайна (не wm:
+     тишина наступила ровно в last+within, а не когда мы это заметили) *)
+  let sweep wm =
+    Hashtbl.iter (fun key st ->
+      match st.deadline with
+      | Some d when not st.silent && wm >= d ->
+        st.silent <- true;
+        Queue.push (Mf_event.data (on_silent key ~last:st.last_seen ~ts:d) d) out_q
+      | _ -> ()) states
+  in
+  let observe key (v : a) ts =
+    let st = state_of key in
+    if has v then begin
+      (* монотонность event-time: late-событие, чей ts не новее уже
+         зафиксированного наблюдения, НЕ откатывает last_seen/дедлайн
+         назад (иначе late-пакет отодвинул бы детекцию тишины в прошлое).
+         Такое событие всё же снимает тишину, если она была ошибочно
+         объявлена, но дедлайн считается от самого свежего наблюдения. *)
+      let is_newer = match st.last_seen with
+        | None -> true | Some prev -> ts > prev in
+      if st.silent then begin
+        st.silent <- false;
+        (match on_resumed with
+         | Some f -> Queue.push (Mf_event.data (f key ~ts) ts) out_q
+         | None -> ())
+      end;
+      if is_newer then begin
+        st.last_seen <- Some ts;
+        st.deadline <- Some (ts + within)
+      end
+    end
+  in
+  let upstream_done = ref false in
+  fun () ->
+    let rec pull () =
+      if not (Queue.is_empty out_q) then Some (Queue.pop out_q)
+      else if !upstream_done then None
+      else match upstream () with
+        | None -> upstream_done := true; None
+        | Some (Mf_event.Data (v, ts)) ->
+          observe (K.key v) v ts; pull ()
+        | Some (Mf_event.Update { new_value; ts; _ }) ->
+          (* Update: трактуем new_value как наблюдение *)
+          observe (K.key new_value) new_value ts; pull ()
+        | Some (Mf_event.Retract _) -> pull ()  (* retract не наблюдение *)
+        | Some (Mf_event.Watermark wm as w) ->
+          sweep wm;
+          Queue.push w out_q;  (* watermark пробрасываем downstream *)
+          pull ()
+    in pull ()
+
+(* ── suppress_while — подавление одного потока алертов другим
+   (закрытие разрыва G-2b).
+
+   В connectivity_alerts motion/voltage не должны сигналить, пока
+   contact = No_packets («мы просто не знаем — связи нет»). Раньше это
+   вшивалось в переплетённые FSM (motion_state/voltage_state сами
+   заглядывали в contact_state). suppress_while выражает это как
+   КОМПОЗИЦИЮ: поток [suppressed] глушится по ключу, пока по ключу
+   активно подавление от [controller].
+
+   [gate] классифицирует событие controller'а: [`On key] включает
+   подавление для ключа, [`Off key] снимает, [`Ignore] — не влияет.
+   Пока для ключа подавление включено, Data/Update/Retract из
+   [suppressed] по этому ключу отбрасываются; watermark'и обоих входов
+   объединяются (min) и проходят.
+
+   Классический пример: controller = поток No_packets-алертов
+   ([`On] на Data, [`Off] на Retract/recovery), suppressed = motion. *)
+
+let suppress_while
+    (type a) (type b)
+    ~(controller_key : b -> string option)
+    ~(gate : b -> [ `On of string | `Off of string | `Ignore ])
+    ~(suppressed_key : a -> string)
+    (controller : b Mf_event.t Stream.t)
+    (suppressed : a Mf_event.t Stream.t)
+  : a Mf_event.t Stream.t =
+  ignore controller_key;
+  let blocked : (string, unit) Hashtbl.t = Hashtbl.create 64 in
+  let is_blocked key = Hashtbl.mem blocked key in
+  (* объединяем: controller-события только обновляют blocked-множество и
+     НЕ проходят в выход (это управляющий поток); suppressed-события
+     проходят, если ключ не заблокирован. Тегируем через either2. *)
+  let cs = controller |> emap (fun b -> L2 b) in
+  let ss = suppressed |> emap (fun a -> R2 a) in
+  let unioned = Mf_event.union cs ss in
+  let out_q : a Mf_event.t Queue.t = Queue.create () in
+  let handle_ctrl b =
+    match gate b with
+    | `On key -> Hashtbl.replace blocked key ()
+    | `Off key -> Hashtbl.remove blocked key
+    | `Ignore -> ()
+  in
+  let pass_suppressed ev key =
+    if not (is_blocked key) then Queue.push ev out_q
+  in
+  let upstream_done = ref false in
+  fun () ->
+    let rec pull () =
+      if not (Queue.is_empty out_q) then Some (Queue.pop out_q)
+      else if !upstream_done then None
+      else match unioned () with
+        | None -> upstream_done := true; None
+        | Some (Mf_event.Data (L2 b, _)) -> handle_ctrl b; pull ()
+        | Some (Mf_event.Update { new_value = L2 b; _ }) -> handle_ctrl b; pull ()
+        | Some (Mf_event.Retract (L2 _, _)) -> pull ()
+        | Some (Mf_event.Data (R2 a, ts) as _e) ->
+          pass_suppressed (Mf_event.data a ts) (suppressed_key a); pull ()
+        | Some (Mf_event.Retract (R2 a, ts)) ->
+          pass_suppressed (Mf_event.retract a ts) (suppressed_key a); pull ()
+        | Some (Mf_event.Update { old = R2 o; new_value = R2 n; ts }) ->
+          pass_suppressed (Mf_event.update o n ts) (suppressed_key n); pull ()
+        | Some (Mf_event.Update _) -> pull ()  (* смешанный old/new — не бывает *)
+        | Some (Mf_event.Watermark _ as w) -> Queue.push w out_q; pull ()
+    in pull ()
+
 (* ── co_process: keyed-обработка нескольких РАЗНОТИПНЫХ потоков на общем
    per-key состоянии (закрытие разрыва G-5).
 
@@ -624,8 +793,6 @@ module Single_timer = Process_fn.Single_timer
 
    key_* извлекают ОБЩИЙ строковый ключ из каждого входа (по нему
    шардируется состояние). *)
-
-type ('a, 'b) either2 = L2 of 'a | R2 of 'b
 
 let co_process2
     ?now_ms ?name ~init
@@ -647,8 +814,6 @@ let co_process2
       | R2 b -> on_b ctx k st b)
     ~on_timer
     unioned
-
-type ('a, 'b, 'c) either3 = L3 of 'a | M3 of 'b | R3 of 'c
 
 let co_process3
     ?now_ms ?name ~init
