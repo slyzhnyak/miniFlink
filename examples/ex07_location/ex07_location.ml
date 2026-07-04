@@ -4,7 +4,7 @@
     {ul
     {- {!Domain}        — типы [packet], [alert], [location], [gas_packet], [gas_alert], пороги, справочник маяков}
     {- {!Mock_source}   — мок-источник «как Kafka»: {!Mock_source.Default}}
-    {- {!Pipelines}     — ядро: [median_rssi] (локация), [connectivity_alerts] (FSM), [gas_alerts] (retract-enrichment)}
+    {- {!Pipelines}     — ядро: [median_rssi] (локация), [connectivity_alerts] (композиция on_silence/Trigger/suppress), [gas_alerts] (retract-enrichment)}
     {- {!Mock_sink}     — мок-sink: рендеринг алертов и локаций в stdout}}
 
     В прода-сценарии заменяется только {!Mock_source} (на [Kafka_source])
