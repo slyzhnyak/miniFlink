@@ -112,33 +112,35 @@ alignment: барьер как маркер, блокирующая достав
 
 ---
 
-## Прочие открытые находки (ревью 2026-06-30)
+## Находки ревью 2026-06-30 — все реальные баги ИСПРАВЛЕНЫ
 
-Полный триаж профессионального ревью от 30.06.2026 — в
-`docs/review-2026-06-30-response.md`. Кратко, открытые реальные баги
-помимо KI-1:
+Полный триаж — в `docs/review-2026-06-30-response.md`. Сверка с кодом на
+2026-07: все реальные баги, помеченные когда-то открытыми, закрыты и
+проверены в исходниках:
 
-- **C-1** data race на `failed[]` (parallel_v5 / checkpoint_parallel):
-  обычный bool-массив пишется воркером и читается диспетчером без
-  `Atomic` → UB на OCaml 5.
-- **C-3** `keyed_join` без eviction (`pipe.ml`): состояние растёт без
-  границ на неограниченном пространстве ключей (в отличие от `dedup`).
-- **H-2** `supervisor` хранит только первый `Critical_failure` +
-  отложенный re-raise после join всех пайплайнов.
-- **H-3** `window_fold` end-of-stream делает `iter`+`remove` по Hashtbl
-  = UB (рядом в файле есть правильный collect-then-remove).
-- **M-1** `dlq_log.count` читает счётчик без mutex.
-- **M-3** per-epoch abort откатывает вклад живых воркеров (зона KI-1).
-- **M-6** снапшот памяти даёт ~3x пик на каждом барьере.
-- **L-4** RocksDB без `set_sync` — нет durability на crash.
+- **C-1** data race на `failed[]` — ИСПРАВЛЕН: `Array.init … Atomic.make`
+  (checkpoint_parallel.ml), чтение/запись через `Atomic.get/set`.
+- **C-3** `keyed_join` без eviction — ИСПРАВЛЕН: `?ttl` с валидацией.
+- **H-2** `supervisor` терял все сбои кроме первого — ИСПРАВЛЕН:
+  накопление `all_crits` под mutex, лог каждого, re-raise первого.
+- **H-3** `window_fold` iter+remove = UB — ИСПРАВЛЕН: collect-then-remove
+  (`to_fire`/`to_remove` списки), end-of-stream через `iter`+`clear`.
+- **M-1** `dlq_log.count` без mutex — ИСПРАВЛЕН: чтение под `t.mu`.
+- **M-3** per-epoch abort откатывал вклад живых воркеров — ИСПРАВЛЕН:
+  `crash_epoch` cutoff + локальная эпоха воркера (см. ниже).
+- **L-4** RocksDB без durability — ИСПРАВЛЕН:
+  `rocksdb_writeoptions_set_sync(wopts, 1)` в стабах.
+- **A-1** `trigger` states без eviction — ИСПРАВЛЕН: `?ttl` с валидацией.
+- **A-2** `runtime_context` `Obj.obj/Obj.repr` — УСТРАНЁН: в модуле их нет.
+- **KI-1** multi-worker exactly-once alignment — ИСПРАВЛЕН (property-тест,
+  10000 кейсов, 1..8 воркеров).
 
-Найдено собственным аудитом сверх ревью:
-- **A-1** `trigger.ml:230-231` — per-key `states`/`last_event_ts` без
-  eviction (тот же класс, что C-3).
-- **A-2** `runtime_context.ml:58,62` — `Obj.obj`/`Obj.repr` (тот же
-  класс, что M-2).
+Осознанно отложены (НЕ баги, а дизайн-компромиссы с обоснованием):
+- **M-6** снапшот памяти ~3x пик на барьере — оптимизация, отложена;
+- **M-2** `Obj.repr/Obj.obj` type-erasure в codec-реестре
+  (managed_state.ml) — осознанный приём с документированной инвариантой в
+  заголовке модуля.
 
-Осознанные дизайн-компромиссы (H-1 SPSC-типы, H-4 trigger drops Retract,
-L-1/L-2/L-3, архитектурные 6.x) и спорные/требующие теста (M-2, M-4, M-5)
-— см. триаж-документ. L-5 (retry jitter) уже исправлен; C-2 — это
-KI-1 выше.
+Прочие осознанные компромиссы (H-1, H-4, L-1..L-3, архитектурные 6.x) и
+снятые property-тестами (M-4, M-5) — см. триаж-документ. На момент
+последней сверки открытых реальных багов не осталось.
