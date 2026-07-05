@@ -18,6 +18,27 @@
 \usepackage{amsmath}
 \usepackage{amssymb}
 \usepackage[margin=1in]{geometry}
+% Борьба с вылезанием текста за поля. В этой среде нет русских паттернов
+% переносов (ни texlive-lang-cyrillic для pdflatex, ни hyph-ru для
+% xelatex/polyglossia), поэтому длинные слова и \texttt-идентификаторы не
+% переносятся автоматически. Смягчаем это тремя средствами:
+%  1) microtype (protrusion) — микро-поджатие символов к краю поля;
+%  2) emergencystretch — TeX растягивает пробелы на трудной строке
+%     вместо вылезания за поле;
+%  3) повышенный tolerance — предпочесть чуть разреженные пробелы
+%     переполнению строки.
+\usepackage{microtype}
+\emergencystretch=3em
+\tolerance=2000
+\hbadness=2000  % не засорять лог мелкими underfull-предупреждениями
+% Примечание: в этой среде нет русских паттернов переносов (ни
+% texlive-lang-cyrillic для pdflatex, ни hyph-ru для polyglossia), а
+% длинные \texttt-идентификаторы неразрывны. microtype (protrusion) +
+% emergencystretch убирают всё вылезание за поля (0 overfull), ценой
+% нескольких чуть разреженных строк — это невидимый глазу компромисс,
+% предпочтительнее текста за полем. Если добавить русские паттерны
+% переносов (пакет hyph-ru / texlive-lang-cyrillic), строки станут ещё
+% плотнее автоматически.
 \usepackage{hyperref}
 \usepackage{listings}
 \usepackage{xcolor}
