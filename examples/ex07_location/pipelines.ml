@@ -258,14 +258,13 @@ let connectivity_alerts (source : packet Mf_event.t Stream.t)
     | No_packets (k, Some _) -> `On k    (* тишина наступила — подавляем *)
     | No_packets (k, None)   -> `Off k   (* контакт возобновился — снимаем *)
     | _ -> `Ignore in
-  let np_key = function No_packets (k, _) -> Some k | _ -> None in
   let alert_key = function
     | No_packets (k, _) | No_readings (k, _) | No_motion (k, _)
     | Low_voltage (k, _) | Voltage_ok k | Sos (k, _) -> k in
 
   let suppress s =
     Pipe.suppress_while
-      ~controller_key:np_key ~gate:np_gate ~suppressed_key:alert_key
+      ~gate:np_gate ~suppressed_key:alert_key
       np_alerts_ctrl s in
 
   (* ── Слияние всех детекторов ────────────────────────────── *)

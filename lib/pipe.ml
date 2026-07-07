@@ -636,15 +636,29 @@ type ('a, 'b, 'c) either3 = L3 of 'a | M3 of 'b | R3 of 'c
    Событие, не прошедшее [has], не обновляет время наблюдения, но
    watermark всё равно двигает детекцию. *)
 
-type ('key, 'out) silence_state = {
-  mutable last_seen : Time.t option;  (* время последнего has-признака *)
-  mutable silent    : bool;
-  mutable deadline  : Time.t option;  (* когда наступит тишина: last + within *)
+(* Реализация on_silence: ПОВЕРХ process_keyed (аудит 2026-07, N-1/N-2/N-8).
+   Была прямая реализация на Hashtbl+sweep; переписана, потому что:
+   - N-1: голый Hashtbl не персистентен — после recovery детекция тишины
+     слепла до первого события ключа. process_keyed персистит и state, и
+     таймеры через Managed_state → on_silence переживает рестарт.
+   - N-2: не было eviction — states росли вечно (класс C-3/A-1). Теперь
+     ?ttl: спустя ttl после последнего наблюдения (уже в тишине) state
+     ключа очищается через clear_state.
+   - N-8: sweep был O(все ключи) на каждый watermark. Теперь точечные
+     event-таймеры на дедлайн ключа.
+   Доступ к ts события внутри on_event — оборачиванием значения в (v, ts)
+   через Mf_event.map_ts перед process_keyed. *)
+
+type 'out silence_state = {
+  mutable sl_last   : Time.t option;   (* самое свежее has-наблюдение *)
+  mutable sl_silent : bool;
+  sl_timer          : Single_timer.t;
 }
 
 let on_silence
     (type a) (type out)
     (module K : Keyed.S with type t = a)
+    ?(ttl : Time.t option)
     ~(within : Time.t)
     ~(has : a -> bool)
     ~(on_silent : string -> last:Time.t option -> ts:Time.t -> out)
@@ -652,67 +666,60 @@ let on_silence
     (upstream : a Mf_event.t Stream.t)
   : out Mf_event.t Stream.t =
   if within <= 0 then invalid_arg "Pipe.on_silence: within должен быть > 0";
-  let states : (string, (string, out) silence_state) Hashtbl.t =
-    Hashtbl.create 64 in
-  let state_of key =
-    match Hashtbl.find_opt states key with
-    | Some s -> s
-    | None ->
-      let s = { last_seen = None; silent = false; deadline = None } in
-      Hashtbl.add states key s; s
-  in
-  let out_q : out Mf_event.t Queue.t = Queue.create () in
-  (* на watermark wm: для каждого ключа, чей дедлайн наступил и кто ещё
-     не молчит — эмитим переход в тишину со временем дедлайна (не wm:
-     тишина наступила ровно в last+within, а не когда мы это заметили) *)
-  let sweep wm =
-    Hashtbl.iter (fun key st ->
-      match st.deadline with
-      | Some d when not st.silent && wm >= d ->
-        st.silent <- true;
-        Queue.push (Mf_event.data (on_silent key ~last:st.last_seen ~ts:d) d) out_q
-      | _ -> ()) states
-  in
-  let observe key (v : a) ts =
-    let st = state_of key in
-    if has v then begin
-      (* монотонность event-time: late-событие, чей ts не новее уже
-         зафиксированного наблюдения, НЕ откатывает last_seen/дедлайн
-         назад (иначе late-пакет отодвинул бы детекцию тишины в прошлое).
-         Такое событие всё же снимает тишину, если она была ошибочно
-         объявлена, но дедлайн считается от самого свежего наблюдения. *)
-      let is_newer = match st.last_seen with
-        | None -> true | Some prev -> ts > prev in
-      if st.silent then begin
-        st.silent <- false;
-        (match on_resumed with
-         | Some f -> Queue.push (Mf_event.data (f key ~ts) ts) out_q
-         | None -> ())
-      end;
-      if is_newer then begin
-        st.last_seen <- Some ts;
-        st.deadline <- Some (ts + within)
-      end
-    end
-  in
-  let upstream_done = ref false in
-  fun () ->
-    let rec pull () =
-      if not (Queue.is_empty out_q) then Some (Queue.pop out_q)
-      else if !upstream_done then None
-      else match upstream () with
-        | None -> upstream_done := true; None
-        | Some (Mf_event.Data (v, ts)) ->
-          observe (K.key v) v ts; pull ()
-        | Some (Mf_event.Update { new_value; ts; _ }) ->
-          (* Update: трактуем new_value как наблюдение *)
-          observe (K.key new_value) new_value ts; pull ()
-        | Some (Mf_event.Retract _) -> pull ()  (* retract не наблюдение *)
-        | Some (Mf_event.Watermark wm as w) ->
-          sweep wm;
-          Queue.push w out_q;  (* watermark пробрасываем downstream *)
-          pull ()
-    in pull ()
+  (match ttl with
+   | Some t when t <= within ->
+     invalid_arg "Pipe.on_silence: ttl должен быть > within"
+   | _ -> ());
+  let module KT = struct
+    type t = a * Time.t
+    let key (v, _) = K.key v
+  end in
+  upstream
+  |> Stream.map (Mf_event.map_ts (fun v t -> (v, t)))
+  |> process_keyed (module KT)
+       ~name:"on_silence"
+       ~init:(fun () ->
+         { sl_last = None; sl_silent = false;
+           sl_timer = Single_timer.make () })
+       ~on_event:(fun ctx key st (v, ts) ->
+         if has v then begin
+           (* монотонность event-time (M2): late-событие не откатывает
+              last_seen назад, но снимает ошибочно объявленную тишину. *)
+           let is_newer = match st.sl_last with
+             | None -> true | Some prev -> ts > prev in
+           if st.sl_silent then begin
+             st.sl_silent <- false;
+             (match on_resumed with
+              | Some f -> ctx.emit (f key ~ts)
+              | None -> ())
+           end;
+           if is_newer then st.sl_last <- Some ts;
+           (* перевзвести дедлайн тишины от САМОГО СВЕЖЕГО наблюдения
+              (для late-события это прежний last — возможен немедленный
+              повторный silent на следующем watermark, как и раньше) *)
+           (match st.sl_last with
+            | Some last ->
+              Single_timer.reschedule st.sl_timer ctx ~target:(last + within)
+            | None -> ())
+         end)
+       ~on_timer:(fun ctx key st t _kind ->
+         Single_timer.consumed st.sl_timer;
+         match st.sl_last with
+         | Some last when (not st.sl_silent) && t >= last + within ->
+           (* переход в тишину: время = дедлайн (last+within), не watermark *)
+           st.sl_silent <- true;
+           ctx.emit (on_silent key ~last:st.sl_last ~ts:(last + within));
+           (* eviction: спустя ttl после last — очистить state ключа
+              (возобновление после ttl = «первое появление», без Resumed) *)
+           (match ttl with
+            | Some tt ->
+              Single_timer.reschedule st.sl_timer ctx ~target:(last + tt)
+            | None -> ())
+         | Some last when st.sl_silent && (match ttl with
+             | Some tt -> t >= last + tt | None -> false) ->
+           ctx.clear_state ()
+         | _ -> ())
+
 
 (* ── suppress_while — подавление одного потока алертов другим
    (закрытие разрыва G-2b).
@@ -735,13 +742,11 @@ let on_silence
 
 let suppress_while
     (type a) (type b)
-    ~(controller_key : b -> string option)
     ~(gate : b -> [ `On of string | `Off of string | `Ignore ])
     ~(suppressed_key : a -> string)
     (controller : b Mf_event.t Stream.t)
     (suppressed : a Mf_event.t Stream.t)
   : a Mf_event.t Stream.t =
-  ignore controller_key;
   let blocked : (string, unit) Hashtbl.t = Hashtbl.create 64 in
   let is_blocked key = Hashtbl.mem blocked key in
   (* объединяем: controller-события только обновляют blocked-множество и
