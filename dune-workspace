@@ -1,11 +1,27 @@
 (lang dune 3.0)
 
-; Профиль tsan — для прогона test/tsan_parallel.exe под ThreadSanitizer.
-; Требует OCaml switch с поддержкой tsan (OCaml >= 5.2):
-;   opam switch create 5.2.0+tsan
-; Затем:
-;   dune build --profile tsan test/tsan_parallel.exe
-;   ./_build/tsan/test/tsan_parallel.exe
+; Профиль `tsan` для test/tsan_parallel.exe под ThreadSanitizer.
+;
+; ВАЖНО про то, как включается TSan в OCaml: инструментация вшивается в
+; САМ КОМПИЛЯТОР через opam-опцию, а не через флаг сборки. То есть на
+; switch с ocaml-option-tsan ЛЮБАЯ сборка уже инструментирована — этот
+; профиль сам по себе флагов не добавляет (нужного switch-компилятора
+; достаточно). Профиль оставлен как явная точка входа на случай
+; tsan-специфичных флагов/переменных позже.
+;
+; Как получить tsan-switch (opam option-пакет, НЕ отдельный компилятор):
+;   opam switch create miniflink-tsan 5.2.0 --packages=ocaml-option-tsan
+;   # если --packages не поддержан вашим opam, попробуйте:
+;   opam switch create miniflink-tsan ocaml-variants.5.2.0+options ocaml-option-tsan
+;   eval $(opam env --switch=miniflink-tsan)
+;   opam install . --deps-only
+;
+; Затем (на tsan-switch любая сборка инструментирована):
+;   dune build test/tsan_parallel.exe
+;   TSAN_OPTIONS="halt_on_error=1" ./_build/default/test/tsan_parallel.exe
+;
+; TSan в OCaml: только Linux x86-64, OCaml >= 5.2. На Apple Silicon не
+; поддерживается — используйте Linux-машину или Docker.
 (env
  (tsan
   (flags (:standard))))

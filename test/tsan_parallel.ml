@@ -1,15 +1,14 @@
 (** TSan-нагрузка на параллельный exactly-once путь (аудит 2026-07,
     категория «data races систематически не проверены»).
 
-    Прогон на машине с OCaml 5.x + tsan:
-      opam switch create 5.2.0+tsan   # или add tsan вариант
-      dune build test/tsan_parallel.exe \
-        --profile tsan                 # см. dune-workspace ниже / README
-      _build/default/test/tsan_parallel.exe
-
-    Либо руками:
-      OCAMLRUNPARAM=... TSAN_OPTIONS="halt_on_error=1" \
-        _build/.../tsan_parallel.exe
+    Прогон под ThreadSanitizer (Linux x86-64, OCaml >= 5.2). TSan
+    включается opam-опцией, вшитой в компилятор switch:
+      opam switch create miniflink-tsan 5.2.0 --packages=ocaml-option-tsan
+      eval $(opam env --switch=miniflink-tsan)
+      opam install . --deps-only
+      dune build test/tsan_parallel.exe         # уже инструментирован
+      TSAN_OPTIONS="halt_on_error=1" ./_build/default/test/tsan_parallel.exe
+    Полные инструкции — в dune-workspace и FUZZING.md.
 
     Идея: обычные функциональные тесты детерминированно НЕ вскрывают
     гонки — планировщик их прячет. TSan инструментирует каждый доступ к
