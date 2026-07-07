@@ -84,4 +84,32 @@ let () =
     end else
       Printf.printf "  OK config %d (w=%d e=%d c=%d): %d outputs\n%!" i w e c out
   ) configs;
-  Printf.printf "\nAll runs completed. Under TSan, 0 warnings = no races.\n%!"
+  (* Честный вердикт: определяем, инструментирован ли бинарь TSan-ом.
+     Sys.runtime_variant () на tsan-сборке содержит "tsan"; плюс при
+     tsan-прогоне обычно задан TSAN_OPTIONS. Без инструментации этот
+     прогон проверил только КОРРЕКТНОСТЬ (exactly-once), но НЕ гонки. *)
+  let variant = Sys.runtime_variant () in
+  let under_tsan =
+    (let re_tsan s =
+       let s = String.lowercase_ascii s in
+       let n = String.length s and sub = "tsan" in
+       let m = String.length sub in
+       let rec go i = i + m <= n && (String.sub s i m = sub || go (i+1)) in
+       go 0 in
+     re_tsan variant)
+    || (try Sys.getenv "TSAN_OPTIONS" <> "" with Not_found -> false)
+  in
+  if under_tsan then
+    Printf.printf
+      "\n[TSan active: runtime_variant=%S] Прогон завершён без \
+       предупреждений TSan → гонок не обнаружено.\n%!" variant
+  else begin
+    Printf.printf
+      "\n[TSan НЕ активен] Проверена только КОРРЕКТНОСТЬ (exactly-once: \
+       ровно N выходов).\n\
+       Гонки этим прогоном НЕ проверены. Для проверки гонок соберите под \
+       ThreadSanitizer:\n\
+      \  opam switch create 5.2.0+tsan   # если ещё нет\n\
+      \  dune build --profile tsan test/tsan_parallel.exe\n\
+      \  TSAN_OPTIONS=\"halt_on_error=1\" ./_build/tsan/test/tsan_parallel.exe\n%!"
+  end
