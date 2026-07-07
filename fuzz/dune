@@ -1,0 +1,12 @@
+; Crowbar/afl fuzz-таргеты. Требуют crowbar (не в CI-песочнице), поэтому
+; собираются только в профиле `fuzz`, чтобы обычная сборка/CI их не
+; трогали:
+;   opam install crowbar
+;   dune build --profile fuzz fuzz/fuzz_crowbar.exe
+;   dune exec  --profile fuzz fuzz/fuzz_crowbar.exe
+(executable
+ (name fuzz_crowbar)
+ (libraries miniflink crowbar)
+ (enabled_if (= %{profile} fuzz))
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
+ (modules fuzz_crowbar))

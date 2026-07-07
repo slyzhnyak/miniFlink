@@ -808,3 +808,19 @@
  (libraries miniflink)
  (flags (:standard -w +a-26-27-32-33-37-39-40-41-42-44-45-70))
  (modules test_silence_suppress))
+
+; ── Аудит 2026-07: fuzzing + TSan (см. FUZZING.md) ──
+; fuzz_decoders и tsan_parallel собираются и в этой среде (QCheck-режим
+; и обычный прогон); fuzz_crowbar — опционально, только с crowbar.
+
+(executable
+ (name fuzz_decoders)
+ (libraries miniflink qcheck-core qcheck-core.runner qcheck)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70 -alert -deprecated))
+ (modules fuzz_decoders))
+
+(executable
+ (name tsan_parallel)
+ (libraries miniflink unix)
+ (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
+ (modules tsan_parallel))
