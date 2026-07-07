@@ -75,14 +75,14 @@ snapshot»; на недоверенном вводе поведение неоп
 opam switch create 5.2.0+tsan        # точное имя зависит от вашего opam
 # или: opam install ocaml-variants.5.2.0+options ocaml-option-tsan
 
-dune build test/tsan_parallel.exe --profile tsan
+dune build --profile tsan test/tsan_parallel.exe
 TSAN_OPTIONS="halt_on_error=1 second_deadlock_stack=1" \
-  _build/default/test/tsan_parallel.exe
+  ./_build/tsan/test/tsan_parallel.exe
 ```
 
-(Если нет профиля `tsan` в dune-workspace — добавьте:
-`(profile tsan (flags (:standard -tsan)))` или соберите switch с tsan и
-запускайте обычным `dune build`.)
+(Профиль `tsan` объявлен в `dune-workspace`. Главное — switch должен
+быть собран с tsan-рантаймом; иначе соберите обычным `dune build` на
+tsan-switch и запускайте бинарь напрямую.)
 
 Тест гоняет `run_exactly_once` в 5 конфигурациях с высокой contention
 (до 16 воркеров, барьер на каждом событии, общий счётчик под mutex).

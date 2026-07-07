@@ -1,0 +1,11 @@
+(lang dune 3.0)
+
+; Профиль tsan — для прогона test/tsan_parallel.exe под ThreadSanitizer.
+; Требует OCaml switch с поддержкой tsan (OCaml >= 5.2):
+;   opam switch create 5.2.0+tsan
+; Затем:
+;   dune build --profile tsan test/tsan_parallel.exe
+;   ./_build/tsan/test/tsan_parallel.exe
+(env
+ (tsan
+  (flags (:standard))))
