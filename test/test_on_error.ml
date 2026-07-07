@@ -95,4 +95,32 @@ let () =
   check "window_fold: аккумулятор без ядовитого (1+2=3)"
     (List.exists (fun (_k, acc) -> acc = 3) folded);
 
+  (* ── N-4 (аудит 2026-07): атомарность события по окнам ──
+     Sliding-окна: событие попадает в 2 окна. add бросает на ВТОРОМ
+     вызове для ядовитого события. До двухфазного commit'а первое окно
+     уже было мутировано → событие полуприменялось. Теперь событие
+     целиком не применяется ни к одному окну. *)
+  Printf.printf "\n-- window_fold: полуприменение исключено (двухфазный commit)\n";
+  let calls = ref 0 in
+  let atomic_caught = ref 0 in
+  let folded2 =
+    [ Mf_event.data ("w", 5) 150;     (* окна [100,200) и [50,150)? — sliding 100/50 *)
+      Mf_event.data ("w", 666) 160;   (* ядовитое: add ок в 1-м окне, бросит во 2-м *)
+      Mf_event.wm 1000 ]
+    |> Stream.of_list
+    |> Pipe.window_fold (module ByK)
+         ~on_error:(fun _e _ev -> incr atomic_caught)
+         (Pipe.sliding 100 50)
+         ~init:(fun () -> 0)
+         ~add:(fun acc (_k, v) ->
+           if v = 666 then begin
+             incr calls;
+             if !calls >= 2 then raise Poison  (* 1-й вызов проходит! *)
+             else acc + v
+           end else acc + v)
+    |> Pipe.collect in
+  check "N-4: ядовитое поймано" (!atomic_caught = 1);
+  check "N-4: НИ ОДНО окно не содержит вклад ядовитого (нет acc>=666)"
+    (List.for_all (fun (_k, acc) -> acc < 666) folded2);
+
   Printf.printf "\non_error tests passed.\n"

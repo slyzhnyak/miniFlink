@@ -502,7 +502,11 @@ type 'out ctx = 'out Process_fn.ctx = {
   emit_event              : 'out Mf_event.t -> unit;
   (** эмитить уже готовое событие (Data/Retract/Update/Watermark) с его
       собственным временем — когда доменная функция возвращает список
-      [Mf_event.t] (см. ex07 gas_alerts). *)
+      [Mf_event.t] (см. ex07 gas_alerts).
+      ⚠ [Watermark] через emit_event эмитится КАК ЕСТЬ: watermark позади
+      уже выпущенного нарушит монотонность для downstream-окон. Обычным
+      кодом эмитить watermark вручную не нужно — оператор прокидывает
+      их сам. *)
   set_event_timer         : Time.t -> unit;
   (** идентичность таймера — пара (ключ, время); повторный set на то
       же время идемпотентен, cancel снимает всю запись. Полная семантика
@@ -609,9 +613,23 @@ val co_process3 :
     тишину»: [fun _ -> true] — любое событие; [fun p -> p.readings <> []]
     — только с показаниями.
 
-    @raise Invalid_argument если [within <= 0]. *)
+    Построен поверх {!process_keyed}: состояние и таймеры персистентны
+    (Managed_state) — детекция тишины {b переживает рестарт} и работает
+    в exactly-once пайплайнах. [?ttl] включает eviction: спустя [ttl]
+    после последнего наблюдения (ключ уже в тишине) состояние ключа
+    очищается; возобновление после ttl трактуется как первое появление
+    (без [on_resumed]). Без [?ttl] состояние живёт вечно — задавайте его
+    при неограниченном пространстве ключей.
+
+    ⚠ Late-события: [on_resumed] эмитится со временем возобновившего
+    события; если оно late (ts позади уже выпущенного watermark), late
+    будет и Resumed — это унаследованная от источника задержка,
+    downstream-окна увидят его как late-событие.
+
+    @raise Invalid_argument если [within <= 0] или [ttl <= within]. *)
 val on_silence :
   (module Keyed.S with type t = 'a) ->
+  ?ttl:Time.t ->
   within:Time.t ->
   has:('a -> bool) ->
   on_silent:(string -> last:Time.t option -> ts:Time.t -> 'out) ->
@@ -633,9 +651,15 @@ val on_silence :
     объединяются (min) и проходят. Управляющие события в выход не идут.
 
     Пример: [controller] = поток No_packets-алертов ([`On] на Data,
-    [`Off] на Retract), [suppressed] = motion-алерты. *)
+    [`Off] на Retract), [suppressed] = motion-алерты.
+
+    ⚠ Blocked-множество НЕ персистентно (в отличие от {!on_silence} и
+    {!process_keyed}): после рестарта подавление слетает до первого
+    [`On] — возможны ложные алерты из suppressed-потока в окне
+    восстановления. Ключ, получивший [`On] без последующего [`Off],
+    остаётся в множестве навсегда (запись — unit, рост ограничен числом
+    «застрявших» ключей). *)
 val suppress_while :
-  controller_key:('b -> string option) ->
   gate:('b -> [ `On of string | `Off of string | `Ignore ]) ->
   suppressed_key:('a -> string) ->
   'b Mf_event.t Stream.t ->

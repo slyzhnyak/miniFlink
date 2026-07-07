@@ -481,20 +481,33 @@ let window_fold
            pull ())
       | Some (Mf_event.Data (v, t) as ev) ->
         guard ev (fun () ->
-          List.iter (fun (s, stop) ->
-            let mk = (K.key v, s, stop) in
-            match Managed_state.get state mk with
-            | None ->
-              Managed_state.set state mk (FOpen (add (init ()) v, true))
-            | Some (FOpen (acc, _)) ->
-              Managed_state.set state mk (FOpen (add acc v, true))
-            | Some (FFired (acc, _)) ->
-              (* Phase 3 atomic: late data применяет add и эмитит
-                 ОДИН Update event (был Retract+Data пара). *)
-              let acc' = add acc v in
-              emit_update (K.key v) stop acc acc';
-              Managed_state.set state mk (FFired (acc', true))
-          ) (assign spec t));
+          (* Двухфазно (аудит 2026-07, N-4): сначала вычисляем новые
+             аккумуляторы ВСЕХ окон события (add может бросить — при
+             ?on_error событие уйдёт в обработчик ЦЕЛИКОМ непримененным),
+             и только когда все add прошли — коммитим состояния и
+             эмиссии. Иначе исключение на 2-м из sliding-окон оставляло
+             1-е окно уже мутированным: событие полуприменено, а
+             DLQ-повтор задваивал его в первом окне. *)
+          let staged =
+            List.map (fun (s, stop) ->
+              let mk = (K.key v, s, stop) in
+              match Managed_state.get state mk with
+              | None ->
+                (mk, FOpen (add (init ()) v, true), None)
+              | Some (FOpen (acc, _)) ->
+                (mk, FOpen (add acc v, true), None)
+              | Some (FFired (acc, _)) ->
+                (* Phase 3 atomic: late data применяет add и эмитит
+                   ОДИН Update event (был Retract+Data пара). *)
+                let acc' = add acc v in
+                (mk, FFired (acc', true), Some (stop, acc, acc'))
+            ) (assign spec t) in
+          List.iter (fun (mk, st', em) ->
+            Managed_state.set state mk st';
+            match em with
+            | Some (stop, old_acc, new_acc) ->
+              emit_update (K.key v) stop old_acc new_acc
+            | None -> ()) staged);
         pull ()
     in pull ()
 

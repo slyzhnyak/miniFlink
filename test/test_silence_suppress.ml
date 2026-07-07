@@ -93,6 +93,39 @@ let () =
   check "late-событие не сдвинуло дедлайн назад (тишина в 200, не 150)"
     (List.exists (function Silent ("a", 200) -> true | _ -> false) out_mono);
 
+  (* ── N-2 (аудит 2026-07): ?ttl — eviction состояния ──
+     Спустя ttl после последнего наблюдения state ключа очищается;
+     возобновление после ttl = первое появление (без Resumed). *)
+  Printf.printf "\n-- on_silence ?ttl: eviction, возобновление после ttl без Resumed\n";
+  let out_ttl =
+    [ Mf_event.data ("a", true) 10;    (* дедлайн 110, ttl-дедлайн 310 *)
+      Mf_event.wm 130;                  (* silent@110 *)
+      Mf_event.wm 400;                  (* 400 >= 10+300 → state очищен *)
+      Mf_event.data ("a", true) 500;    (* первое появление — НЕ Resumed *)
+      Mf_event.wm 700 ]                 (* silent@600 (новый цикл) *)
+    |> Stream.of_list
+    |> Pipe.on_silence (module ByLamp)
+         ~ttl:300 ~within:100
+         ~has:(fun _ -> true)
+         ~on_silent:(fun k ~last:_ ~ts -> Silent (k, ts))
+         ~on_resumed:(fun k ~ts -> Resumed (k, ts))
+    |> Pipe.collect in
+  check "ttl: тишина до eviction есть (110)"
+    (List.exists (function Silent ("a", 110) -> true | _ -> false) out_ttl);
+  check "ttl: возобновление после eviction БЕЗ Resumed"
+    (not (List.exists (function Resumed _ -> true | _ -> false) out_ttl));
+  check "ttl: новый цикл тишины после возобновления (600)"
+    (List.exists (function Silent ("a", 600) -> true | _ -> false) out_ttl);
+  check "ttl <= within → Invalid_argument"
+    (try
+       let _s : alert Mf_event.t Stream.t =
+         Pipe.on_silence (module ByLamp) ~ttl:50 ~within:100
+           ~has:(fun _ -> true)
+           ~on_silent:(fun k ~last:_ ~ts -> Silent (k, ts))
+           (Stream.of_list []) in
+       false
+     with Invalid_argument _ -> true);
+
   (* ── suppress_while: motion глушится при No_packets ── *)
   Printf.printf "\n-- suppress_while: подавление по ключу\n";
   (* controller: строки-события "on"/"off" по ключу; suppressed: int-алерты *)
@@ -108,7 +141,6 @@ let () =
     |> Stream.of_list in
   let out4 =
     Pipe.suppress_while
-      ~controller_key:(fun (k, _) -> Some k)
       ~gate:(fun (k, g) -> match g with `On -> `On k | `Off -> `Off k)
       ~suppressed_key:(fun (k, _) -> k)
       controller suppressed
