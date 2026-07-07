@@ -53,19 +53,23 @@ let () =
       | exception e ->
         Crowbar.failf "round-trip raised %s" (Printexc.to_string e));
 
-  (* Таргет 3 (ОПАСНЫЙ): state_backend restore на сыром Marshal.
-     Оборачиваем в try, чтобы Crowbar/afl поймал и НЕОБРАБОТАННЫЕ
-     исключения (Failure "input_value: ..."), и — если случится —
-     зафиксировал вход перед возможным крэшем. Segfault afl увидит как
-     crash даже без нашего перехвата. *)
-  Crowbar.add_test ~name:"state_backend restore on raw bytes"
+  (* Таргет 3: state_backend restore. ИСПРАВЛЕНО (N-9): restore теперь
+     оборачивает Marshal в Snapshot_frame (магия+длина+md5), поэтому
+     битый/чужой вход даёт Failure, а не segfault. Раньше вход
+     [Marshal.to_bytes [(1,2);(3,4)]] проходил и валил процесс при
+     первом обращении к «ключу» (type confusion). Таргет проверяет, что
+     рамка держит: ЛЮБОЙ вход → Failure или Ok, но НЕ segfault.
+     Если afl найдёт вход, дающий segfault — рамку пробили (например
+     намеренно пересчитанный md5 + type-confused payload), это отдельная
+     находка про намеренную атаку (см. FUZZING.md). *)
+  Crowbar.add_test ~name:"state_backend restore is crash-safe"
     [ Crowbar.bytes ]
     (fun raw ->
       let b = State_backend_memory.create () in
       (try State_backend_memory.restore b (Bytes.of_string raw)
        with
-       | Failure _ -> ()          (* Marshal может бросить Failure — ок для теста *)
-       | End_of_file -> ()        (* усечённый вход *)
+       | Failure _ -> ()          (* рамка отсекла — ожидаемо *)
+       | End_of_file -> ()
        | e ->
          Crowbar.failf "restore raised unexpected %s"
            (Printexc.to_string e)))

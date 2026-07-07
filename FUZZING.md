@@ -43,7 +43,7 @@ afl-fuzz -i fuzz_in -o fuzz_out -- _build/fuzz/fuzz/fuzz_crowbar.exe @@
 2. **`schema round-trip`** — `encode >> decode` тождественно. Чисто.
 3. **`state_backend restore on raw bytes`** — ⚠ **вот главная цель.**
 
-### ⚠ Known-unsafe: `Marshal.from_bytes` в restore
+### ✅ ИСПРАВЛЕНО (N-9): `Marshal.from_bytes` в restore обёрнут рамкой
 
 `State_backend_memory.restore` (и `_rocksdb`, и `runtime_context.of_bytes`,
 и `checkpoint_parallel`) декодируют снапшот через

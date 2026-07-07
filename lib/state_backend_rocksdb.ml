@@ -54,13 +54,15 @@ let close t = Rocksdb_ffi.close_db t.db
 let snapshot t =
   let pairs = Hashtbl.fold (fun k () a ->
     match get t k with Some v -> (k,v)::a | None -> a) t.known [] in
-  Marshal.to_bytes pairs []
+  Snapshot_frame.marshal_wrap pairs
 
 let restore t b =
+  (* Snapshot_frame проверяет магию/длину/crc ДО Marshal.from_bytes (N-9).
+     Декодируем ДО очистки: если вход битый, состояние не теряется. *)
+  let pairs : (string * bytes) list = Snapshot_frame.marshal_unwrap b in
   (* очищаем текущее состояние перед загрузкой снапшота — restore
      ЗАМЕНЯЕТ состояние, не объединяет (иначе ключи записанные после
      снапшота остались бы, расходясь с memory-backend и ломая recovery) *)
   Hashtbl.iter (fun k () -> Rocksdb_ffi.delete t.db k) t.known;
   Hashtbl.clear t.known;
-  let pairs : (string * bytes) list = Marshal.from_bytes b 0 in
   List.iter (fun (k,v) -> set t k v) pairs

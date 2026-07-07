@@ -9,9 +9,11 @@ let keys t     = Hashtbl.fold (fun k _ a -> k :: a) t []
 let size t     = Hashtbl.length t
 
 let snapshot t =
-  Marshal.to_bytes (Hashtbl.fold (fun k v a -> (k,v)::a) t []) []
+  Snapshot_frame.marshal_wrap (Hashtbl.fold (fun k v a -> (k,v)::a) t [])
 
 let restore t b =
+  (* Snapshot_frame проверяет магию/длину/crc ДО Marshal.from_bytes —
+     повреждённый/чужой вход даёт Failure, а не segfault (N-9). *)
+  let pairs : (string * bytes) list = Snapshot_frame.marshal_unwrap b in
   Hashtbl.clear t;
-  let pairs : (string * bytes) list = Marshal.from_bytes b 0 in
   List.iter (fun (k,v) -> Hashtbl.replace t k v) pairs

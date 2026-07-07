@@ -610,13 +610,14 @@ let recover ~workers ~make_state ~(source : 'a seekable_source) store
 
 (* ── Durable checkpoint storage ──────────────────────────── *)
 
-(** Сериализация checkpoint в bytes (Marshal). worker_snapshot.state
-    уже bytes, поэтому Marshal записи безопасен. *)
+(** Сериализация checkpoint в bytes. worker_snapshot.state уже bytes.
+    Обёрнут в Snapshot_frame (магия+длина+crc) — битый/чужой чекпоинт при
+    deserialize даёт Failure, а не segfault от сырого Marshal (N-9). *)
 let serialize_checkpoint (cp : checkpoint) : bytes =
-  Marshal.to_bytes cp []
+  Snapshot_frame.marshal_wrap cp
 
 let deserialize_checkpoint (b : bytes) : checkpoint =
-  Marshal.from_bytes b 0
+  Snapshot_frame.marshal_unwrap b
 
 (* Открыть файл, выполнить [f] над каналом, ГАРАНТИРОВАННО закрыть
    даже если [f] бросит. Без этого исключение при записи (диск полон,
