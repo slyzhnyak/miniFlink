@@ -203,11 +203,14 @@ if [ "$ON_TSAN_SWITCH" = 1 ]; then
 elif [ "$HAS_CROWBAR" = 1 ]; then
   echo "  сборка fuzz-таргета..."
   if dune build --profile fuzz fuzz/fuzz_crowbar.exe 2>/tmp/rel_fuzzbuild.log; then
-    FEXE="_build/fuzz/fuzz/fuzz_crowbar.exe"
-    if [ "$HAS_AFL" = 1 ] && [ -x "$FEXE" ]; then
+    # путь к бинарю ищем через find, а не угадываем: имя profile-папки в
+    # _build/ зависит от версии dune, из-за жёсткого пути afl-ветка
+    # ошибочно пропускалась даже при установленном afl.
+    FEXE=$(find _build -name fuzz_crowbar.exe -type f 2>/dev/null | head -1)
+    if [ "$HAS_AFL" = 1 ] && [ -n "$FEXE" ] && [ -x "$FEXE" ]; then
       mkdir -p fuzz_in fuzz_out
       [ -f fuzz_in/seed ] || printf '\x00\x01hello' > fuzz_in/seed
-      echo "  запуск afl-fuzz на ${FUZZ_SECS}с (Ctrl-C прервёт)..."
+      echo "  запуск afl-fuzz на ${FUZZ_SECS}с (бинарь: $FEXE; Ctrl-C прервёт)..."
       # AFL_ переменные обходят типичные блокеры старта afl++ без sudo:
       #  SKIP_CPUFREQ — не требовать performance-governor
       #  NO_AFFINITY — не привязываться к ядру

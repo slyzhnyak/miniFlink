@@ -48,7 +48,8 @@ opam install afl-persistent
 sudo apt install afl++               # чтобы afl-fuzz был в PATH
 mkdir -p fuzz_in fuzz_out
 printf '\x00\x01hello' > fuzz_in/seed
-afl-fuzz -i fuzz_in -o fuzz_out -- _build/fuzz/fuzz/fuzz_crowbar.exe @@
+FEXE=$(find _build -name fuzz_crowbar.exe -type f | head -1)
+afl-fuzz -i fuzz_in -o fuzz_out -- "$FEXE" @@
 ```
 
 Три таргета по возрастанию опасности:
