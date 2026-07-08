@@ -9,7 +9,13 @@
 # Использование:
 #   ./scripts/reliability.sh            # всё доступное
 #   ./scripts/reliability.sh --quick    # только быстрый sanity (без afl-циклов)
+#   ./scripts/reliability.sh --setup    # доустановить недостающее, потом прогнать
 #   ./scripts/reliability.sh --fuzz-secs 120   # длительность afl-фаззинга (по умолч. 60)
+#
+# --setup ставит то, что можно безопасно в userspace (crowbar через opam,
+# tsan-switch — компилирует компилятор, НЕСКОЛЬКО МИНУТ). sudo-вещи (apt
+# install afl++, настройка core_pattern) НЕ выполняет за вас — только
+# показывает команды, т.к. они требуют root и меняют систему.
 #
 # Что прогоняется:
 #   1. быстрый sanity — всегда (обычный switch): fuzz_decoders (QCheck) +
@@ -26,12 +32,14 @@ set -uo pipefail
 # ── аргументы ──
 QUICK=0
 FUZZ_SECS=60
+SETUP=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --quick)      QUICK=1; shift ;;
+    --setup)      SETUP=1; shift ;;
     --fuzz-secs)  FUZZ_SECS="${2:-60}"; shift 2 ;;
     -h|--help)
-      sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+      sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "неизвестный аргумент: $1"; exit 2 ;;
   esac
 done
@@ -65,6 +73,53 @@ else warn "afl-fuzz НЕ найден → afl-fuzzing пропущу (будет
      echo "      (afl-инструментация уже в профиле fuzz — отдельный switch НЕ нужен)"
 fi
 [ "$HAS_TSAN" = 1 ] && ok "switch с tsan-опцией" || warn "switch БЕЗ tsan (гонки не проверю; см. dune-workspace)"
+
+# ── опциональный автосетап (--setup) ──
+# Ставит то, что можно безопасно (opam-пакеты в userspace) и создаёт
+# tsan-switch. sudo-вещи (apt, core_pattern) НЕ трогает автоматически —
+# только показывает команды, т.к. они требуют root и меняют систему.
+if [ "$SETUP" = 1 ]; then
+  hdr "Автосетап (--setup): доустановка недостающего"
+  if ! have opam; then
+    err "opam не найден — установите opam вручную, потом повторите"
+  else
+    # crowbar — userspace, безопасно ставить
+    if [ "$HAS_CROWBAR" = 0 ]; then
+      echo "  opam install crowbar (для afl-fuzzing)..."
+      if opam install -y crowbar >/tmp/rel_setup_cb.log 2>&1; then
+        ok "crowbar установлен"; HAS_CROWBAR=1
+      else warn "не удалось поставить crowbar (лог /tmp/rel_setup_cb.log); пропущу"; fi
+    fi
+    # tsan-switch — userspace, но ДОЛГО (собирает компилятор). Явно
+    # предупреждаем и делаем, раз пользователь попросил --setup.
+    if [ "$HAS_TSAN" = 0 ]; then
+      if opam switch list 2>/dev/null | grep -q miniflink-tsan; then
+        ok "switch miniflink-tsan уже существует — активирую"
+        eval "$(opam env --switch=miniflink-tsan 2>/dev/null)" || true
+        HAS_TSAN=1
+      else
+        echo "  создаю tsan-switch (компилирует OCaml 5.2.0 — это НЕСКОЛЬКО МИНУТ)..."
+        if opam switch create miniflink-tsan \
+             --packages=ocaml.5.2.0,ocaml-option-tsan -y >/tmp/rel_setup_tsan.log 2>&1; then
+          eval "$(opam env --switch=miniflink-tsan)"
+          echo "  opam install . --deps-only..."
+          opam install . --deps-only -y >>/tmp/rel_setup_tsan.log 2>&1 || true
+          ok "tsan-switch готов и активирован"
+          HAS_TSAN=1
+        else
+          warn "не удалось создать tsan-switch (лог /tmp/rel_setup_tsan.log)."
+          echo "      частая причина — устаревшие репозитории: opam update, потом повторите"
+        fi
+      fi
+    fi
+  fi
+  # sudo-часть — НЕ делаем за пользователя, показываем:
+  if [ "$HAS_AFL" = 0 ]; then
+    warn "afl-fuzz требует системной установки (root) — выполните сами:"
+    echo "      sudo apt install afl++      # положит afl-fuzz в PATH"
+    have afl-fuzz && HAS_AFL=1
+  fi
+fi
 
 # ── 1. быстрый sanity (всегда) ──
 hdr "1. Быстрый sanity (без спец-инструментов)"
