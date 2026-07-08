@@ -8,5 +8,9 @@
  (name fuzz_crowbar)
  (libraries miniflink crowbar)
  (enabled_if (= %{profile} fuzz))
+ ; -afl-instrument: инструментация покрытия для afl. Работает на обычном
+ ; компиляторе (не нужен отдельный afl-switch), поэтому afl-fuzz получает
+ ; обратную связь по покрытию, а не фаззит вслепую.
+ (ocamlopt_flags (:standard -afl-instrument))
  (flags (:standard -w +a-26-27-32-33-37-39-41-42-44-45-70))
  (modules fuzz_crowbar))

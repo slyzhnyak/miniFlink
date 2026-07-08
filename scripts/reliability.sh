@@ -59,7 +59,11 @@ if have afl-fuzz; then HAS_AFL=1; fi
 if have opam && opam list --installed 2>/dev/null | grep -qE '^ocaml-option(s-only)?-tsan|tsan'; then HAS_TSAN=1; fi
 
 [ "$HAS_CROWBAR" = 1 ] && ok "crowbar установлен" || warn "crowbar НЕ установлен (afl-fuzzing пропущу; opam install crowbar)"
-[ "$HAS_AFL" = 1 ] && ok "afl-fuzz в PATH" || warn "afl-fuzz НЕ найден (afl-fuzzing пропущу)"
+if [ "$HAS_AFL" = 1 ]; then ok "afl-fuzz в PATH"
+else warn "afl-fuzz НЕ найден → afl-fuzzing пропущу (будет быстрый Crowbar-режим)."
+     echo "      установка: opam install afl-persistent && sudo apt install afl++"
+     echo "      (afl-инструментация уже в профиле fuzz — отдельный switch НЕ нужен)"
+fi
 [ "$HAS_TSAN" = 1 ] && ok "switch с tsan-опцией" || warn "switch БЕЗ tsan (гонки не проверю; см. dune-workspace)"
 
 # ── 1. быстрый sanity (всегда) ──
