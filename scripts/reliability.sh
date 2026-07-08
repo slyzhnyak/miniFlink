@@ -60,6 +60,12 @@ FAILED=0
 hdr "Окружение"
 have() { command -v "$1" >/dev/null 2>&1; }
 HAS_CROWBAR=0; HAS_AFL=0; HAS_TSAN=0
+# на каком switch мы сейчас? нужно нескольким секциям: fuzzing и TSan —
+# разные switch'и, и собирать fuzz-таргет (тянет dune) на tsan-switch
+# нельзя (dune пересоберётся под TSan и упадёт на GC-гонках рантайма).
+CUR_SWITCH=$(command -v opam >/dev/null 2>&1 && opam switch show 2>/dev/null || echo "")
+ON_TSAN_SWITCH=0
+case "$CUR_SWITCH" in *tsan*) ON_TSAN_SWITCH=1 ;; esac
 if have opam && opam list --installed 2>/dev/null | grep -q '^crowbar '; then HAS_CROWBAR=1; fi
 if have afl-fuzz; then HAS_AFL=1; fi
 # TSan: инструментация вшита в компилятор switch. Определяем по наличию
@@ -83,12 +89,17 @@ if [ "$SETUP" = 1 ]; then
   if ! have opam; then
     err "opam не найден — установите opam вручную, потом повторите"
   else
-    # crowbar — userspace, безопасно ставить
-    if [ "$HAS_CROWBAR" = 0 ]; then
+    # crowbar — только НЕ на tsan-switch (иначе dune ломается под TSan)
+    if [ "$HAS_CROWBAR" = 0 ] && [ "$ON_TSAN_SWITCH" = 0 ]; then
       echo "  opam install crowbar (для afl-fuzzing) — вывод ниже:"
       if OPAMYES=1 opam install -y crowbar </dev/null 2>&1 | sed 's/^/    | /'; then
         ok "crowbar установлен"; HAS_CROWBAR=1
       else warn "не удалось поставить crowbar; пропущу"; fi
+    elif [ "$HAS_CROWBAR" = 0 ] && [ "$ON_TSAN_SWITCH" = 1 ]; then
+      warn "вы на tsan-switch ($CUR_SWITCH) — crowbar сюда НЕ ставлю."
+      echo "      fuzzing (crowbar/afl) идёт на ОБЫЧНОМ switch, TSan — на этом."
+      echo "      для fuzzing: opam switch <обычный> && opam install crowbar,"
+      echo "      затем ./scripts/reliability.sh там."
     fi
     # tsan-switch — userspace, но ДОЛГО (собирает компилятор). Явно
     # предупреждаем и показываем прогресс НА ЭКРАН (не прячем в лог).
@@ -184,7 +195,12 @@ fi
 
 # ── 2. afl-fuzzing декодеров ──
 hdr "2. Fuzzing декодеров (afl + Crowbar)"
-if [ "$HAS_CROWBAR" = 1 ]; then
+if [ "$ON_TSAN_SWITCH" = 1 ]; then
+  warn "пропуск: вы на tsan-switch ($CUR_SWITCH). Fuzzing идёт на обычном"
+  echo "      switch (сборка fuzz-таргета тянет dune, который под TSan"
+  echo "      падает на GC-гонках). Для fuzzing переключитесь:"
+  echo "        opam switch <обычный> && ./scripts/reliability.sh"
+elif [ "$HAS_CROWBAR" = 1 ]; then
   echo "  сборка fuzz-таргета..."
   if dune build --profile fuzz fuzz/fuzz_crowbar.exe 2>/tmp/rel_fuzzbuild.log; then
     FEXE="_build/fuzz/fuzz/fuzz_crowbar.exe"
