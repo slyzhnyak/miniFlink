@@ -43,25 +43,15 @@ dune build --profile fuzz fuzz/fuzz_crowbar.exe
 dune exec --profile fuzz fuzz/fuzz_crowbar.exe
 ```
 
-Для afl есть два пути. **afl в OCaml требует, чтобы инструментация
-покрытия была вшита в компилятор switch** (как tsan) — тогда
-инструментируется ВЕСЬ код, включая lib/miniflink (сами декодеры). Флаг
-`-afl-instrument` на один модуль не помогает: библиотека остаётся
-неинструментированной, и afl отказывается стартовать с «No instrumentation
-detected».
+afl+Crowbar работает ТОЛЬКО с настоящей afl-инструментацией: Crowbar
+общается с afl через forkserver, а тот требует, чтобы код был
+инструментирован. Инструментация вшивается в компилятор switch
+(ocaml-option-afl), тогда весь код (включая lib/miniflink — сами
+декодеры) инструментируется. Флаг -afl-instrument на один модуль не
+помогает, а dumb-mode (AFL_SKIP_BIN_CHECK) с Crowbar не работает —
+forkserver handshake проваливается.
 
-**Путь A — dumb-mode (без 3-го switch, слабее):** afl фаззит без
-обратной связи по покрытию. Проще, но менее эффективно.
-```sh
-opam install afl-persistent
-sudo apt install afl++
-mkdir -p fuzz_in fuzz_out && printf '\x00\x01hello' > fuzz_in/seed
-FEXE=$(find _build -name fuzz_crowbar.exe -type f | head -1)
-AFL_SKIP_BIN_CHECK=1 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \
-  afl-fuzz -i fuzz_in -o fuzz_out -- "$FEXE" @@
-```
-
-**Путь B — настоящий afl с покрытием (нужен afl-switch):**
+**Настоящий afl (нужен afl-switch):**
 ```sh
 opam switch create miniflink-afl --packages=ocaml.5.2.0,ocaml-option-afl
 eval $(opam env --switch=miniflink-afl)
@@ -69,12 +59,15 @@ opam install . --deps-only && opam install crowbar
 dune build --profile fuzz fuzz/fuzz_crowbar.exe   # ВЕСЬ код инструментирован
 mkdir -p fuzz_in fuzz_out && printf '\x00\x01hello' > fuzz_in/seed
 FEXE=$(find _build -name fuzz_crowbar.exe -type f | head -1)
-afl-fuzz -i fuzz_in -o fuzz_out -- "$FEXE" @@
+AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \\
+  afl-fuzz -i fuzz_in -o fuzz_out -- "$FEXE" @@
 ```
 
-Скрипт `./scripts/reliability.sh` использует путь A (dumb-mode) на обычном
-switch — работает без afl-switch, но без покрытия. Для пути B заведите
-miniflink-afl.
+**Без afl-switch:** используйте Crowbar random-режим (`dune exec --profile
+fuzz fuzz/fuzz_crowbar.exe`) — это тоже fuzzing, просто случайная
+генерация без обратной связи по покрытию. Скрипт reliability.sh
+автоматически падает в этот режим, если бинарь не afl-инструментирован.
+
 
 Три таргета по возрастанию опасности:
 

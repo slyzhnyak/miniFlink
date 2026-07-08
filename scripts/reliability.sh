@@ -207,38 +207,29 @@ elif [ "$HAS_CROWBAR" = 1 ]; then
     # _build/ зависит от версии dune, из-за жёсткого пути afl-ветка
     # ошибочно пропускалась даже при установленном afl.
     FEXE=$(find _build -name fuzz_crowbar.exe -type f 2>/dev/null | head -1)
-    if [ "$HAS_AFL" = 1 ] && [ -n "$FEXE" ] && [ -x "$FEXE" ]; then
+    # afl+Crowbar работает ТОЛЬКО с реально инструментированным бинарём
+    # (Crowbar общается с afl через forkserver, а он требует
+    # инструментации). dumb-mode тут не спасает — handshake всё равно
+    # провалится. Поэтому проверяем инструментацию бинаря заранее.
+    AFL_INSTRUMENTED=0
+    if [ -n "$FEXE" ] && { nm "$FEXE" 2>/dev/null | grep -q "__afl" \
+         || strings "$FEXE" 2>/dev/null | grep -q "__afl_area"; }; then
+      AFL_INSTRUMENTED=1
+    fi
+    if [ "$HAS_AFL" = 1 ] && [ -n "$FEXE" ] && [ -x "$FEXE" ] && [ "$AFL_INSTRUMENTED" = 1 ]; then
       mkdir -p fuzz_in fuzz_out
       [ -f fuzz_in/seed ] || printf '\x00\x01hello' > fuzz_in/seed
-      echo "  запуск afl-fuzz на ${FUZZ_SECS}с (бинарь: $FEXE; Ctrl-C прервёт)..."
-      # AFL_ переменные обходят типичные блокеры старта afl++ без sudo:
-      #  SKIP_CPUFREQ — не требовать performance-governor
-      #  NO_AFFINITY — не привязываться к ядру
-      #  I_DONT_CARE_ABOUT_MISSING_CRASHES — не требовать core_pattern=core
-      #  SKIP_BIN_CHECK — не требовать afl-инструментацию бинаря. Наш
-      #    бинарь инструментирован ТОЛЬКО если собран на afl-switch
-      #    (ocaml-option-afl). Без него afl бы упал с "No instrumentation
-      #    detected"; SKIP_BIN_CHECK разрешает dumb-mode (fuzzing без
-      #    обратной связи по покрытию — слабее, но работает без 3-го switch).
+      echo "  запуск afl-fuzz на ${FUZZ_SECS}с (бинарь инструментирован; Ctrl-C прервёт)..."
       AFL_SKIP_CPUFREQ=1 AFL_NO_AFFINITY=1 \
-      AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 AFL_SKIP_BIN_CHECK=1 \
+      AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \
         timeout "${FUZZ_SECS}" afl-fuzz -i fuzz_in -o fuzz_out -- "$FEXE" @@ \
         >/tmp/rel_afl.log 2>&1
-      AFL_RC=$?
-      # afl++ мог отказаться стартовать (не из-за находки) — распознаём
-      if grep -qiE "PROGRAM ABORT|core_pattern.*abort|forkserver.*failed" /tmp/rel_afl.log \
+      if grep -qiE "PROGRAM ABORT|handshake failed|core_pattern.*abort" /tmp/rel_afl.log \
          && ! find fuzz_out -path '*/crashes/id:*' 2>/dev/null | grep -q .; then
-        warn "afl-fuzz не смог стартовать (настройка окружения, не находка). Причина:"
-        grep -iE "PROGRAM ABORT|No instrumentation|core_pattern|Tips" /tmp/rel_afl.log | head -4
-        if grep -qi "No instrumentation" /tmp/rel_afl.log; then
-          echo "      бинарь без afl-инструментации. Для НАСТОЯЩЕГО afl нужен"
-          echo "      afl-switch (весь код инструментируется), см. FUZZING.md:"
-          echo "        opam switch create miniflink-afl --packages=ocaml.5.2.0,ocaml-option-afl"
-          echo "      (dumb-mode должен был включиться через AFL_SKIP_BIN_CHECK —"
-          echo "       если всё равно упал, проверьте версию afl: afl-fuzz -h)"
-        elif grep -qi "core_pattern" /tmp/rel_afl.log; then
+        warn "afl-fuzz не смог стартовать. Причина:"
+        grep -iE "PROGRAM ABORT|core_pattern" /tmp/rel_afl.log | head -3
+        grep -qi "core_pattern" /tmp/rel_afl.log && \
           echo "      core_pattern — разово: echo core | sudo tee /proc/sys/kernel/core_pattern"
-        fi
         echo "      (полный лог: /tmp/rel_afl.log)"
       else
         CRASHES=$(find fuzz_out -path '*/crashes/id:*' 2>/dev/null | grep -c . || echo 0)
@@ -250,12 +241,22 @@ elif [ "$HAS_CROWBAR" = 1 ]; then
         fi
       fi
     else
-      # без afl — быстрый Crowbar-режим (случайная генерация)
-      echo "  afl нет — быстрый Crowbar-режим..."
-      if timeout 60 dune exec --profile fuzz fuzz/fuzz_crowbar.exe >/tmp/rel_cb.log 2>&1; then
-        ok "Crowbar-прогон без падений (без afl-глубины)"
+      # Сюда попадаем если afl нет ИЛИ бинарь не afl-инструментирован.
+      # afl+Crowbar без инструментации не работает (forkserver handshake
+      # проваливается), поэтому честно идём в Crowbar random-режим.
+      if [ "$HAS_AFL" = 1 ] && [ "$AFL_INSTRUMENTED" = 0 ]; then
+        warn "afl есть, но бинарь БЕЗ afl-инструментации → afl тут не запустится."
+        echo "      (Crowbar+afl требует forkserver = настоящей инструментации)."
+        echo "      Для coverage-guided afl нужен afl-switch:"
+        echo "        opam switch create miniflink-afl --packages=ocaml.5.2.0,ocaml-option-afl"
+        echo "        eval \$(opam env --switch=miniflink-afl) && opam install . --deps-only"
+        echo "      Сейчас прогоню Crowbar random-режим (тоже fuzzing, без покрытия):"
       else
-        # Crowbar при находке выходит !=0
+        echo "  afl нет — Crowbar random-режим (случайная генерация):"
+      fi
+      if timeout 60 dune exec --profile fuzz fuzz/fuzz_crowbar.exe >/tmp/rel_cb.log 2>&1; then
+        ok "Crowbar-прогон без падений (без afl-покрытия)"
+      else
         err "Crowbar нашёл падение:"; tail -8 /tmp/rel_cb.log; FAILED=1
       fi
     fi
