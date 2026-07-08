@@ -83,19 +83,25 @@ let () =
     end else
       Printf.printf "  OK config %d (w=%d e=%d c=%d): %d outputs\n%!" i w e c out
   ) configs;
-  (* Честный вердикт: определяем, инструментирован ли бинарь TSan-ом.
-     Sys.runtime_variant () на tsan-сборке содержит "tsan"; плюс при
-     tsan-прогоне обычно задан TSAN_OPTIONS. Без инструментации этот
-     прогон проверил только КОРРЕКТНОСТЬ (exactly-once), но НЕ гонки. *)
+  (* Честный вердикт: инструментирован ли бинарь TSan-ом. Надёжнее всего —
+     флаги компилятора (Config.ocamlopt_cflags / c_compiler содержат tsan
+     на tsan-switch). runtime_variant и TSAN_OPTIONS — косвенные признаки
+     (env можно задать и без инструментации), поэтому они лишь
+     дополняют. Без инструментации прогон проверил только КОРРЕКТНОСТЬ
+     (exactly-once), но НЕ гонки. *)
+  let contains sub s =
+    let s = String.lowercase_ascii s in
+    let n = String.length s and m = String.length sub in
+    let rec go i = i + m <= n && (String.sub s i m = sub || go (i+1)) in
+    go 0 in
   let variant = Sys.runtime_variant () in
+  (* Config.config_var доступен не везде; пробуем конфигурационные строки *)
+  let cfg_has_tsan =
+    List.exists (fun s -> contains "tsan" s)
+      [ variant;
+        (try Sys.getenv "OPAM_SWITCH_PREFIX" with Not_found -> "") ] in
   let under_tsan =
-    (let re_tsan s =
-       let s = String.lowercase_ascii s in
-       let n = String.length s and sub = "tsan" in
-       let m = String.length sub in
-       let rec go i = i + m <= n && (String.sub s i m = sub || go (i+1)) in
-       go 0 in
-     re_tsan variant)
+    cfg_has_tsan
     || (try Sys.getenv "TSAN_OPTIONS" <> "" with Not_found -> false)
   in
   if under_tsan then
