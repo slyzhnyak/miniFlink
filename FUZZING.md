@@ -45,7 +45,7 @@ dune exec --profile fuzz fuzz/fuzz_crowbar.exe
 # настоящий afl-fuzzing (afl-инструментация уже в профиле fuzz —
 # отдельный afl-switch НЕ нужен):
 opam install afl-persistent
-sudo apt install afl++               # или afl; чтобы afl-fuzz был в PATH
+sudo apt install afl++               # чтобы afl-fuzz был в PATH
 mkdir -p fuzz_in fuzz_out
 printf '\x00\x01hello' > fuzz_in/seed
 afl-fuzz -i fuzz_in -o fuzz_out -- _build/fuzz/fuzz/fuzz_crowbar.exe @@

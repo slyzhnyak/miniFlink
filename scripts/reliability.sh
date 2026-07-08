@@ -108,16 +108,32 @@ if [ "$HAS_CROWBAR" = 1 ]; then
       mkdir -p fuzz_in fuzz_out
       [ -f fuzz_in/seed ] || printf '\x00\x01hello' > fuzz_in/seed
       echo "  запуск afl-fuzz на ${FUZZ_SECS}с (Ctrl-C прервёт)..."
-      # AFL_ переменные — не падать на мелочах окружения
+      # AFL_ переменные обходят типичные блокеры старта afl++ без sudo:
+      #  SKIP_CPUFREQ — не требовать performance-governor
+      #  NO_AFFINITY — не привязываться к ядру
+      #  I_DONT_CARE_ABOUT_MISSING_CRASHES — не требовать core_pattern=core
+      #    (иначе afl++ откажется стартовать без sudo-настройки системы)
       AFL_SKIP_CPUFREQ=1 AFL_NO_AFFINITY=1 \
+      AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \
         timeout "${FUZZ_SECS}" afl-fuzz -i fuzz_in -o fuzz_out -- "$FEXE" @@ \
         >/tmp/rel_afl.log 2>&1
-      CRASHES=$(find fuzz_out -path '*/crashes/id:*' 2>/dev/null | grep -c . || echo 0)
-      if [ "$CRASHES" -gt 0 ]; then
-        err "afl нашёл $CRASHES крэш(ей)! входы в fuzz_out/*/crashes/ — это находка"
-        FAILED=1
+      AFL_RC=$?
+      # afl++ мог отказаться стартовать (не из-за находки) — распознаём
+      if grep -qiE "PROGRAM ABORT|no instrumentation|core_pattern|forkserver" /tmp/rel_afl.log \
+         && ! find fuzz_out -path '*/crashes/id:*' 2>/dev/null | grep -q .; then
+        warn "afl-fuzz не смог стартовать (не находка, а настройка окружения). Вывод:"
+        grep -iE "PROGRAM ABORT|core_pattern|instrumentation|Tips|echo core" /tmp/rel_afl.log | head -6
+        echo "      частый случай — core_pattern; разово поправляется:"
+        echo "        echo core | sudo tee /proc/sys/kernel/core_pattern"
+        echo "      (полный лог: /tmp/rel_afl.log)"
       else
-        ok "afl отработал ${FUZZ_SECS}с, крэшей нет (fuzz_out/)"
+        CRASHES=$(find fuzz_out -path '*/crashes/id:*' 2>/dev/null | grep -c . || echo 0)
+        if [ "$CRASHES" -gt 0 ]; then
+          err "afl нашёл $CRASHES крэш(ей)! входы в fuzz_out/*/crashes/ — это находка"
+          FAILED=1
+        else
+          ok "afl отработал ${FUZZ_SECS}с, крэшей нет (fuzz_out/)"
+        fi
       fi
     else
       # без afl — быстрый Crowbar-режим (случайная генерация)
