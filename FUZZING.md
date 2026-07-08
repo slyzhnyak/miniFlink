@@ -84,20 +84,31 @@ snapshot»; на недоверенном вводе поведение неоп
 
 ## 2. TSan (гонки в exactly-once)
 
-Нужен OCaml 5.x со switch, собранным с ThreadSanitizer:
+Нужен OCaml switch с ThreadSanitizer (Linux x86-64, OCaml >= 5.2).
 
 ```sh
-sudo apt install libunwind-dev   # нужен tsan-компилятору
-#   opam switch create miniflink-tsan --packages=ocaml.5.2.0,ocaml-option-tsan   # версия ВНУТРИ --packages
-# или: opam install ocaml-variants.5.2.0+options ocaml-option-tsan
-
-dune build --profile tsan test/tsan_parallel.exe
-TSAN_OPTIONS="halt_on_error=1 second_deadlock_stack=1" \
-  ./_build/tsan/test/tsan_parallel.exe
+sudo apt install libunwind-dev                 # tsan-компилятору нужна эта библиотека
+opam switch create miniflink-tsan --packages=ocaml.5.2.0,ocaml-option-tsan
+eval $(opam env --switch=miniflink-tsan)
 ```
 
-(Профиль `tsan` объявлен в `dune-workspace`. Главное — switch должен
-быть собран с tsan-рантаймом; иначе соберите обычным `dune build` на
+⚠ Тонкость: на tsan-switch инструментирована **любая** сборка, включая
+dune и зависимости. GC OCaml даёт TSan-предупреждения (`minor_gc.c
+oldify_one`) — это **не ваш код**, но они ломают сборку. Поэтому
+СОБИРАЕМ с мягкими опциями (не ронять на этих гонках), а ЗАПУСКАЕМ тест —
+со строгими:
+
+```sh
+# зависимости + сборка: не падать на GC-гонках рантайма
+TSAN_OPTIONS="halt_on_error=0 exitcode=0 report_bugs=0" opam install . --deps-only
+TSAN_OPTIONS="halt_on_error=0 exitcode=0 report_bugs=0" dune build test/tsan_parallel.exe
+
+# запуск теста: строго — здесь гонки в exactly-once и есть предмет проверки
+TSAN_OPTIONS="halt_on_error=1 second_deadlock_stack=1" \
+  ./_build/default/test/tsan_parallel.exe
+```
+
+Проще всего — `./scripts/reliability.sh --setup`, он делает это сам.
 tsan-switch и запускайте бинарь напрямую.)
 
 Тест гоняет `run_exactly_once` в 5 конфигурациях с высокой contention

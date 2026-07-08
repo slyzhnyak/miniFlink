@@ -121,7 +121,13 @@ if [ "$SETUP" = 1 ]; then
             echo "  ----------------------------------------------------------------"
             eval "$(opam env --switch=miniflink-tsan)"
             echo "  opam install . --deps-only (зависимости проекта):"
-            OPAMYES=1 opam install . --deps-only -y </dev/null 2>&1 \
+            # На tsan-switch ЛЮБАЯ сборка инструментирована, включая сборку
+            # инструментов (dune) и библиотек. GC OCaml даёт TSan-гонки
+            # (minor_gc.c oldify_one) — это НЕ наш код. При СБОРКЕ говорим
+            # TSan не ронять процесс из-за них (exitcode=0 report_bugs=0);
+            # строгий режим включим только при ЗАПУСКЕ теста.
+            TSAN_OPTIONS="halt_on_error=0 exitcode=0 report_bugs=0" \
+              OPAMYES=1 opam install . --deps-only -y </dev/null 2>&1 \
               | sed 's/^/    | /' || true
             ok "tsan-switch готов и активирован"
             HAS_TSAN=1
@@ -234,8 +240,11 @@ fi
 hdr "3. Гонки (ThreadSanitizer)"
 if [ "$HAS_TSAN" = 1 ]; then
   echo "  сборка под tsan-switch (инструментация в компиляторе)..."
-  if dune build test/tsan_parallel.exe 2>/tmp/rel_tbuild.log; then
+  # СБОРКА: не ронять на GC-гонках рантайма (не наш код).
+  if TSAN_OPTIONS="halt_on_error=0 exitcode=0 report_bugs=0" \
+       dune build test/tsan_parallel.exe 2>/tmp/rel_tbuild.log; then
     echo "  запуск под TSan..."
+    # ЗАПУСК: строго — тут гонки в exactly-once и есть предмет проверки.
     if TSAN_OPTIONS="halt_on_error=1 second_deadlock_stack=1" \
          ./_build/default/test/tsan_parallel.exe >/tmp/rel_tsanrun.log 2>&1; then
       if grep -q "TSan active" /tmp/rel_tsanrun.log; then
