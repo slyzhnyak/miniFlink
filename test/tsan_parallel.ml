@@ -3,7 +3,7 @@
 
     Прогон под ThreadSanitizer (Linux x86-64, OCaml >= 5.2). TSan
     включается opam-опцией, вшитой в компилятор switch:
-      opam switch create miniflink-tsan 5.2.0 --packages=ocaml-option-tsan
+      opam switch create miniflink-tsan --packages=ocaml.5.2.0,ocaml-option-tsan
       eval $(opam env --switch=miniflink-tsan)
       opam install . --deps-only
       dune build test/tsan_parallel.exe         # уже инструментирован
@@ -108,7 +108,7 @@ let () =
        ровно N выходов).\n\
        Гонки этим прогоном НЕ проверены. Для проверки гонок соберите под \
        ThreadSanitizer:\n\
-      \  opam switch create 5.2.0+tsan   # если ещё нет\n\
+      \  opam switch create miniflink-tsan --packages=ocaml.5.2.0,ocaml-option-tsan\n\
       \  dune build --profile tsan test/tsan_parallel.exe\n\
       \  TSAN_OPTIONS=\"halt_on_error=1\" ./_build/tsan/test/tsan_parallel.exe\n%!"
   end

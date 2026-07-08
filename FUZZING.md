@@ -87,7 +87,7 @@ snapshot»; на недоверенном вводе поведение неоп
 Нужен OCaml 5.x со switch, собранным с ThreadSanitizer:
 
 ```sh
-opam switch create 5.2.0+tsan        # точное имя зависит от вашего opam
+opam switch create miniflink-tsan --packages=ocaml.5.2.0,ocaml-option-tsan   # версия ВНУТРИ --packages
 # или: opam install ocaml-variants.5.2.0+options ocaml-option-tsan
 
 dune build --profile tsan test/tsan_parallel.exe

@@ -176,8 +176,9 @@ if [ "$HAS_TSAN" = 1 ]; then
   fi
 else
   warn "пропуск: switch без tsan. Как включить:"
-  echo "      opam switch create miniflink-tsan 5.2.0 --packages=ocaml-option-tsan"
+  echo "      opam switch create miniflink-tsan --packages=ocaml.5.2.0,ocaml-option-tsan"
   echo "      eval \$(opam env --switch=miniflink-tsan) && opam install . --deps-only"
+  echo "      (если пакеты не найдены — сначала: opam update)"
   echo "      затем перезапустите этот скрипт"
 fi
 
