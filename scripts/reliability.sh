@@ -85,29 +85,35 @@ if [ "$SETUP" = 1 ]; then
   else
     # crowbar — userspace, безопасно ставить
     if [ "$HAS_CROWBAR" = 0 ]; then
-      echo "  opam install crowbar (для afl-fuzzing)..."
-      if opam install -y crowbar >/tmp/rel_setup_cb.log 2>&1; then
+      echo "  opam install crowbar (для afl-fuzzing) — вывод ниже:"
+      if opam install -y crowbar 2>&1 | sed 's/^/    | /'; then
         ok "crowbar установлен"; HAS_CROWBAR=1
-      else warn "не удалось поставить crowbar (лог /tmp/rel_setup_cb.log); пропущу"; fi
+      else warn "не удалось поставить crowbar; пропущу"; fi
     fi
     # tsan-switch — userspace, но ДОЛГО (собирает компилятор). Явно
-    # предупреждаем и делаем, раз пользователь попросил --setup.
+    # предупреждаем и показываем прогресс НА ЭКРАН (не прячем в лог).
     if [ "$HAS_TSAN" = 0 ]; then
       if opam switch list 2>/dev/null | grep -q miniflink-tsan; then
         ok "switch miniflink-tsan уже существует — активирую"
         eval "$(opam env --switch=miniflink-tsan 2>/dev/null)" || true
         HAS_TSAN=1
       else
-        echo "  создаю tsan-switch (компилирует OCaml 5.2.0 — это НЕСКОЛЬКО МИНУТ)..."
+        echo "  создаю tsan-switch: компилирует OCaml 5.2.0 с нуля."
+        echo "  ЭТО ДОЛГО — обычно 10-30 минут, зависит от машины."
+        echo "  Прогресс opam идёт ниже (если строки движутся — всё идёт штатно):"
+        echo "  ----------------------------------------------------------------"
         if opam switch create miniflink-tsan \
-             --packages=ocaml.5.2.0,ocaml-option-tsan -y >/tmp/rel_setup_tsan.log 2>&1; then
+             --packages=ocaml.5.2.0,ocaml-option-tsan -y --no-install 2>&1 \
+             | sed 's/^/    | /'; then
+          echo "  ----------------------------------------------------------------"
           eval "$(opam env --switch=miniflink-tsan)"
-          echo "  opam install . --deps-only..."
-          opam install . --deps-only -y >>/tmp/rel_setup_tsan.log 2>&1 || true
+          echo "  opam install . --deps-only (зависимости проекта):"
+          opam install . --deps-only -y 2>&1 | sed 's/^/    | /' || true
           ok "tsan-switch готов и активирован"
           HAS_TSAN=1
         else
-          warn "не удалось создать tsan-switch (лог /tmp/rel_setup_tsan.log)."
+          echo "  ----------------------------------------------------------------"
+          warn "не удалось создать tsan-switch (см. вывод выше)."
           echo "      частая причина — устаревшие репозитории: opam update, потом повторите"
         fi
       fi
