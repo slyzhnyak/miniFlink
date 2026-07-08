@@ -99,14 +99,14 @@ jobs:
           fi
 
   # ── ThreadSanitizer: гонки в параллельном exactly-once ──────
-  # TSan требует OCaml >= 5.2 с ocaml-option-tsan (инструментация вшита в
-  # компилятор switch — собирается ~10-20 мин, поэтому switch кэшируется).
-  # На tsan-switch ЛЮБАЯ сборка инструментирована, включая dune и
-  # зависимости; GC OCaml даёт TSan-предупреждения (minor_gc.c) — не наш
-  # код, поэтому СБОРКА идёт с мягкими TSAN_OPTIONS (не ронять на них), а
-  # тест ЗАПУСКАЕТСЯ со строгими (halt_on_error=1: гонка в exactly-once
-  # завалит job). Не в матрице build-test: медленный, не должен блокировать
-  # быстрые сборки.
+  # TSan требует, чтобы инструментация была ВШИТА в компилятор switch
+  # (ocaml-option-tsan) — это пересборка компилятора (~10-20 мин),
+  # поэтому просим setup-ocaml собрать вариант +options СРАЗУ с опцией,
+  # а не доставлять её поверх готового switch (доустановка поверх не
+  # переинструментирует компилятор — job проходил бы ЛОЖНО зелёным).
+  # На tsan-switch любая сборка инструментирована; GC OCaml даёт
+  # TSan-предупреждения (minor_gc.c) — не наш код, поэтому deps+build
+  # идут с мягкими TSAN_OPTIONS, а тест ЗАПУСКАЕТСЯ строго.
   tsan:
     runs-on: ubuntu-latest
     steps:
@@ -115,18 +115,24 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libunwind-dev librocksdb-dev
       - uses: ocaml/setup-ocaml@v3
         with:
-          ocaml-compiler: "5.2"
-          # опции компилятора для tsan-инструментации
-          opam-repositories: |
-            default: https://github.com/ocaml/opam-repository.git
-      - name: Add tsan option to switch
+          # вариант +options с tsan-опцией — компилятор соберётся
+          # инструментированным. Это и есть длинный шаг (~10-20 мин).
+          ocaml-compiler: "ocaml-variants.5.2.0+options,ocaml-option-tsan"
+      - name: Verify the compiler is actually TSan-instrumented
         run: |
-          # ocaml-option-tsan инструментирует весь компилятор. Ставим в
-          # текущий 5.2 switch (setup-ocaml его кэширует по хэшу).
-          opam install -y ocaml-option-tsan || {
-            echo "::warning::ocaml-option-tsan install failed — TSan job skipped"
-            exit 0
-          }
+          # Доказываем инструментацию ДО тестов, иначе job бессмысленен.
+          # На tsan-компиляторе Config.config содержит tsan-флаги.
+          if ! opam exec -- ocamlfind ocamlopt -config 2>/dev/null | grep -qiE "tsan|thread.?sanitiz"; then
+            # запасная проверка: собрать крошечную программу и поискать
+            # __tsan символы в бинаре
+            echo 'let()=()' > /tmp/t.ml
+            opam exec -- ocamlfind ocamlopt /tmp/t.ml -o /tmp/t 2>/dev/null || true
+            if ! nm /tmp/t 2>/dev/null | grep -q "__tsan"; then
+              echo "::error title=TSan not instrumented::компилятор switch БЕЗ tsan — job недействителен"
+              exit 1
+            fi
+          fi
+          echo "TSan instrumentation confirmed"
       - name: Install deps (мягкие TSAN_OPTIONS — не падать на GC-гонках рантайма)
         env:
           TSAN_OPTIONS: "halt_on_error=0 exitcode=0 report_bugs=0"
@@ -147,7 +153,3 @@ jobs:
             awk 'BEGIN{printf "::error title=TSan data race::"} {gsub(/%/,"%25"); gsub(/\r/,""); printf "%s%%0A", $0} END{print ""}' /tmp/tsan_tail.txt
             exit 1
           fi
-          # убедимся, что тест реально был под инструментацией (не ложное "ок")
-          grep -q "TSan active" /tmp/tsan_out.txt || {
-            echo "::warning title=TSan not active::тест не увидел инструментацию — проверьте, что ocaml-option-tsan применился"
-          }
