@@ -97,3 +97,57 @@ jobs:
             awk 'BEGIN{printf "::error title=EOS failure::"} {gsub(/%/,"%25"); gsub(/\r/,""); printf "%s%%0A", $0} END{print ""}' /tmp/eos_tail.txt
             exit 1
           fi
+
+  # ── ThreadSanitizer: гонки в параллельном exactly-once ──────
+  # TSan требует OCaml >= 5.2 с ocaml-option-tsan (инструментация вшита в
+  # компилятор switch — собирается ~10-20 мин, поэтому switch кэшируется).
+  # На tsan-switch ЛЮБАЯ сборка инструментирована, включая dune и
+  # зависимости; GC OCaml даёт TSan-предупреждения (minor_gc.c) — не наш
+  # код, поэтому СБОРКА идёт с мягкими TSAN_OPTIONS (не ронять на них), а
+  # тест ЗАПУСКАЕТСЯ со строгими (halt_on_error=1: гонка в exactly-once
+  # завалит job). Не в матрице build-test: медленный, не должен блокировать
+  # быстрые сборки.
+  tsan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install libunwind (нужен tsan-компилятору)
+        run: sudo apt-get update && sudo apt-get install -y libunwind-dev librocksdb-dev
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5.2"
+          # опции компилятора для tsan-инструментации
+          opam-repositories: |
+            default: https://github.com/ocaml/opam-repository.git
+      - name: Add tsan option to switch
+        run: |
+          # ocaml-option-tsan инструментирует весь компилятор. Ставим в
+          # текущий 5.2 switch (setup-ocaml его кэширует по хэшу).
+          opam install -y ocaml-option-tsan || {
+            echo "::warning::ocaml-option-tsan install failed — TSan job skipped"
+            exit 0
+          }
+      - name: Install deps (мягкие TSAN_OPTIONS — не падать на GC-гонках рантайма)
+        env:
+          TSAN_OPTIONS: "halt_on_error=0 exitcode=0 report_bugs=0"
+        run: opam install -y dune yojson ppx_deriving ppx_deriving_yojson qcheck-core qcheck
+      - name: Build tsan test (мягкие TSAN_OPTIONS)
+        env:
+          TSAN_OPTIONS: "halt_on_error=0 exitcode=0 report_bugs=0"
+        run: opam exec -- dune build test/tsan_parallel.exe
+      - name: Run under TSan (строго — гонка в exactly-once завалит job)
+        env:
+          TSAN_OPTIONS: "halt_on_error=1 second_deadlock_stack=1"
+        run: |
+          set -o pipefail
+          if ! opam exec -- dune exec test/tsan_parallel.exe 2>&1 | tee /tmp/tsan_out.txt; then
+            echo "===== TSAN OUTPUT (tail) ====="
+            tail -40 /tmp/tsan_out.txt
+            { echo "TSan reported a data race:"; grep -A15 "WARNING: ThreadSanitizer" /tmp/tsan_out.txt | head -20; } > /tmp/tsan_tail.txt
+            awk 'BEGIN{printf "::error title=TSan data race::"} {gsub(/%/,"%25"); gsub(/\r/,""); printf "%s%%0A", $0} END{print ""}' /tmp/tsan_tail.txt
+            exit 1
+          fi
+          # убедимся, что тест реально был под инструментацией (не ложное "ок")
+          grep -q "TSan active" /tmp/tsan_out.txt || {
+            echo "::warning title=TSan not active::тест не увидел инструментацию — проверьте, что ocaml-option-tsan применился"
+          }
