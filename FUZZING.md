@@ -39,18 +39,42 @@ dune exec test/tsan_parallel.exe     # 5 конфигураций contention
 opam install crowbar
 dune build --profile fuzz fuzz/fuzz_crowbar.exe
 
-# быстрый Crowbar-режим (без afl, случайная генерация):
+# быстрый Crowbar-режим (без afl, случайная генерация — работает всегда):
 dune exec --profile fuzz fuzz/fuzz_crowbar.exe
+```
 
-# настоящий afl-fuzzing (afl-инструментация уже в профиле fuzz —
-# отдельный afl-switch НЕ нужен):
+Для afl есть два пути. **afl в OCaml требует, чтобы инструментация
+покрытия была вшита в компилятор switch** (как tsan) — тогда
+инструментируется ВЕСЬ код, включая lib/miniflink (сами декодеры). Флаг
+`-afl-instrument` на один модуль не помогает: библиотека остаётся
+неинструментированной, и afl отказывается стартовать с «No instrumentation
+detected».
+
+**Путь A — dumb-mode (без 3-го switch, слабее):** afl фаззит без
+обратной связи по покрытию. Проще, но менее эффективно.
+```sh
 opam install afl-persistent
-sudo apt install afl++               # чтобы afl-fuzz был в PATH
-mkdir -p fuzz_in fuzz_out
-printf '\x00\x01hello' > fuzz_in/seed
+sudo apt install afl++
+mkdir -p fuzz_in fuzz_out && printf '\x00\x01hello' > fuzz_in/seed
+FEXE=$(find _build -name fuzz_crowbar.exe -type f | head -1)
+AFL_SKIP_BIN_CHECK=1 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \
+  afl-fuzz -i fuzz_in -o fuzz_out -- "$FEXE" @@
+```
+
+**Путь B — настоящий afl с покрытием (нужен afl-switch):**
+```sh
+opam switch create miniflink-afl --packages=ocaml.5.2.0,ocaml-option-afl
+eval $(opam env --switch=miniflink-afl)
+opam install . --deps-only && opam install crowbar
+dune build --profile fuzz fuzz/fuzz_crowbar.exe   # ВЕСЬ код инструментирован
+mkdir -p fuzz_in fuzz_out && printf '\x00\x01hello' > fuzz_in/seed
 FEXE=$(find _build -name fuzz_crowbar.exe -type f | head -1)
 afl-fuzz -i fuzz_in -o fuzz_out -- "$FEXE" @@
 ```
+
+Скрипт `./scripts/reliability.sh` использует путь A (dumb-mode) на обычном
+switch — работает без afl-switch, но без покрытия. Для пути B заведите
+miniflink-afl.
 
 Три таргета по возрастанию опасности:
 

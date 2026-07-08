@@ -215,19 +215,30 @@ elif [ "$HAS_CROWBAR" = 1 ]; then
       #  SKIP_CPUFREQ — не требовать performance-governor
       #  NO_AFFINITY — не привязываться к ядру
       #  I_DONT_CARE_ABOUT_MISSING_CRASHES — не требовать core_pattern=core
-      #    (иначе afl++ откажется стартовать без sudo-настройки системы)
+      #  SKIP_BIN_CHECK — не требовать afl-инструментацию бинаря. Наш
+      #    бинарь инструментирован ТОЛЬКО если собран на afl-switch
+      #    (ocaml-option-afl). Без него afl бы упал с "No instrumentation
+      #    detected"; SKIP_BIN_CHECK разрешает dumb-mode (fuzzing без
+      #    обратной связи по покрытию — слабее, но работает без 3-го switch).
       AFL_SKIP_CPUFREQ=1 AFL_NO_AFFINITY=1 \
-      AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 \
+      AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 AFL_SKIP_BIN_CHECK=1 \
         timeout "${FUZZ_SECS}" afl-fuzz -i fuzz_in -o fuzz_out -- "$FEXE" @@ \
         >/tmp/rel_afl.log 2>&1
       AFL_RC=$?
       # afl++ мог отказаться стартовать (не из-за находки) — распознаём
-      if grep -qiE "PROGRAM ABORT|no instrumentation|core_pattern|forkserver" /tmp/rel_afl.log \
+      if grep -qiE "PROGRAM ABORT|core_pattern.*abort|forkserver.*failed" /tmp/rel_afl.log \
          && ! find fuzz_out -path '*/crashes/id:*' 2>/dev/null | grep -q .; then
-        warn "afl-fuzz не смог стартовать (не находка, а настройка окружения). Вывод:"
-        grep -iE "PROGRAM ABORT|core_pattern|instrumentation|Tips|echo core" /tmp/rel_afl.log | head -6
-        echo "      частый случай — core_pattern; разово поправляется:"
-        echo "        echo core | sudo tee /proc/sys/kernel/core_pattern"
+        warn "afl-fuzz не смог стартовать (настройка окружения, не находка). Причина:"
+        grep -iE "PROGRAM ABORT|No instrumentation|core_pattern|Tips" /tmp/rel_afl.log | head -4
+        if grep -qi "No instrumentation" /tmp/rel_afl.log; then
+          echo "      бинарь без afl-инструментации. Для НАСТОЯЩЕГО afl нужен"
+          echo "      afl-switch (весь код инструментируется), см. FUZZING.md:"
+          echo "        opam switch create miniflink-afl --packages=ocaml.5.2.0,ocaml-option-afl"
+          echo "      (dumb-mode должен был включиться через AFL_SKIP_BIN_CHECK —"
+          echo "       если всё равно упал, проверьте версию afl: afl-fuzz -h)"
+        elif grep -qi "core_pattern" /tmp/rel_afl.log; then
+          echo "      core_pattern — разово: echo core | sudo tee /proc/sys/kernel/core_pattern"
+        fi
         echo "      (полный лог: /tmp/rel_afl.log)"
       else
         CRASHES=$(find fuzz_out -path '*/crashes/id:*' 2>/dev/null | grep -c . || echo 0)
