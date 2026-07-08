@@ -121,18 +121,38 @@ jobs:
       - name: Verify the compiler is actually TSan-instrumented
         run: |
           # Доказываем инструментацию ДО тестов, иначе job бессмысленен.
-          # На tsan-компиляторе Config.config содержит tsan-флаги.
-          if ! opam exec -- ocamlfind ocamlopt -config 2>/dev/null | grep -qiE "tsan|thread.?sanitiz"; then
-            # запасная проверка: собрать крошечную программу и поискать
-            # __tsan символы в бинаре
-            echo 'let()=()' > /tmp/t.ml
-            opam exec -- ocamlfind ocamlopt /tmp/t.ml -o /tmp/t 2>/dev/null || true
-            if ! nm /tmp/t 2>/dev/null | grep -q "__tsan"; then
-              echo "::error title=TSan not instrumented::компилятор switch БЕЗ tsan — job недействителен"
-              exit 1
+          # Проверка 1: пакет-опция установлен в switch.
+          HAS_OPT=0
+          if opam list --installed 2>/dev/null | grep -qi ocaml-option-tsan; then
+            HAS_OPT=1
+            echo "ocaml-option-tsan installed in switch: yes"
+          fi
+          # Проверка 2: собрать НЕтривиальную программу (с доступами к
+          # памяти — ссылка+мутация+массив) и поискать __tsan символы.
+          # Пустая программа не годится: без доступов к памяти
+          # инструментация не вставляет __tsan_read/write.
+          cat > /tmp/probe.ml <<'ML'
+          let () =
+            let r = ref 0 in
+            let a = Array.make 8 0 in
+            for i = 0 to 7 do a.(i) <- !r + i; r := a.(i) done;
+            Printf.printf "%d\n" !r
+          ML
+          HAS_SYM=0
+          if opam exec -- ocamlfind ocamlopt -package str -linkpkg /tmp/probe.ml -o /tmp/probe 2>/dev/null \
+             || opam exec -- ocamlopt /tmp/probe.ml -o /tmp/probe 2>/dev/null; then
+            if nm /tmp/probe 2>/dev/null | grep -q "__tsan"; then
+              HAS_SYM=1
+              echo "TSan symbols present in compiled binary: yes"
             fi
           fi
-          echo "TSan instrumentation confirmed"
+          if [ "$HAS_OPT" = 1 ] || [ "$HAS_SYM" = 1 ]; then
+            echo "TSan instrumentation confirmed (opt=$HAS_OPT sym=$HAS_SYM)"
+          else
+            echo "::error title=TSan not instrumented::switch compiler is NOT tsan-instrumented (opt=$HAS_OPT sym=$HAS_SYM) — job invalid"
+            echo "--- opam list (tail) ---"; opam list --installed 2>/dev/null | grep -i ocaml || true
+            exit 1
+          fi
       - name: Install deps (мягкие TSAN_OPTIONS — не падать на GC-гонках рантайма)
         env:
           TSAN_OPTIONS: "halt_on_error=0 exitcode=0 report_bugs=0"
