@@ -86,7 +86,7 @@ if [ "$SETUP" = 1 ]; then
     # crowbar — userspace, безопасно ставить
     if [ "$HAS_CROWBAR" = 0 ]; then
       echo "  opam install crowbar (для afl-fuzzing) — вывод ниже:"
-      if opam install -y crowbar 2>&1 | sed 's/^/    | /'; then
+      if OPAMYES=1 opam install -y crowbar --assume-depexts </dev/null 2>&1 | sed 's/^/    | /'; then
         ok "crowbar установлен"; HAS_CROWBAR=1
       else warn "не удалось поставить crowbar; пропущу"; fi
     fi
@@ -102,18 +102,26 @@ if [ "$SETUP" = 1 ]; then
         echo "  ЭТО ДОЛГО — обычно 10-30 минут, зависит от машины."
         echo "  Прогресс opam идёт ниже (если строки движутся — всё идёт штатно):"
         echo "  ----------------------------------------------------------------"
-        if opam switch create miniflink-tsan \
-             --packages=ocaml.5.2.0,ocaml-option-tsan -y --no-install 2>&1 \
+        # Полностью неинтерактивно: --assume-depexts не даёт opam зависнуть
+        # на вопросе про СИСТЕМНЫЕ зависимости (его -y не покрывает), а
+        # </dev/null — страховка: любой оставшийся запрос сразу провалится,
+        # а не будет ждать ввода вечно (это и была «получасовая тишина»).
+        if OPAMYES=1 opam switch create miniflink-tsan \
+             --packages=ocaml.5.2.0,ocaml-option-tsan \
+             -y --no-install --assume-depexts </dev/null 2>&1 \
              | sed 's/^/    | /'; then
           echo "  ----------------------------------------------------------------"
           eval "$(opam env --switch=miniflink-tsan)"
           echo "  opam install . --deps-only (зависимости проекта):"
-          opam install . --deps-only -y 2>&1 | sed 's/^/    | /' || true
+          OPAMYES=1 opam install . --deps-only -y --assume-depexts </dev/null 2>&1 \
+            | sed 's/^/    | /' || true
           ok "tsan-switch готов и активирован"
           HAS_TSAN=1
         else
           echo "  ----------------------------------------------------------------"
           warn "не удалось создать tsan-switch (см. вывод выше)."
+          echo "      если switch остался частичным — почистите:"
+          echo "        opam switch remove miniflink-tsan"
           echo "      частая причина — устаревшие репозитории: opam update, потом повторите"
         fi
       fi

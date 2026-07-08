@@ -10,7 +10,7 @@
 ; tsan-специфичных флагов/переменных позже.
 ;
 ; Как получить tsan-switch (opam option-пакет, НЕ отдельный компилятор):
-;   opam switch create miniflink-tsan --packages=ocaml.5.2.0,ocaml-option-tsan
+;   opam switch create miniflink-tsan --packages=ocaml.5.2.0,ocaml-option-tsan --assume-depexts
 ;   # если --packages не поддержан вашим opam, попробуйте:
 ;   opam switch create miniflink-tsan ocaml-variants.5.2.0+options ocaml-option-tsan
 ;   eval $(opam env --switch=miniflink-tsan)
