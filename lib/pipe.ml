@@ -747,8 +747,15 @@ let suppress_while
     (controller : b Mf_event.t Stream.t)
     (suppressed : a Mf_event.t Stream.t)
   : a Mf_event.t Stream.t =
-  let blocked : (string, unit) Hashtbl.t = Hashtbl.create 64 in
-  let is_blocked key = Hashtbl.mem blocked key in
+  (* N-1b (аудит 2026-07): blocked-множество ПЕРСИСТЕНТНО через
+     Managed_state (было — голый Hashtbl, слетало после рестарта, давая
+     окно ложных алертов из suppressed-потока до первого `On`). API
+     Managed_state (mem/set/remove) совместимо с прежним Hashtbl, поэтому
+     pull-цикл ниже (Data/Retract/Update/Watermark) не меняется — только
+     хранилище стало durable и переживает recovery в exactly-once. *)
+  let blocked : (string, unit) Managed_state.t =
+    Managed_state.create_string ~name:"suppress_while:blocked" () in
+  let is_blocked key = Managed_state.mem blocked key in
   (* объединяем: controller-события только обновляют blocked-множество и
      НЕ проходят в выход (это управляющий поток); suppressed-события
      проходят, если ключ не заблокирован. Тегируем через either2. *)
@@ -758,8 +765,8 @@ let suppress_while
   let out_q : a Mf_event.t Queue.t = Queue.create () in
   let handle_ctrl b =
     match gate b with
-    | `On key -> Hashtbl.replace blocked key ()
-    | `Off key -> Hashtbl.remove blocked key
+    | `On key -> Managed_state.set blocked key ()
+    | `Off key -> Managed_state.remove blocked key
     | `Ignore -> ()
   in
   let pass_suppressed ev key =
@@ -782,7 +789,12 @@ let suppress_while
         | Some (Mf_event.Update { old = R2 o; new_value = R2 n; ts }) ->
           pass_suppressed (Mf_event.update o n ts) (suppressed_key n); pull ()
         | Some (Mf_event.Update _) -> pull ()  (* смешанный old/new — не бывает *)
-        | Some (Mf_event.Watermark _ as w) -> Queue.push w out_q; pull ()
+        | Some (Mf_event.Watermark _ as w) ->
+          (* N-1b: по watermark чекпоинтим blocked-состояние (как это
+             делает process_keyed для своего state). В ephemeral —
+             noop; в durable — снапшот в backend, переживает рестарт. *)
+          Managed_state.checkpoint blocked;
+          Queue.push w out_q; pull ()
     in pull ()
 
 (* ── co_process: keyed-обработка нескольких РАЗНОТИПНЫХ потоков на общем

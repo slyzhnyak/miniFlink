@@ -150,3 +150,54 @@ let () =
   check "разблокированный x@110 прошёл (=3)" (List.mem 3 vals);
 
   Printf.printf "\non_silence + suppress_while tests passed.\n"
+
+(* ── N-1b (аудит 2026-07): suppress_while персистентен ──
+   Блокировка ключа переживает snapshot/restore (рестарт). Раньше
+   blocked был голым Hashtbl → после рестарта подавление слетало. *)
+let test_suppress_persistence () =
+  Printf.printf "\n-- N-1b: suppress_while переживает рестарт\n";
+  let tbl = Hashtbl.create 16 in
+  let backend = Persistence_backend.of_memory tbl in
+  let ctx = Runtime_context.durable backend in
+
+  (* Фаза 1: controller блокирует ключ "x". Watermark в конце потока
+     триггерит checkpoint blocked-состояния в durable backend. *)
+  Runtime_context.with_context ctx (fun () ->
+    let ctrl = Stream.of_list
+      [ Mf_event.data ("x", `On) 10; Mf_event.wm 100 ] in
+    let supp : (string * int) Mf_event.t Stream.t = Stream.empty in
+    let out =
+      Pipe.suppress_while
+        ~gate:(fun (k, g) -> match g with `On -> `On k | `Off -> `Off k)
+        ~suppressed_key:(fun (k, _) -> k)
+        ctrl supp in
+    ignore (Stream.to_list out));
+
+  check "N-1b: backend получил blocked-ключ после checkpoint"
+    (List.exists
+       (fun s ->
+          let n = String.length s and sub = "suppress_while" in
+          let m = String.length sub in
+          let rec go i = i + m <= n && (String.sub s i m = sub || go (i+1)) in
+          go 0)
+       (backend.Persistence_backend.keys ()));
+
+  (* Фаза 2 («рестарт»): новый suppress_while из ТОГО ЖЕ backend.
+     suppressed-событие ключа "x" должно быть ПОДАВЛЕНО (blocked
+     восстановлен), хотя controller в этой фазе молчит. *)
+  Runtime_context.with_context ctx (fun () ->
+    let ctrl : (string * [`On|`Off]) Mf_event.t Stream.t = Stream.empty in
+    let supp = Stream.of_list [ Mf_event.data ("x", 42) 20 ] in
+    let out =
+      Pipe.suppress_while
+        ~gate:(fun (k, g) -> match g with `On -> `On k | `Off -> `Off k)
+        ~suppressed_key:(fun (k, _) -> k)
+        ctrl supp in
+    let passed =
+      Stream.to_list out
+      |> List.filter_map (function
+           | Mf_event.Data ((_, v), _) -> Some v | _ -> None) in
+    check "N-1b: после рестарта ключ x ВСЁ ЕЩЁ подавлен (пусто)"
+      (passed = []))
+
+let () = test_suppress_persistence ()
