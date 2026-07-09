@@ -327,7 +327,12 @@ let window_fold
 
      namespace включает spec, чтобы разные window_fold в одном
      пайплайне не коллидировали по ключам в backend. *)
-  let win_key_str (uk, start, stop) = Printf.sprintf "%s:%d:%d" uk start stop in
+  (* Горячий путь: key_str вызывается на КАЖДОЕ событие × окно.
+     Printf.sprintf форматирует через буфер — дорого (профилирование:
+     ~629МБ аллокаций на bench_ops шаге window count). Ручная
+     конкатенация string_of_int + ^ в разы дешевле. *)
+  let win_key_str (uk, start, stop) =
+    uk ^ ":" ^ string_of_int start ^ ":" ^ string_of_int stop in
   let win_key_unstr s =
     (* обратный разбор: два int с конца — start, stop; остальное — uk *)
     match List.rev (String.split_on_char ':' s) with
